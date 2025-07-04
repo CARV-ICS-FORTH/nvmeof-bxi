@@ -23,7 +23,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
-
+#define PTL_SIZE_MAX ((1UL<<48)-1)
 struct rdma_utils_device {
 	struct ibv_pd			*pd;
 	struct ibv_context		*context;
@@ -185,7 +185,6 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 {
 	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
 	struct ptl_pd *ptl_pd;
-	struct ptl_cq *ptl_cq;
 	struct spdk_rdma_utils_mem_map *rmap = cb_ctx;
 	struct ibv_pd *pd = rmap->pd;
 	struct ibv_mr *mr;
@@ -211,7 +210,6 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 	rdma_utils_ptl_is_access_zero_based(access_flags);
 
 	ptl_pd = ptl_pd_get_from_ibv_pd(rmap->pd);
-	ptl_cq = ptl_cq_get_instance(NULL);
 	ptl_context = ptl_cnxt_get_from_ibvpd(rmap->pd);
 	spdk_ptl_print_access_flags(access_flags);
 
@@ -230,6 +228,7 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 		SPDK_PTL_DEBUG("CAUTION Unsupported staff XXX TODO XXX, ignore");
 		access_flags |= IBV_ACCESS_RELAXED_ORDERING;
 #endif
+		/*Check first if a ptl_pd_mem_desc has been already created for this vaddr*/
 		ptl_pd_mem_desc = calloc(1UL, sizeof(*ptl_pd_mem_desc));
 
 		if (rdma_utils_ptl_is_local_write(access_flags)) {
@@ -238,7 +237,7 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 			ptl_pd_mem_desc->local_w_mem_desc.start = vaddr;
 			ptl_pd_mem_desc->local_w_mem_desc.options = 0;
 			ptl_pd_mem_desc->local_w_mem_desc.length = size;
-			ptl_pd_mem_desc->local_w_mem_desc.eq_handle = ptl_cq_get_queue(ptl_cq);
+			ptl_pd_mem_desc->local_w_mem_desc.eq_handle = ptl_cq_get_static_event_queue();
 			rc = PtlCTAlloc(ptl_cnxt_get_ni_handle(ptl_context), &ptl_pd_mem_desc->local_w_mem_desc.ct_handle);
 			if (PTL_OK != rc) {
 				SPDK_PTL_FATAL("Failed to allocate a counting event");
@@ -259,27 +258,29 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 			goto done;
 
 		}
-		SPDK_PTL_DEBUG("Memory registration for RMA operations requested....");
-
-		ptl_pd_mem_desc->remote_wr_me.start = 0;
-		ptl_pd_mem_desc->remote_wr_me.length = UINT64_MAX;
-		ptl_pd_mem_desc->remote_wr_me.uid = PTL_UID_ANY;
-
-
+		SPDK_PTL_DEBUG("Memory registration for RMA operations requested....exposing the whole address space");
+		memset(&ptl_pd_mem_desc->remote_wr_me, 0x00, sizeof(ptl_pd_mem_desc->remote_wr_me));
 		ptl_pd_mem_desc->remote_wr_me.ignore_bits = PTL_UUID_IGNORE_MASK;
-		ptl_pd_mem_desc->remote_wr_me.match_bits = ptl_uuid_set_op_type(PTL_UUID_IGNORE_MASK, PTL_RMA);
-		ptl_pd_mem_desc->remote_wr_me.min_free    = 0;
+		// ptl_pd_mem_desc->remote_wr_me.match_bits = ptl_uuid_set_op_type(PTL_UUID_IGNORE_MASK, PTL_RMA);
+		ptl_pd_mem_desc->remote_wr_me.match_bits = PTL_UUID_RMA_MASK;
+		ptl_pd_mem_desc->remote_wr_me.match_id.phys.nid = PTL_NID_ANY;
+		ptl_pd_mem_desc->remote_wr_me.match_id.phys.pid = PTL_PID_ANY;
+		ptl_pd_mem_desc->remote_wr_me.min_free = 0;
+		ptl_pd_mem_desc->remote_wr_me.start = NULL;
+		ptl_pd_mem_desc->remote_wr_me.length = PTL_SIZE_MAX;
+		ptl_pd_mem_desc->remote_wr_me.uid = PTL_UID_ANY;
 
 		ptl_pd_mem_desc->remote_read = rdma_utils_ptl_is_remote_read(access_flags);
 		ptl_pd_mem_desc->remote_write = rdma_utils_ptl_is_remote_write(access_flags);
 
 		/*Create and associate counting events*/
-		ret = PtlCTAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt), &ptl_pd_mem_desc->remote_rw_ct_handle);
-		if (ret != PTL_OK) {
-			SPDK_PTL_FATAL("Failed to allocate counting event");
-		}
-		ptl_pd_mem_desc->remote_wr_me.ct_handle = ptl_pd_mem_desc->remote_rw_ct_handle;
-		ptl_pd_mem_desc->remote_wr_me.options = 0;
+		// ret = PtlCTAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt), &ptl_pd_mem_desc->remote_rw_ct_handle);
+		// if (ret != PTL_OK) {
+		// 	SPDK_PTL_FATAL("Failed to allocate counting event");
+		// }
+		// ptl_pd_mem_desc->remote_wr_me.ct_handle = ptl_pd_mem_desc->remote_rw_ct_handle;
+		ptl_pd_mem_desc->remote_wr_me.ct_handle = PTL_CT_NONE;
+		ptl_pd_mem_desc->remote_wr_me.options = PTL_RMA_ME_OPTS;
 		if (ptl_pd_mem_desc->remote_read) {
 			SPDK_PTL_DEBUG("Enabling READ access for the remote region as requested");
 			ptl_pd_mem_desc->remote_wr_me.options     |= PTL_ME_OP_GET;
@@ -288,12 +289,12 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 			SPDK_PTL_DEBUG("Enabling WRITE access for the remote region as requested");
 			ptl_pd_mem_desc->remote_wr_me.options     |= PTL_ME_OP_PUT;
 		}
-
 		rc = PtlMEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_PT_INDEX, &ptl_pd_mem_desc->remote_wr_me,
 				 PTL_PRIORITY_LIST, NULL, &ptl_pd_mem_desc->remote_rw_mem_handle);
 		if (rc != PTL_OK) {
-			SPDK_PTL_FATAL("PtlLEAppend failed with error code: %d", rc);
+			SPDK_PTL_FATAL("PtlMEAppend for RMA operations failed with error code: %d", rc);
 		}
+		SPDK_PTL_INFO("PtlMEAppend for RMA operation is successful!");
 		rc = PtlCTAlloc(ptl_cnxt_get_ni_handle(ptl_context), &ptl_pd_mem_desc->remote_wr_me.ct_handle);
 		if (PTL_OK != rc) {
 			SPDK_PTL_FATAL("Failed to allocate a counting event");
@@ -352,7 +353,7 @@ done:
 static int
 rdma_check_contiguous_entries(uint64_t addr_1, uint64_t addr_2)
 {
-	SPDK_PTL_FATAL("UNIMPLEMENTED");
+	SPDK_PTL_DEBUG("XXX TODO XXX Check if the addresses are contiguous");
 	/* Two contiguous mappings will point to the same address which is the start of the RDMA MR. */
 	return addr_1 == addr_2;
 }
@@ -527,7 +528,7 @@ rdma_add_dev(struct ibv_context *context)
 	}
 
 	dev->context = context;
-  dev->ref++;
+	dev->ref++;
 	TAILQ_INSERT_TAIL(&g_dev_list, dev, tailq);
 
 	return dev;

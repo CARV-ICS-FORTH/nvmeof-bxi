@@ -27,12 +27,22 @@ struct ptl_conn_msg_header {
 
 struct ptl_conn_open {
 	struct sockaddr src_addr;
+	/*Where initiator has MEs for recv operations*/
+	uint64_t recv_match_bits;
+	/*Where initiator has an ME for remote read/write operations*/
+	uint64_t rma_match_bits;
+	/*In which completion queue id initiator has subscribed for notifications*/
+	int cq_id;
 	int initiator_qp_num;
 	struct rdma_conn_param conn_param;
 };
 
 struct ptl_conn_open_reply {
 	uint64_t uuid;
+	/*Where the target has buffer for receive operations*/
+	uint64_t srq_match_bits;
+	/*Where I wait for recv events and staff*/
+	int cq_id;
 	int status;
 	struct rdma_conn_param conn_param;
 };

@@ -1,4 +1,5 @@
 #include "ptl_context.h"
+#include "deque.h"
 #include "ptl_config.h"
 #include "ptl_cq.h"
 #include "ptl_log.h"
@@ -13,7 +14,6 @@
 #include <spdk/util.h>
 #include <stdbool.h>
 #include <stdint.h>
-
 extern volatile int is_target;
 
 struct ptl_cnxt_mem_handle {
@@ -24,24 +24,34 @@ struct ptl_cnxt_mem_handle {
 };
 
 static struct ptl_context ptl_context;
-typedef bool (*process_event)(ptl_event_t event, struct ibv_wc *wc);
+typedef bool (*process_event)(ptl_event_t event, struct ibv_wc *wc, struct ptl_cq *ptl_cq);
 
+static void ptl_cnxt_keep_event(struct ptl_cq *ptl_cq, struct ibv_wc *wc)
+{
+	struct ibv_wc *wc_copy = calloc(1UL, sizeof(*wc_copy));
+	memcpy(wc_copy, wc, sizeof(*wc_copy));
+	if (ptl_cq->pending_completions == NULL) {
+		SPDK_PTL_FATAL("pending_completions is NULL for ptl_cq id: %d in use: %d", ptl_cq->cq_id,
+			       ptl_cq->is_in_use);
+	}
+	deque_push_back(ptl_cq->pending_completions, wc_copy);
+}
 
-
-static bool ptl_cnxt_process_get(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_get(ptl_event_t event, struct ibv_wc *wc, struct ptl_cq *ptl_cq)
 {
 	SPDK_PTL_DEBUG("NVMe: Someone performed an RDMA READ from me, ignore Portals internal");
 	return false;
 }
 
-static bool ptl_cnxt_process_get_overflow(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_get_overflow(ptl_event_t event, struct ibv_wc *wc,
+		struct ptl_cq *ptl_cq)
 {
 
 	SPDK_PTL_FATAL("UNIMPLEMENTED");
-	return true;
+	return false;
 }
 
-static bool ptl_cnxt_process_put(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_put(ptl_event_t event, struct ibv_wc *wc, struct ptl_cq *ptl_cq)
 {
 	struct ptl_context_recv_op *recv_op;
 
@@ -85,46 +95,53 @@ static bool ptl_cnxt_process_put(ptl_event_t event, struct ibv_wc *wc)
 	return false;
 }
 
-static bool ptl_cnxt_process_put_overflow(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_put_overflow(ptl_event_t event, struct ibv_wc *wc,
+		struct ptl_cq *ptl_cq)
 {
 
 	SPDK_PTL_FATAL("UNIMPLEMENTED");
-	return true;
+	return false;
 }
 
 
-static bool ptl_cnxt_process_atomic(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_atomic(ptl_event_t event, struct ibv_wc *wc, struct ptl_cq *ptl_cq)
+{
+	SPDK_PTL_FATAL("UNIMPLEMENTED");
+	return false;
+}
+
+
+static bool ptl_cnxt_process_atomic_overflow(ptl_event_t event, struct ibv_wc *wc,
+		struct ptl_cq *ptl_cq)
 {
 
 	SPDK_PTL_FATAL("UNIMPLEMENTED");
-	return true;
+	return false;
 }
 
 
-static bool ptl_cnxt_process_atomic_overflow(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_fetch_atomic(ptl_event_t event, struct ibv_wc *wc,
+		struct ptl_cq *ptl_cq)
 {
 
 	SPDK_PTL_FATAL("UNIMPLEMENTED");
-	return true;
+	return false;
 }
 
-
-static bool ptl_cnxt_process_fetch_atomic(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_fetch_atomic_overflow(ptl_event_t event, struct ibv_wc *wc,
+		struct ptl_cq *ptl_cq)
 {
 
 	SPDK_PTL_FATAL("UNIMPLEMENTED");
-	return true;
+	return false;
 }
 
-static bool ptl_cnxt_process_fetch_atomic_overflow(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_reply(ptl_event_t event, struct ibv_wc *wc, struct ptl_cq *ptl_cq)
 {
-
-	SPDK_PTL_FATAL("UNIMPLEMENTED");
-	return true;
-}
-
-static bool ptl_cnxt_process_reply(ptl_event_t event, struct ibv_wc *wc)
-{
+	/**
+	 * Notification at the initiator that the read read issued by it has
+	 * moved the data in its memory
+	 */
 	struct ptl_context_send_op *rdma_read_op;
 
 	if (event.user_ptr == NULL) {
@@ -157,16 +174,24 @@ static bool ptl_cnxt_process_reply(ptl_event_t event, struct ibv_wc *wc)
 	SPDK_PTL_DEBUG("NVMe: RDMA read done (PTL_EVENT_REPLY). Number of bytes received: %lu. Filling wc with code %d qp_num: %d",
 		       event.rlength, event.ni_fail_type, rdma_read_op->qp_num);
 
+	if (ptl_cq->cq_id != rdma_read_op->cq_id) {
+		SPDK_PTL_DEBUG("PtlCQ: Wrong cq_id for the rdma read op event current ptl_cq id = %d "
+			       "event is for: %d, keep it to serve it later",
+			       ptl_cq->cq_id, rdma_read_op->cq_id);
+		ptl_cnxt_keep_event(&ptl_cq_array[rdma_read_op->cq_id], wc);
+		return false;
+	}
+	SPDK_PTL_DEBUG("PtlCQ: OK with rdma_read_op->cq_id = %d", rdma_read_op->cq_id);
 	free(rdma_read_op);
 	return true;
 }
 
-static bool ptl_cnxt_process_send(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_send(ptl_event_t event, struct ibv_wc *wc, struct ptl_cq *ptl_cq)
 {
 	return false;
 }
 
-static bool ptl_cnxt_process_ack(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_ack(ptl_event_t event, struct ibv_wc *wc, struct ptl_cq *ptl_cq)
 {
 	struct ptl_context_send_op *send_op;
 
@@ -179,16 +204,13 @@ static bool ptl_cnxt_process_ack(ptl_event_t event, struct ibv_wc *wc)
 	if (send_op->obj_type != PTL_SEND_OP) {
 		SPDK_PTL_FATAL("Corrupted object type this is not a PTL_LE_SEND_OP");
 	}
-
-
-
 	SPDK_PTL_DEBUG("NVMe: Got a PTL_EVENT_ACK event filling wc with code %d event type: %d from local qp num: %d",
 		       event.ni_fail_type, event.type, send_op->qp_num);
 
 	memset(wc, 0xFF, sizeof(*wc));
 
 	if (event.ni_fail_type != PTL_NI_OK) {
-		SPDK_PTL_FATAL("Operation failed");
+		SPDK_PTL_FATAL("Operation failed with code: %d", event.ni_fail_type);
 	}
 	wc->status =
 		event.ni_fail_type == PTL_NI_OK ? IBV_WC_SUCCESS : IBV_WC_LOC_PROT_ERR;
@@ -202,18 +224,28 @@ static bool ptl_cnxt_process_ack(ptl_event_t event, struct ibv_wc *wc)
 	}
 
 	wc->src_qp = 0;//TOOO
+	if (ptl_cq->cq_id != send_op->cq_id) {
+		SPDK_PTL_DEBUG("Wrong receiver for the send_op event. ptl_cq id = %d event is for: %d keep it for later",
+			       ptl_cq->cq_id,
+			       send_op->cq_id);
+		ptl_cnxt_keep_event(&ptl_cq_array[send_op->cq_id], wc);
+		return false;
+	}
+	SPDK_PTL_DEBUG("PtlCQ: OK with send_op: %d", send_op->cq_id);
 	free(send_op);
 	return true;
 }
 
-static bool ptl_cnxt_process_bt_disabled(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_bt_disabled(ptl_event_t event, struct ibv_wc *wc,
+		struct ptl_cq *ptl_cq)
 {
 
 	SPDK_PTL_FATAL("UNIMPLEMENTED");
-	return true;
+	return false;
 }
 
-static bool ptl_cnxt_process_auto_unlink(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_auto_unlink(ptl_event_t event, struct ibv_wc *wc,
+		struct ptl_cq *ptl_cq)
 {
 	struct ptl_context_recv_op *recv_op;
 
@@ -257,30 +289,42 @@ static bool ptl_cnxt_process_auto_unlink(ptl_event_t event, struct ibv_wc *wc)
 		       recv_op->bytes_received, wc->qp_num, (uint64_t)recv_op->io_vector[0].iov_base);
 
 	if (wc->qp_num == 0) {
-		SPDK_PTL_FATAL("Nida does not assign 0 fake qp numbers");
+		SPDK_PTL_FATAL(
+			"Nida does not assign 0 fake qp numbers is_target? %s pair "
+			"is [initiator qp num: %d target_qp_num: %d]",
+			is_target ? "YES" : "NO", recv_op->initiator_qp_num,
+			recv_op->target_qp_num);
 	}
 
 	wc->src_qp = INT32_MAX;
+	if (ptl_cq->cq_id != recv_op->cq_id) {
+		SPDK_PTL_DEBUG("PtlCQ: Wrong cq_id for the recv event current ptl_cq id = %d "
+			       "event is for: %d, keep it to serve it later",
+			       ptl_cq->cq_id, recv_op->cq_id);
+		ptl_cnxt_keep_event(&ptl_cq_array[recv_op->cq_id], wc);
+		return false;
+	}
+	SPDK_PTL_DEBUG("PtlCQ: Ok with recv op for id: %d", recv_op->cq_id);
 	free(recv_op);
 	return true;
 }
 
-static bool ptl_cnxt_process_auto_free(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_auto_free(ptl_event_t event, struct ibv_wc *wc, struct ptl_cq *ptl_cq)
 {
 
 	SPDK_PTL_FATAL("UNIMPLEMENTED");
-	return true;
+	return false;
 }
 
-static bool ptl_cnxt_process_search(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_search(ptl_event_t event, struct ibv_wc *wc, struct ptl_cq *ptl_cq)
 {
 
 	SPDK_PTL_FATAL("UNIMPLEMENTED");
-	return true;
+	return false;
 }
 
 
-static bool ptl_cnxt_process_link(ptl_event_t event, struct ibv_wc *wc)
+static bool ptl_cnxt_process_link(ptl_event_t event, struct ibv_wc *wc, struct ptl_cq *ptl_cq)
 {
 
 	SPDK_PTL_DEBUG("PROCESS LINK EVENT OK go on PORTALS internal");
@@ -338,23 +382,44 @@ static process_event handler[16] = {
 // 	}
 // }
 
+pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 			    struct ibv_wc *wc)
 {
-	static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+
 	ptl_event_t event;
 	int ret;
 	int events_processed = 0;
+	struct ibv_wc *late_wc;
 
 
 	pthread_mutex_lock(&g_lock);
+
 	struct ptl_cq *ptl_cq = ptl_cq_get_from_ibv_cq(ibv_cq);
 
+	if (ptl_cq->pending_completions == NULL) {
+		SPDK_PTL_FATAL("pending_completions is NULL, at this point it shouldn't");
+	}
+
+	if (ptl_cq->is_in_use == false) {
+		SPDK_PTL_FATAL("Cannot happen");
+	}
+
+	/*First of all look for pending staff that was for me and I missed them*/
+	while (events_processed < num_entries) {
+		late_wc = deque_pop_front(ptl_cq->pending_completions);
+		if (late_wc == NULL) {
+			break;
+		}
+		SPDK_PTL_DEBUG("PtlCQ: Delivered late event for ptl_cq id: %d", ptl_cq->cq_id);
+		wc[events_processed++] = *late_wc;
+		free(late_wc);
+	}
 
 	while (events_processed < num_entries) {
 		ret = PtlEQGet(ptl_cq_get_queue(ptl_cq), &event);
 		if (ret == PTL_OK) {
-			if (false == handler[event.type](event, &wc[events_processed])) {
+			if (false == handler[event.type](event, &wc[events_processed], ptl_cq)) {
 				continue;
 			}
 			++events_processed;
@@ -416,12 +481,23 @@ struct ptl_context *ptl_cnxt_get(void)
 
 	// desired.features = PTL_TOTAL_DATA_ORDERING;
 
-	ret = PtlNIInit((int)atoi(srv_nid), PTL_NI_MATCHING | PTL_NI_PHYSICAL,
+	ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
 			(int)atoi(srv_pid), NULL, &actual, &ptl_context.ni_handle);
+	// ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
+	// 		2000, NULL, &actual, &ptl_context.ni_handle);
 
 	if (ret != PTL_OK) {
-		SPDK_PTL_FATAL("RDMACM: PtlNIInit failed");
+		SPDK_PTL_FATAL("RDMACM: PtlNIInit failed with code: %d for nid: %d and pid: %d", ret,
+			       PTL_IFACE_DEFAULT, ptl_context.pid);
 	}
+	ptl_process_t actual_phys_id;
+	ret = PtlGetPhysId(ptl_context.ni_handle, &actual_phys_id);
+	if (ret != PTL_OK) {
+		SPDK_PTL_FATAL("PtlGetPhysId failed: %d", ret);
+	}
+	SPDK_PTL_INFO("Server Physical NID: %d, PID: %d\n", actual_phys_id.phys.nid,
+		      actual_phys_id.phys.pid);
+
 	// Check if PTL_TOTAL_DATA_ORDERING is supported
 	// if (actual.features & PTL_TOTAL_DATA_ORDERING) {
 	// 	SPDK_PTL_DEBUG("Total data ordering is enabled");

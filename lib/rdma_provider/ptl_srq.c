@@ -1,8 +1,8 @@
 #include "ptl_srq.h"
-#include "lib/rdma_provider/ptl_context.h"
-#include "lib/rdma_provider/ptl_log.h"
-#include "lib/rdma_provider/ptl_object_types.h"
-#include "lib/rdma_provider/ptl_pd.h"
+#include "ptl_context.h"
+#include "ptl_log.h"
+#include "ptl_object_types.h"
+#include "ptl_pd.h"
 
 static int ptl_post_srq_recv(struct ibv_srq *srq, struct ibv_recv_wr *recv_wr,
 			     struct ibv_recv_wr **bad_recv_wr)

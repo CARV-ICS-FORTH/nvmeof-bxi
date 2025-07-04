@@ -1,8 +1,8 @@
 #ifndef PTL_CONTEXT_H
 #define PTL_CONTEXT_H
+#include "../../include/spdk/nvme_spec.h"
 #include "portals4.h"
 #include "ptl_object_types.h"
-#include <include/spdk/nvme_spec.h>
 #include <infiniband/verbs.h>
 #include <stdbool.h>
 #define PTL_CONTEXT_SERVER_PID 0
@@ -16,12 +16,15 @@ struct ptl_context_recv_op {
 	uint64_t bytes_received;
 	int initiator_qp_num;
 	int target_qp_num;
+	/*In which cqid I wait for the receive event*/
+	int cq_id;
 	ptl_iovec_t io_vector[PTL_IOVEC_SIZE];
 };
 
 struct ptl_context_send_op {
 	ptl_obj_type_e obj_type;
 	uint64_t wr_id;
+	int cq_id;
 	int qp_num;
 };
 

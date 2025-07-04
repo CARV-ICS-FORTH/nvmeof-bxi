@@ -1,6 +1,6 @@
 #include "ptl_qp.h"
-#include "lib/rdma_provider/ptl_config.h"
-#include "lib/rdma_provider/ptl_connection.h"
+#include "ptl_config.h"
+#include "ptl_connection.h"
 #include "ptl_cm_id.h"
 #include "ptl_cq.h"
 #include "ptl_log.h"

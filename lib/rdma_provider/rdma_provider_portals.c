@@ -3,7 +3,7 @@
  *   Copyright (c) Mellanox Technologies LTD. All rights reserved.
  *   Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
-#include "lib/rdma_provider/ptl_print_nvme_commands.h"
+#include "ptl_print_nvme_commands.h"
 #include "portals4.h"
 #include "ptl_cm_id.h"
 #include "ptl_config.h"
@@ -33,6 +33,18 @@
         SPDK_PTL_FATAL("Corrupted PORTALS SRQ"); \
     }
 
+#define SPDK_PTL_CHECK_SGE_LENGTH(wr) \
+	do { \
+		if ((wr)->num_sge != 1) { \
+			for (int i = 0; i < (wr)->num_sge; i++) { \
+				SPDK_PTL_DEBUG("Opcode: wr[%d] = %d, addr: %lu length is: %d", \
+					       i, (wr)->opcode, (wr)->sg_list[i].addr, \
+					       (wr)->sg_list[i].length); \
+			} \
+			SPDK_PTL_FATAL("Num sges > 1 are under development, sorry requested are: %d", \
+				       (wr)->num_sge); \
+		} \
+	} while (0)
 
 struct spdk_portals_provider_srq {
 	uint64_t magic_number;
@@ -191,6 +203,7 @@ spdk_rdma_provider_srq_flush_recv_wrs(struct spdk_rdma_provider_srq *rdma_srq,
 		// SPDK_PTL_DEBUG("Num of sges are %d", wr->num_sge);
 		recv_op = calloc(1UL, sizeof(*recv_op));
 		recv_op->obj_type = PTL_RECV_OP;
+		recv_op->cq_id = PTL_UUID_TARGET_COMPLETION_QUEUE_ID;
 		for (int i = 0; i < wr->num_sge; i++) {
 			recv_op->io_vector[i].iov_base = (ptl_addr_t)wr->sg_list[i].addr;
 			recv_op->io_vector[i].iov_len = wr->sg_list[i].length;
@@ -201,7 +214,8 @@ spdk_rdma_provider_srq_flush_recv_wrs(struct spdk_rdma_provider_srq *rdma_srq,
 		/*Initialize the matching entries*/
 		memset(&me, 0, sizeof(me));
 		me.ignore_bits = PTL_UUID_IGNORE_MASK;
-		me.match_bits = ptl_uuid_set_op_type(PTL_UUID_IGNORE_MASK, PTL_SEND_RECV);
+		// me.match_bits = ptl_uuid_set_op_type(PTL_UUID_IGNORE_MASK, PTL_SEND_RECV);
+		me.match_bits = PTL_UUID_TARGET_SRQ_MATCH_BITS;
 		me.match_id.phys.nid = PTL_NID_ANY;
 		me.match_id.phys.pid = PTL_PID_ANY;
 		me.min_free = 0;
@@ -299,6 +313,7 @@ spdk_rdma_provider_qp_flush_recv_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 
 		recv_op = calloc(1UL, sizeof(*recv_op));
 		recv_op->obj_type = PTL_RECV_OP;
+		recv_op->cq_id = portals_qp->ptl_id->ptl_qp->recv_cq->cq_id;
 		for (int i = 0; i < wr->num_sge; i++) {
 			recv_op->io_vector[i].iov_base = (ptl_addr_t) wr->sg_list[i].addr;
 			recv_op->io_vector[i].iov_len = wr->sg_list[i].length;
@@ -309,7 +324,8 @@ spdk_rdma_provider_qp_flush_recv_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 		// Initialize the matching entry
 		memset(&me, 0, sizeof(me));
 		me.ignore_bits = PTL_UUID_IGNORE_MASK;
-		me.match_bits = ptl_uuid_set_op_type(PTL_UUID_IGNORE_MASK, PTL_SEND_RECV);
+		// me.match_bits = ptl_uuid_set_op_type(PTL_UUID_IGNORE_MASK, PTL_SEND_RECV);
+		me.match_bits = portals_qp->ptl_id->my_match_bits;
 		me.match_id.phys.nid = PTL_NID_ANY;
 		me.match_id.phys.pid = PTL_PID_ANY;
 		me.min_free = 0;
@@ -336,6 +352,8 @@ spdk_rdma_provider_qp_flush_recv_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 	}
 
 	/* gesalous end */
+	// SPDK_PTL_DEBUG("MATCH_BITS: Registered memory for a single QP under match bits: %lu",
+	// 	       portals_qp->ptl_id->my_match_bits);
 	spdk_rdma_qp->recv_wrs.first = NULL;
 	spdk_rdma_qp->stats->recv.doorbell_updates++;
 
@@ -559,9 +577,7 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 	int rc;
 	struct ptl_context_send_op *rdma_read_op;
 
-	if (wr->num_sge != 1) {
-		SPDK_PTL_FATAL("num sge greater than one for rdma read?");
-	}
+	SPDK_PTL_CHECK_SGE_LENGTH(wr);
 
 	struct ptl_pd_mem_desc * ptl_pd_mem_desc = ptl_pd_get_mem_desc(ptl_pd, wr->sg_list[0].addr,
 		wr->sg_list[0].length, true,
@@ -593,55 +609,55 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 }
 
 
-
 static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_qp *ptl_qp,
 		struct ibv_send_wr *wr, uint64_t match_bits)
 {
-	ptl_process_t destination = {.phys.nid = ptl_qp->remote_nid, .phys.pid = ptl_qp->remote_pid};
+	struct ptl_pd_mem_desc *ptl_pd_mem_desc;
 	size_t local_offset;
+	ptl_process_t destination = {.phys.nid = ptl_qp->remote_nid, .phys.pid = ptl_qp->remote_pid};
 	struct ptl_context_send_op *send_op;
 	int rc;
+	uint64_t remote_addr =  wr->wr.rdma.remote_addr;
 
-	if (wr->num_sge != 1) {
-		SPDK_PTL_FATAL("num sge greater than one for rdma read?");
-	}
+	for (int i = 0; i < wr->num_sge; i++) {
+		ptl_pd_mem_desc =
+			ptl_pd_get_mem_desc(ptl_pd, wr->sg_list[i].addr,
+					    wr->sg_list[i].length, true, false);
+		if (NULL == ptl_pd_mem_desc) {
+			SPDK_PTL_FATAL("Failed to find descriptor");
+		}
+		local_offset = wr->sg_list[i].addr - (uint64_t)ptl_pd_mem_desc->local_w_mem_desc.start;
+		SPDK_PTL_DEBUG("Performing an RDMA WRITE (sg[%d]) from node "
+			       "nid: %d pid: %d portal index: %d local offset: "
+			       "%lu length in B: %u is it signaled?: %s",
+			       i, destination.phys.nid, destination.phys.pid,
+			       PTL_PT_INDEX, local_offset,
+			       wr->sg_list[i].length, send_op ? "YES" : "NO");
 
+		send_op = NULL;
+		if (wr->send_flags & IBV_SEND_SIGNALED && i == (wr->num_sge - 1)) {
+			send_op = calloc(1UL, sizeof(*send_op));
+			send_op->obj_type = PTL_SEND_OP;
+			send_op->wr_id = wr->wr_id;
+			send_op->qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
+			send_op->cq_id = ptl_qp->send_cq->cq_id;
+		}
 
-	struct ptl_pd_mem_desc * ptl_pd_mem_desc = ptl_pd_get_mem_desc(ptl_pd, wr->sg_list[0].addr,
-		wr->sg_list[0].length, true,
-		false);
+		rc = PtlPut(ptl_pd_mem_desc->local_w_mem_handle,
+			    local_offset,           // local offset
+			    wr->sg_list[i].length,         // length
+			    PTL_ACK_REQ,
+			    destination,       // target process
+			    PTL_PT_INDEX,        // portal table index
+			    match_bits,// match bits
+			    remote_addr,
+			    send_op,
+			    0);// priority
 
-	if (NULL == ptl_pd_mem_desc) {
-		SPDK_PTL_FATAL("Failed to find descriptor");
-	}
-
-	send_op = NULL;
-	if (wr->send_flags & IBV_SEND_SIGNALED) {
-		send_op = calloc(1UL, sizeof(*send_op));
-		send_op->obj_type = PTL_SEND_OP;
-		send_op->wr_id = wr->wr_id;
-		send_op->qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
-	}
-
-	local_offset = wr->sg_list[0].addr - (uint64_t)ptl_pd_mem_desc->local_w_mem_desc.start;
-	SPDK_PTL_DEBUG("NVMe: Performing an RDMA WRITE from node nid: %d pid: %d portal index: %d local offset: %lu length in B: %u is it signaled?: %s",
-		       destination.phys.nid, destination.phys.pid, PTL_PT_INDEX, local_offset, wr->sg_list[0].length,
-		       send_op ? "YES" : "NO");
-	/*XXX TODO XXX Set the match bits correctly here! XXX TODO XXX*/
-
-	rc = PtlPut(ptl_pd_mem_desc->local_w_mem_handle,
-		    local_offset,           // local offset
-		    wr->sg_list[0].length,         // length
-		    PTL_ACK_REQ,
-		    destination,       // target process
-		    PTL_PT_INDEX,        // portal table index
-		    match_bits,// match bits
-		    wr->wr.rdma.remote_addr,
-		    send_op,
-		    0);                            // priority
-
-	if (PTL_OK != rc) {
-		SPDK_PTL_FATAL("Remote RDMA write failed Sorry!");
+		if (PTL_OK != rc) {
+			SPDK_PTL_FATAL("Remote RDMA write failed Sorry!");
+		}
+		remote_addr += wr->sg_list[i].length;
 	}
 }
 
@@ -668,25 +684,24 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 		return 0;
 	}
 
-	SPDK_PTL_DEBUG("NVMe: Flushing send requests....\n");
 	match_bits = ptl_qp->ptl_cm_id->uuid;
 
 	for (struct ibv_send_wr *wr = spdk_rdma_qp->send_wrs.first; wr != NULL; wr = wr->next) {
 
-		if (wr->num_sge != 1) {
-			SPDK_PTL_FATAL("Num sges > 1 are under development, sorry");
-		}
-
-		spdk_rdma_print_wr_flags(wr);
+		// spdk_rdma_print_wr_flags(wr);
 		if (wr->opcode == IBV_WR_RDMA_WRITE) {
-			spdk_rdma_provider_ptl_rdma_write(ptl_pd, ptl_qp, wr, ptl_uuid_set_op_type(match_bits, PTL_RMA));
+			spdk_rdma_provider_ptl_rdma_write(ptl_pd, ptl_qp, wr, ptl_uuid_set_match_list(match_bits,
+							  ptl_qp->ptl_cm_id->rma_match_bits));
 			continue;
 		}
 
 		if (wr->opcode == IBV_WR_RDMA_READ) {
-			spdk_rdma_provider_ptl_rdma_read(ptl_pd, ptl_qp, wr, ptl_uuid_set_op_type(match_bits, PTL_RMA));
+			spdk_rdma_provider_ptl_rdma_read(ptl_pd, ptl_qp, wr, ptl_uuid_set_match_list(match_bits,
+							 ptl_qp->ptl_cm_id->rma_match_bits));
 			continue;
 		}
+
+		SPDK_PTL_CHECK_SGE_LENGTH(wr);
 
 		for (int i = 0; i < wr->num_sge; i++) {
 			ptl_mem_desc = ptl_pd_get_mem_desc(ptl_pd, wr->sg_list[i].addr, wr->sg_list[i].length, true, false);
@@ -711,28 +726,29 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				send_op->obj_type = PTL_SEND_OP;
 				send_op->wr_id = wr->wr_id;
 				send_op->qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
+				send_op->cq_id = ptl_qp->send_cq->cq_id;
 			}
 
-      SPDK_PTL_DEBUG(
-          "%s: Performing a SEND (PtlPut) operation to nid: "
-          "%d pid: %d pt_index: %d initiator qp_num: %d "
-          "target qp_num: %d local_offset: %lu is it "
-          "signaled?: %s",
-          wr->sg_list[i].length == 16 ? "NVMe-cpl-send"
-                                      : "NVMe-cmd-send",
-          target.phys.nid, target.phys.pid,
-          ptl_qp->remote_pt_index,
-          ptl_uuid_get_initiator_qp_num(match_bits),
-          ptl_uuid_get_target_qp_num(match_bits),
-          local_offset, send_op ? "YES" : "NO");
+			SPDK_PTL_DEBUG(
+				"%s: Performing a SEND (PtlPut) operation to nid: "
+				"%d pid: %d pt_index: %d initiator qp_num: %d "
+				"target qp_num: %d local_offset: %lu is it "
+				"signaled?: %s",
+				wr->sg_list[i].length == 16 ? "NVMe-cpl-send"
+				: "NVMe-cmd-send",
+				target.phys.nid, target.phys.pid,
+				ptl_qp->remote_pt_index,
+				ptl_uuid_get_initiator_qp_num(match_bits),
+				ptl_uuid_get_target_qp_num(match_bits),
+				local_offset, send_op ? "YES" : "NO");
 
-                        rc = PtlPut(ptl_mem_desc->local_w_mem_handle,
+			rc = PtlPut(ptl_mem_desc->local_w_mem_handle,
 				    local_offset,//local offset
 				    wr->sg_list[i].length,//length
 				    PTL_ACK_REQ,
 				    target,// target process
 				    ptl_qp->remote_pt_index,//portal table index
-				    ptl_uuid_set_op_type(match_bits, PTL_SEND_RECV),//match bits
+				    ptl_uuid_set_match_list(match_bits, ptl_qp->ptl_cm_id->recv_match_bits),//match bits
 				    0,// remote offset, don't care let target decide
 				    send_op,
 				    0);

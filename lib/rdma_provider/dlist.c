@@ -119,6 +119,8 @@ void *dlist_remove_first(struct dlist *list)
 	struct dlist_node *to_free = list->head;
 	list->head = list->head->next;
 	--list->size;
+  if(list->size == 0)
+    list->tail = list->head;
 	free(to_free);
 	return node;
 }

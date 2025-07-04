@@ -1,14 +1,14 @@
 #include "ptl_cm_id.h"
 #include "deque.h"
-#include "lib/rdma_provider/ptl_object_types.h"
-#include "ptl_log.h"
 #include "ptl_context.h"
-#include "rdma_cm_ptl_event_channel.h"
+#include "ptl_log.h"
 #include "ptl_macros.h"
+#include "ptl_object_types.h"
+#include "ptl_uuid.h"
+#include "rdma_cm_ptl_event_channel.h"
 #include <assert.h>
 #include <rdma/rdma_cma.h>
 #include <stdlib.h>
-
 static int ptl_local_qp_num = 1;
 
 struct ptl_cm_id *ptl_cm_id_create(struct rdma_cm_ptl_event_channel *ptl_channel, void *context)
@@ -27,7 +27,9 @@ struct ptl_cm_id *ptl_cm_id_create(struct rdma_cm_ptl_event_channel *ptl_channel
 	ptl_id->fake_cm_id.ps = RDMA_PS_TCP;
 	ptl_id->ptl_qp_num = ptl_local_qp_num++;
 	ptl_id->cm_id_state = PTL_CM_UNCONNECTED;
-	SPDK_PTL_DEBUG("CAUTION: SUCCESSFULLY created PTL_ID: %p", ptl_id);
+	ptl_id->my_match_bits = ptl_uuid_get_next_match_bit();
+	SPDK_PTL_DEBUG("MATCH_BITS: SUCCESSFULLY created PTL_ID: %p MY match bits are %lu", ptl_id,
+		       ptl_id->my_match_bits);
 	return ptl_id;
 }
 
@@ -42,7 +44,8 @@ struct rdma_cm_event *ptl_cm_id_create_event(struct ptl_cm_id *ptl_id, struct pt
 		SPDK_PTL_FATAL("No memory!");
 	}
 	fake_event->id = &ptl_id->fake_cm_id;
-  SPDK_PTL_DEBUG("CP server: creating event %d for qp num: %d",event_type,fake_event->id->qp ? fake_event->id->qp->qp_num: -128);
+	SPDK_PTL_DEBUG("CP server: creating event %d for qp num: %d", event_type,
+		       fake_event->id->qp ? fake_event->id->qp->qp_num : -128);
 	fake_event->listen_id = (void*)0xFFFFFFFFFFFFFFFF;
 	if (listen_id) {
 		fake_event->listen_id = &listen_id->fake_cm_id;
@@ -80,7 +83,7 @@ void ptl_cm_id_add_event(struct ptl_cm_id *ptl_id,
 	uint64_t result;
 	if (write(ptl_id->ptl_channel->fake_channel.fd, &result, sizeof(result)) != sizeof(result)) {
 		perror("read");
-		SPDK_PTL_FATAL("Failed to write event");
+		SPDK_PTL_WARN("Failed to write event");
 	}
 	rdma_cm_ptl_event_channel_unlock_event_deque(ptl_id->ptl_channel);
 }
@@ -90,3 +93,6 @@ void ptl_cm_id_set_fake_data(struct ptl_cm_id *ptl_id,
 {
 	ptl_id->fake_data = fake_data;
 }
+
+
+

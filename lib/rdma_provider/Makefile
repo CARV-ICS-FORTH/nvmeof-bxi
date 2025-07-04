@@ -25,6 +25,7 @@ WRAPPER_SRCS += ptl_cq.c
 WRAPPER_SRCS += ptl_pd.c
 WRAPPER_SRCS += ptl_qp.c
 WRAPPER_SRCS += ptl_srq.c
+WRAPPER_SRCS += ptl_uuid.c
 WRAPPER_SRCS += ptl_print_nvme_commands.c
 WRAPPER_SO = lib$(WRAPPER_LIBNAME).so
 

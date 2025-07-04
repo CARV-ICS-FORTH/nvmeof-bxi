@@ -1,6 +1,6 @@
 #ifndef PTL_QP_H
 #define PTL_QP_H
-#include "lib/rdma_provider/ptl_connection.h"
+#include "ptl_connection.h"
 #include "ptl_object_types.h"
 #include <infiniband/verbs.h>
 #include <stdbool.h>

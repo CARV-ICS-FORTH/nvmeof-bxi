@@ -1,6 +1,6 @@
 #ifndef PTL_PD_H
 #define PTL_PD_H
-#include "lib/rdma_provider/ptl_log.h"
+#include "ptl_log.h"
 #include "ptl_object_types.h"
 #include <infiniband/verbs.h>
 #include <portals4.h>
@@ -90,7 +90,6 @@ static inline struct ptl_eq *ptl_pd_get_ptl_cq(struct ptl_pd *ptl_pd)
 	}
 	return ptl_pd->ptl_eq;
 }
-
 bool ptl_pd_add_mem_desc(struct ptl_pd *ptl_pd, struct ptl_pd_mem_desc *mem_desc);
 
 struct ptl_pd_mem_desc *ptl_pd_get_mem_desc(struct ptl_pd *ptl_pd, uint64_t address,

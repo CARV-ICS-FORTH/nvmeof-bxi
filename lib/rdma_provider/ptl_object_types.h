@@ -6,6 +6,7 @@ typedef enum ptl_obj_type {
 	PTL_CONTEXT,
 	PTL_PD,
 	PTL_QP,
+	PTL_STATIC_CQ,
 	PTL_CQ,
 	PTL_CM_ID,
 	PTL_SRQ,
