@@ -605,9 +605,9 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 
 	SPDK_PTL_CHECK_SGE_LENGTH(wr);
 
-	struct ptl_pd_mem_desc * ptl_pd_mem_desc = ptl_pd_get_mem_desc(ptl_pd, wr->sg_list[0].addr,
-		wr->sg_list[0].length, true,
-		false);
+	struct ptl_pd_mem_desc * ptl_pd_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map,
+		wr->sg_list[0].addr,
+		wr->sg_list[0].length, false);
 
 	if (NULL == ptl_pd_mem_desc) {
 		SPDK_PTL_FATAL("Failed to find descriptor");
@@ -647,8 +647,8 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 
 	for (int i = 0; i < wr->num_sge; i++) {
 		ptl_pd_mem_desc =
-			ptl_pd_get_mem_desc(ptl_pd, wr->sg_list[i].addr,
-					    wr->sg_list[i].length, true, false);
+			ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr,
+					wr->sg_list[i].length, false);
 		if (NULL == ptl_pd_mem_desc) {
 			SPDK_PTL_FATAL("Failed to find descriptor");
 		}
@@ -731,7 +731,8 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 		SPDK_PTL_CHECK_SGE_LENGTH(wr);
 
 		for (int i = 0; i < wr->num_sge; i++) {
-			ptl_mem_desc = ptl_pd_get_mem_desc(ptl_pd, wr->sg_list[i].addr, wr->sg_list[i].length, true, false);
+			ptl_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr, wr->sg_list[i].length,
+						       false);
 
 			if (NULL == ptl_mem_desc) {
 				SPDK_PTL_FATAL("MEM desc not found!");
@@ -809,9 +810,3 @@ spdk_rdma_provider_accel_sequence_supported(void)
 	return false;
 }
 
-int rdma_reject(struct rdma_cm_id *id, const void *private_data,
-		uint8_t private_data_len)
-{
-	SPDK_PTL_WARN("XXX TODO XXX not impemented yet continue");
-	return 0;
-}

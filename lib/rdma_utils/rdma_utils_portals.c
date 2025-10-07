@@ -17,6 +17,7 @@
 #include "spdk/util.h"
 #include "spdk_internal/assert.h"
 #include "spdk_internal/rdma_utils.h"
+#include <rte_hash.h>
 #include <portals4.h>
 #include <rdma/rdma_cma.h>
 #include <rdma/rdma_verbs.h>
@@ -187,7 +188,6 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 	struct ptl_pd *ptl_pd;
 	struct spdk_rdma_utils_mem_map *rmap = cb_ctx;
 	struct ibv_pd *pd = rmap->pd;
-	struct ibv_mr *mr;
 	struct ptl_context * ptl_context;
 	struct ptl_pd_mem_desc * ptl_pd_mem_desc  = NULL;
 	int rc = -1;
@@ -317,15 +317,14 @@ done:
 		rc = ptl_pd_mem_desc->local_w_mem_handle.handle ? spdk_mem_map_set_translation(map, (uint64_t)vaddr,
 			size,
 			(uint64_t)ptl_pd_mem_desc->local_w_mem_handle.handle) : -1;
-		if (false == ptl_pd_add_mem_desc(ptl_pd, ptl_pd_mem_desc)) {
+		if (false == ptl_pd->ops.add(ptl_pd->mem_desc_map, ptl_pd_mem_desc)) {
 			SPDK_PTL_FATAL("Failed to keep memory handle in portals context");
 		}
 		SPDK_PTL_DEBUG("DONE with memory registration in Portals");
 		break;
 	case SPDK_MEM_MAP_NOTIFY_UNREGISTER:
-		ptl_pd_mem_desc = ptl_pd_get_mem_desc(ptl_pd, (uint64_t)vaddr, 0,
-						      rdma_utils_ptl_is_local_write(access_flags),
-						      rdma_utils_ptl_is_remote_read(access_flags) || rdma_utils_ptl_is_local_write(access_flags));
+		ptl_pd_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map, (uint64_t)vaddr, 0,
+						  rdma_utils_ptl_is_remote_read(access_flags));
 		if (ptl_pd_mem_desc == NULL) {
 			SPDK_PTL_FATAL("Mem desc not found! (It should have)");
 		}
@@ -334,7 +333,7 @@ done:
 			SPDK_PTL_FATAL("Failed to clean ptl_mem_desc");
 		}
 		if (rmap->hooks == NULL || rmap->hooks->get_rkey == NULL) {
-			mr = (struct ibv_mr *)spdk_mem_map_translate(map, (uint64_t)vaddr, NULL);
+			struct ibv_mr *mr = (struct ibv_mr *)spdk_mem_map_translate(map, (uint64_t)vaddr, NULL);
 			// if (mr) {
 			// 	ibv_dereg_mr(mr);
 			// }
@@ -379,6 +378,23 @@ struct spdk_rdma_utils_mem_map *
 spdk_rdma_utils_create_mem_map(struct ibv_pd *pd, struct spdk_nvme_rdma_hooks *hooks,
 			       uint32_t access_flags)
 {
+	/*TEST*/
+	struct rte_hash_parameters hash_params = {
+		.name = "dummy",
+		.entries = 1024,
+		.key_len = sizeof(uint64_t), // Example: key is a 64-bit integer
+		.hash_func = NULL,
+		.hash_func_init_val = 0,
+		.socket_id = rte_socket_id(),
+		.extra_flag = 0, // Or RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY for multi-writer
+	};
+
+	// 3. Create the Hash Table
+	struct rte_hash *my_hash_table = NULL;
+	my_hash_table = rte_hash_create(&hash_params);
+	if (my_hash_table == NULL) {
+		rte_exit(EXIT_FAILURE, "Error: rte_hash_create failed\n");
+	}
 	SPDK_PTL_DEBUG("RDMAPTLUTILS: hooks are NULL? %s", hooks ? "NO" : "YES");
 
 	struct spdk_rdma_utils_mem_map *map;
@@ -430,11 +446,17 @@ spdk_rdma_utils_create_mem_map(struct ibv_pd *pd, struct spdk_nvme_rdma_hooks *h
 	}
 	LIST_INSERT_HEAD(&g_rdma_utils_mr_maps, map, link);
 
-	pthread_mutex_unlock(&g_rdma_mr_maps_mutex);
-	SPDK_PTL_DEBUG("Ok created mem_map updated field for PORTALS PD (struct ptl_pd)");
 	/*We want to update our ptl_pd object with which mem_map it relates to*/
 	ptl_pd = ptl_pd_get_from_ibv_pd(pd);
 	ptl_pd_set_mem_map(ptl_pd, map);
+	/*Create the map that stores the MDs for Portals*/
+	if (NULL == ptl_pd->mem_desc_map) {
+		ptl_pd->mem_desc_map = ptl_pd->ops.create(1024);
+	}
+
+	pthread_mutex_unlock(&g_rdma_mr_maps_mutex);
+	SPDK_PTL_DEBUG("Ok created mem_map updated field for PORTALS PD (struct ptl_pd)");
+
 	return map;
 }
 
@@ -656,7 +678,7 @@ spdk_rdma_utils_get_pd(struct ibv_context *context)
 	struct ptl_context * ptl_context = ptl_cnxt_get_from_ibcnxt(context);
 	if (NULL == ptl_context->ptl_pd) {
 		SPDK_PTL_DEBUG("PTL PD IS NULLQ creating it");
-		ptl_context->ptl_pd = ptl_pd_create(ptl_context);
+		ptl_context->ptl_pd = ptl_pd_create(ptl_context, NULL);
 	}
 	return ptl_pd_get_ibv_pd(ptl_context->ptl_pd);
 	// struct ptl_context *ptl_context;

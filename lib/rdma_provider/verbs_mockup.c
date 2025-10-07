@@ -116,7 +116,7 @@ struct ibv_pd *ibv_alloc_pd(struct ibv_context *context)
 		SPDK_PTL_DEBUG("PTL_PD Already set, go on");
 		return ptl_pd_get_ibv_pd(ptl_context->ptl_pd);
 	}
-	ptl_pd = ptl_pd_create(ptl_context);
+	ptl_pd = ptl_pd_create(ptl_context, NULL);
 	ptl_context->ptl_pd = ptl_pd;
 	return ptl_pd_get_ibv_pd(ptl_pd);
 }
