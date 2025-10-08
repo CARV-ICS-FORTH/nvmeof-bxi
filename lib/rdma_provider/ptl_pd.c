@@ -87,10 +87,6 @@ struct ptl_pd *ptl_pd_create(struct ptl_context *ptl_context, struct ptl_pd_mem_
 		ptl_pd->ops.get = ptl_pd_map_get;
 		ptl_pd->ops.destroy = ptl_pd_map_destroy;
 	}
-	ptl_pd->mem_desc_map = ptl_pd->ops.create(1024);
-	if (NULL == ptl_pd->mem_desc_map) {
-		SPDK_PTL_FATAL("Failed to allocated mem_desc_map");
-	}
 	return ptl_pd;
 }
 

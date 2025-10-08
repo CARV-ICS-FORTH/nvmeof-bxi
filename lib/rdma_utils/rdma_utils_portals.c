@@ -8,6 +8,7 @@
 #include "../rdma_provider/ptl_cq.h"
 #include "../rdma_provider/ptl_log.h"
 #include "../rdma_provider/ptl_pd.h"
+#include "../rdma_provider/ptl_rte_hash_map.h"
 #include "../rdma_provider/ptl_uuid.h"
 #include "spdk/file.h"
 #include "spdk/likely.h"
@@ -17,10 +18,10 @@
 #include "spdk/util.h"
 #include "spdk_internal/assert.h"
 #include "spdk_internal/rdma_utils.h"
-#include <rte_hash.h>
 #include <portals4.h>
 #include <rdma/rdma_cma.h>
 #include <rdma/rdma_verbs.h>
+#include <rte_hash.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -378,27 +379,23 @@ struct spdk_rdma_utils_mem_map *
 spdk_rdma_utils_create_mem_map(struct ibv_pd *pd, struct spdk_nvme_rdma_hooks *hooks,
 			       uint32_t access_flags)
 {
-	/*TEST*/
-	struct rte_hash_parameters hash_params = {
-		.name = "dummy",
-		.entries = 1024,
-		.key_len = sizeof(uint64_t), // Example: key is a 64-bit integer
-		.hash_func = NULL,
-		.hash_func_init_val = 0,
-		.socket_id = rte_socket_id(),
-		.extra_flag = 0, // Or RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY for multi-writer
-	};
-
-	// 3. Create the Hash Table
-	struct rte_hash *my_hash_table = NULL;
-	my_hash_table = rte_hash_create(&hash_params);
-	if (my_hash_table == NULL) {
-		rte_exit(EXIT_FAILURE, "Error: rte_hash_create failed\n");
-	}
 	SPDK_PTL_DEBUG("RDMAPTLUTILS: hooks are NULL? %s", hooks ? "NO" : "YES");
 
 	struct spdk_rdma_utils_mem_map *map;
 	struct ptl_pd *ptl_pd;
+
+	/*We want to update our ptl_pd object with which mem_map it relates to*/
+	ptl_pd = ptl_pd_get_from_ibv_pd(pd);
+	/*Create the map that stores the MDs for Portals*/
+	SPDK_PTL_DEBUG("Setting RTE_HASH table.....");
+	if (NULL == ptl_pd->mem_desc_map) {
+		SPDK_PTL_DEBUG("Setting RTE_HASH table");
+		ptl_pd->ops.create =  ptl_rte_map_create;
+		ptl_pd->ops.add = ptl_rte_map_add;
+		ptl_pd->ops.get = ptl_rte_map_get;
+		ptl_pd->ops.destroy = ptl_rte_map_destroy;
+		ptl_pd->mem_desc_map = ptl_pd->ops.create(1024);
+	}
 
 	/*No IWARP support this is PORTALS*/
 	// if (pd->context->device->transport_type == IBV_TRANSPORT_IWARP) {
@@ -447,13 +444,7 @@ spdk_rdma_utils_create_mem_map(struct ibv_pd *pd, struct spdk_nvme_rdma_hooks *h
 	LIST_INSERT_HEAD(&g_rdma_utils_mr_maps, map, link);
 
 	/*We want to update our ptl_pd object with which mem_map it relates to*/
-	ptl_pd = ptl_pd_get_from_ibv_pd(pd);
 	ptl_pd_set_mem_map(ptl_pd, map);
-	/*Create the map that stores the MDs for Portals*/
-	if (NULL == ptl_pd->mem_desc_map) {
-		ptl_pd->mem_desc_map = ptl_pd->ops.create(1024);
-	}
-
 	pthread_mutex_unlock(&g_rdma_mr_maps_mutex);
 	SPDK_PTL_DEBUG("Ok created mem_map updated field for PORTALS PD (struct ptl_pd)");
 

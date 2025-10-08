@@ -52,6 +52,7 @@ C_SRCS += rdma_provider_mlx5_dv.c
 LOCAL_SYS_LIBS += -lmlx5
 else ifeq ($(CONFIG_RDMA_PROV),portals)
 C_SRCS = rdma_provider_portals.c
+C_SRCS += ptl_rte_hash_map.c
 EXTRA_TARGETS = $(CORE_SO) $(VERBS_SO) $(RDMACM_SO)
 # gesalous, not needed everything set in mk/spdk.common.mk
 LOCAL_SYS_LIBS = -L$(PORTALS_LIB_PREFIX) -lportals
