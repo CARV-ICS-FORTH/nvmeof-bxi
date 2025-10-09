@@ -552,7 +552,6 @@ struct ptl_context *ptl_cnxt_get(void)
 	}
 
 	ptl_context.object_type = PTL_CONTEXT;
-	// ptl_context.portals_idx_send_recv = PTL_PT_INDEX;
 	SPDK_PTL_DEBUG("Calling PtlInit()");
 	ret = PtlInit();
 	if (ret != PTL_OK) {
@@ -610,12 +609,34 @@ struct ptl_context *ptl_cnxt_get(void)
 
 	ptl_context.fake_ibv_cnxt.ops.poll_cq = ptl_cnxt_poll_cq;
 	ptl_context.fake_cq.context = &ptl_context.fake_ibv_cnxt;
-
+	SPDK_PTL_DEBUG("Initializing PTE allocation table...");
+	ptl_context.ptl_allocation_table_size = actual.max_pt_index;
+	ptl_context.pte_allocation_table = calloc(ptl_context.ptl_allocation_table_size,
+					   sizeof(*ptl_context.pte_allocation_table));
+	ptl_context.pte_allocation_table[PTL_CP_SERVER_PTE] = 1;
 	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context");
 	ptl_context.initialized = true;
 exit:
 	pthread_mutex_unlock(&cnxt_lock);
 	return &ptl_context;
+}
+
+int ptl_cnxt_allocate_pte(struct ptl_context *cnxt)
+{
+	if (cnxt->pte_allocation_table[PTL_PT_INDEX]) {
+		SPDK_PTL_FATAL("PTE: %d already taken current version does not support allocating more than one PTEs",
+			       PTL_PT_INDEX);
+	}
+	cnxt->pte_allocation_table[PTL_PT_INDEX] = 1;
+	return PTL_PT_INDEX;
+	// for (uint32_t i = 0; i < cnxt->ptl_allocation_table_size; i++) {
+	// 	if (cnxt->pte_allocation_table[i] == 1) {
+	// 		continue;
+	// 	}
+	// 	cnxt->pte_allocation_table[i] = 1;
+	// 	return i;
+	// }
+	// return -1;
 }
 
 struct ibv_context *ptl_cnxt_get_ibv_context(struct ptl_context *cnxt)

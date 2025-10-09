@@ -49,7 +49,13 @@ struct ptl_context {
 	struct ptl_pd *ptl_pd;
 	struct ibv_context fake_ibv_cnxt;
 	struct ibv_cq fake_cq;
-	struct spdk_rdma_provider_srq *srq;
+	/**
+	 * Keeps which PTEs have not been assigned to a shared receive queue
+	 * and their correspoding size. 0 free, 1 in use
+	**/
+	uint8_t *pte_allocation_table;
+	uint32_t ptl_allocation_table_size;
+	// struct spdk_rdma_provider_srq *srq;
 	int pid;
 	int nid;
 	bool initialized;
@@ -75,7 +81,9 @@ static inline int ptl_cnxt_get_pid(struct ptl_context *cnxt)
 }
 
 
-
-
+/**
+  * Allocates a free pte typically for use for a new srq
+**/
+int ptl_cnxt_allocate_pte(struct ptl_context *cnxt);
 #endif
 
