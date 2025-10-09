@@ -6,15 +6,12 @@ typedef enum {PTL_OPEN_CONNECTION = 0, PTL_OPEN_CONNECTION_REPLY, PTL_CLOSE_CONN
 
 struct ptl_conn_comm_pair_info {
 	/*Initiator of the communication info*/
-	int src_nid;
-	int src_pid;
-	/*PTE entry where initiator expects reply*/
-	int src_pte;
-	/*Target of the communication info*/
-	int dst_nid;
-	int dst_pid;
-	/*PTE entry of the target*/
-	int dst_pte;
+	struct src {
+		int nid;
+		int pid;
+		/*PTE entry where initiator's control plane server expects reply*/
+		int pte;
+	} src, dest;
 };
 
 struct ptl_conn_msg_header {
@@ -44,6 +41,8 @@ struct ptl_conn_open_reply {
 	/*Where I wait for recv events and staff*/
 	int cq_id;
 	int status;
+	/*PTE where target has assigned the queue (qpair->IO queue)*/
+	int target_dp_pte;
 	struct rdma_conn_param conn_param;
 };
 

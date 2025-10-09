@@ -88,8 +88,9 @@ spdk_rdma_provider_srq_create(struct spdk_rdma_provider_srq_init_attr *init_attr
 	struct spdk_portals_provider_srq *portals_srq;
 	struct spdk_rdma_provider_srq * fake_rdma_srq;
 
+	SPDK_PTL_DEBUG("SRQ: Creating a new Shared Receive Queue!");
 	ptl_context = ptl_cnxt_get_from_ibvpd(init_attr->pd);
-	SPDK_PTL_DEBUG("Ok got portals context from ibv_pd!");
+
 	portals_srq = calloc(1UL, sizeof(*portals_srq));
 	if (!portals_srq) {
 		SPDK_PTL_FATAL("Can't allocate memory for SRQ handle\n");
@@ -111,7 +112,7 @@ spdk_rdma_provider_srq_create(struct spdk_rdma_provider_srq_init_attr *init_attr
 	}
 
 	struct ptl_pd *ptl_pd = ptl_pd_get_from_ibv_pd(init_attr->pd);
-	struct ptl_srq * ptl_srq = ptl_create_srq(ptl_pd, &init_attr->srq_init_attr);
+	struct ptl_srq * ptl_srq = ptl_srq_create(ptl_pd, &init_attr->srq_init_attr);
 	fake_rdma_srq->srq = &ptl_srq->fake_srq;
 
 	// if (!rdma_srq->srq) {
@@ -204,18 +205,22 @@ spdk_rdma_provider_srq_flush_recv_wrs(struct spdk_rdma_provider_srq *rdma_srq,
 	ptl_handle_me_t me_handle;
 	struct ptl_context_op_meta *recv_meta;
 	int ret;
+	uint32_t num_of_bufs = 0;
 
 	if (spdk_unlikely(rdma_srq->recv_wrs.first == NULL)) {
 		return 0;
 	}
+
+
+	struct spdk_portals_provider_srq *portals_srq =
+		SPDK_CONTAINEROF(rdma_srq, struct spdk_portals_provider_srq, fake_srq);
+	SPDK_PTL_CHECK_SRQ(portals_srq);
+	nic = ptl_cnxt_get_ni_handle(portals_srq->ptl_context);
+
 	//Now it's time to append the entries in portals
 	for (struct ibv_recv_wr *wr = rdma_srq->recv_wrs.first; wr != NULL;
 	     wr = wr->next) {
-
-		struct spdk_portals_provider_srq *portals_srq =
-			SPDK_CONTAINEROF(rdma_srq, struct spdk_portals_provider_srq, fake_srq);
-		SPDK_PTL_CHECK_SRQ(portals_srq);
-		nic = ptl_cnxt_get_ni_handle(portals_srq->ptl_context);
+		++num_of_bufs;
 
 		if (wr->num_sge != PTL_IOVEC_SIZE) {
 			SPDK_PTL_FATAL("IOVECTOR too small size is: %d needs %d", PTL_IOVEC_SIZE, wr->num_sge);
@@ -251,18 +256,23 @@ spdk_rdma_provider_srq_flush_recv_wrs(struct spdk_rdma_provider_srq *rdma_srq,
 		// Append the memory entry
 		ret = PtlMEAppend(
 			      nic,                    // Network interface handle
-			      ptl_cnxt_get_portal_index(portals_srq->ptl_context), //Portals table index
+			      ptl_cnxt_get_portal_index(portals_srq->ptl_context), //Portals Table Entry
 			      &me,                    // List entry
 			      PTL_PRIORITY_LIST,      // List type (PRIORITY or OVERFLOW)
 			      recv_meta,               // User pointer, stores recv op meta (wr_id)
 			      &me_handle              // Returned handle
 		      );
 		if (PTL_OK != ret) {
-			SPDK_PTL_FATAL("Failed to append memory entry start addr: %p length %lu code is: %d", me.start,
-				       me.length, ret);
+			SPDK_PTL_FATAL(
+				"Failed to append memory entry start addr: %p "
+				"length %lu code is: %d num_of_bufs: %u until "
+				"crash of portals srq: %p",
+				me.start, me.length, ret, num_of_bufs, portals_srq);
 		}
 
 	}
+	SPDK_PTL_DEBUG("Number of receive buffers posted in portals_srq: %p are: %u", portals_srq,
+		       num_of_bufs);
 	// rc = ibv_post_srq_recv(rdma_srq->srq, rdma_srq->recv_wrs.first, bad_wr);
 	rdma_srq->recv_wrs.first = NULL;
 	rdma_srq->stats->doorbell_updates++;
@@ -624,11 +634,11 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 
 	local_offset = wr->sg_list[0].addr - (uint64_t)ptl_pd_mem_desc->local_w_mem_desc.start;
 	SPDK_PTL_DEBUG("NVMe: Performing an RDMA read from node nid: %d pid: %d portal index: %d local offset: %lu match_bits: %lu is it signaled?: %s qp_num: %d",
-		       destination.phys.nid, destination.phys.pid, PTL_PT_INDEX, local_offset, match_bits,
+		       destination.phys.nid, destination.phys.pid, ptl_qp->remote_pte, local_offset, match_bits,
 		       rdma_read_meta ? "YES" : "NO", ptl_qp->ptl_cm_id->ptl_qp_num);
 	/*XXX TODO XXX, set match bits correct here!XXX TODO XXX*/
 	rc = PtlGet(ptl_pd_mem_desc->local_w_mem_handle, local_offset, wr->sg_list[0].length, destination,
-		    PTL_PT_INDEX, match_bits, wr->wr.rdma.remote_addr, rdma_read_meta);
+		    ptl_qp->remote_pte, match_bits, wr->wr.rdma.remote_addr, rdma_read_meta);
 	if (PTL_OK != rc) {
 		SPDK_PTL_FATAL("Remote RDMA read failed Sorry!");
 	}
@@ -666,7 +676,7 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 			       "nid: %d pid: %d portal index: %d local offset: "
 			       "%lu length in B: %u remote_addr: %lu is it signaled?: %s",
 			       i, destination.phys.nid, destination.phys.pid,
-			       PTL_PT_INDEX, local_offset,
+			       ptl_qp->remote_pte, local_offset,
 			       wr->sg_list[i].length, remote_addr, rdma_write_meta ? "YES" : "NO");
 
 
@@ -675,7 +685,7 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 			    wr->sg_list[i].length,
 			    PTL_ACK_REQ,
 			    destination,// target process
-			    PTL_PT_INDEX,// portal table index
+			    ptl_qp->remote_pte,//portal table index
 			    match_bits,// match bits
 			    remote_addr,
 			    rdma_write_meta,
@@ -771,7 +781,7 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				wr->sg_list[i].length == 16 ? "NVMe-cpl-send"
 				: "NVMe-cmd-send",
 				target.phys.nid, target.phys.pid,
-				ptl_qp->remote_pt_index,
+				ptl_qp->remote_pte,
 				ptl_uuid_get_initiator_qp_num(match_bits),
 				ptl_uuid_get_target_qp_num(match_bits),
 				local_offset, send_meta ? "YES" : "NO");
@@ -781,7 +791,7 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				    wr->sg_list[i].length,//length
 				    PTL_ACK_REQ,
 				    target,// target process
-				    ptl_qp->remote_pt_index,//portal table index
+				    ptl_qp->remote_pte,//portal table index
 				    ptl_uuid_set_match_list(match_bits, ptl_qp->ptl_cm_id->recv_match_bits),//match bits
 				    0,// remote offset, don't care let target decide
 				    send_meta,
