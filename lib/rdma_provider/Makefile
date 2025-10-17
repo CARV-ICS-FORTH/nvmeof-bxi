@@ -25,6 +25,7 @@ CORE_SRCS += ptl_pd.c
 CORE_SRCS += ptl_qp.c
 CORE_SRCS += ptl_srq.c
 CORE_SRCS += ptl_uuid.c
+CORE_SRCS += ptl_mem_desc.c
 CORE_SRCS += ptl_print_nvme_commands.c
 CORE_SO = lib$(CORE_LIBNAME).so
 
