@@ -107,21 +107,13 @@ static struct ptl_context_op_meta *ptl_cnxt_process_put(ptl_event_t event, struc
 	}
 
 
-	if (event.start != recv_meta->recv_op.io_vector) {
+	if (event.start != recv_meta->recv_op.io_vector[0].iov_base) {
 		SPDK_PTL_FATAL(
 			"Corrupted receive event.start: %p event.legnth: %lu "
 			"iovector[0] = %p iovector size[0] = %lu pte: %d",
 			event.start, event.rlength, recv_meta->recv_op.io_vector[0].iov_base,
 			recv_meta->recv_op.io_vector[0].iov_len, event.pt_index);
 	}
-
-//  if (event.start != recv_op->io_vector[0].iov_base) {
-	// 	SPDK_PTL_FATAL(
-	// 		"Corrupted receive event.start: %p event.legnth: %lu "
-	// 		"iovector[0] = %p iovector size[0] = %lu pte: %d",
-	// 		event.start, event.rlength, recv_op->io_vector[0].iov_base,
-	// 		recv_op->io_vector[0].iov_len, event.pt_index);
-	// }
 
 	recv_meta->recv_op.initiator_qp_num =  ptl_uuid_get_initiator_qp_num(event.match_bits);
 	recv_meta->recv_op.target_qp_num = ptl_uuid_get_target_qp_num(event.match_bits);
@@ -136,8 +128,7 @@ static struct ptl_context_op_meta *ptl_cnxt_process_put(ptl_event_t event, struc
 			       recv_meta->recv_op.initiator_qp_num, recv_meta->recv_op.target_qp_num);
 	}
 	recv_meta->recv_op.bytes_received = event.rlength;
-	//debug
-	recv_meta->recv_op.reveive_done = true;
+	recv_meta->recv_op.receive_done = true;
 
 	return NULL;
 }
@@ -202,7 +193,7 @@ static struct ptl_context_op_meta *ptl_cnxt_process_reply(ptl_event_t event, str
 		return NULL;
 	}
 
-	memset(wc, 0xFF, sizeof(*wc));
+	// memset(wc, 0xFF, sizeof(*wc));
 
 	if (event.ni_fail_type != PTL_NI_OK) {
 		SPDK_PTL_FATAL("Operation failed with code: %d", event.ni_fail_type);
@@ -213,6 +204,11 @@ static struct ptl_context_op_meta *ptl_cnxt_process_reply(ptl_event_t event, str
 	if (rdma_read_meta->obj_type != PTL_SEND_OP) {
 		SPDK_PTL_FATAL("Corrupted object");
 	}
+
+	if (++rdma_read_meta->send_op.parts_acked < rdma_read_meta->send_op.total_parts) {
+		return NULL;
+	}
+
 	wc->status =
 		event.ni_fail_type == PTL_NI_OK ? IBV_WC_SUCCESS : IBV_WC_LOC_PROT_ERR;
 	wc->opcode = IBV_WC_RDMA_READ;
@@ -304,8 +300,11 @@ static struct ptl_context_op_meta *ptl_cnxt_process_auto_unlink(ptl_event_t even
 		SPDK_PTL_FATAL("Corrupted recv_op");
 	}
 
-	if (false == recv_meta->recv_op.reveive_done) {
-		SPDK_PTL_FATAL("AUTO_UNLINK without a prior receive!");
+	if (false == recv_meta->recv_op.receive_done) {
+		SPDK_PTL_FATAL("AUTO_UNLINK without a prior receive for "
+			       "{buffer:%lu, len: %lu cq id: %d} event fail type: %d",
+			       (size_t)recv_meta->recv_op.io_vector[0].iov_base,
+			       recv_meta->recv_op.io_vector[0].iov_len, ptl_cq->cq_id, event.ni_fail_type);
 	}
 
 	if (event.ni_fail_type != PTL_NI_OK) {

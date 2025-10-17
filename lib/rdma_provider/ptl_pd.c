@@ -1,9 +1,10 @@
 #include "ptl_pd.h"
 #include "ptl_log.h"
+#include "ptl_mem_desc.h"
 #include "ptl_object_types.h"
 
 struct ptl_pd_mem_desc_map {
-	struct ptl_pd_mem_desc **entries;
+	struct ptl_mem_desc **entries;
 	uint32_t num_entries;
 	uint32_t max_entries;
 };
@@ -12,12 +13,12 @@ struct ptl_pd_mem_desc_map *ptl_pd_map_create(uint32_t num_entries)
 {
 	SPDK_PTL_DEBUG("Creating mem_desc_map");
 	struct ptl_pd_mem_desc_map *map = calloc(1UL, sizeof(struct ptl_pd_mem_desc_map));
-	map->entries = calloc(num_entries, sizeof(struct ptl_pd_mem_desc *));
+	map->entries = calloc(num_entries, sizeof(struct ptl_mem_desc *));
 	map->max_entries = num_entries;
 	return map;
 }
 
-static bool ptl_pd_map_add(struct ptl_pd_mem_desc_map *map, struct ptl_pd_mem_desc *mem_desc)
+static bool ptl_pd_map_add(struct ptl_pd_mem_desc_map *map, struct ptl_mem_desc *mem_desc)
 {
 	if (NULL == map) {
 		SPDK_PTL_FATAL("Mem desc map is NULL");
@@ -26,12 +27,11 @@ static bool ptl_pd_map_add(struct ptl_pd_mem_desc_map *map, struct ptl_pd_mem_de
 		SPDK_PTL_FATAL("Sorry no room to add another portals memory descriptor");
 		return false;
 	}
-	mem_desc->is_valid = true;
 	map->entries[map->num_entries++] = mem_desc;
 	return true;
 }
 
-static struct ptl_pd_mem_desc *ptl_pd_map_get(struct ptl_pd_mem_desc_map *map, uint64_t address,
+static struct ptl_mem_desc *ptl_pd_map_get(struct ptl_pd_mem_desc_map *map, uint64_t address,
 		size_t length,
 		bool is_remote_operation)
 {
@@ -43,9 +43,9 @@ static struct ptl_pd_mem_desc *ptl_pd_map_get(struct ptl_pd_mem_desc_map *map, u
 	}
 
 	for (i = 0; i < map->num_entries; i++) {
-		if ((uint64_t)map->entries[i]->local_w_mem_desc.start <= address &&
-		    (uint64_t)end_address <= (uint64_t)map->entries[i]->local_w_mem_desc.start +
-		    map->entries[i]->local_w_mem_desc.length) {
+		if ((uint64_t)map->entries[i]->local.local_w_mem_desc.start <= address &&
+		    (uint64_t)end_address <= (uint64_t)map->entries[i]->local.local_w_mem_desc.start +
+		    map->entries[i]->local.local_w_mem_desc.length) {
 			SPDK_PTL_DEBUG("Found *LOCAL* mem desc for portals!");
 			return map->entries[i];
 		}
@@ -54,9 +54,9 @@ static struct ptl_pd_mem_desc *ptl_pd_map_get(struct ptl_pd_mem_desc_map *map, u
 	return NULL;
 remote:
 	for (i = 0; i < map->num_entries; i++) {
-		if ((uint64_t)map->entries[i]->remote_wr_me.start <= address &&
-		    (uint64_t)end_address <= (uint64_t)map->entries[i]->remote_wr_me.start +
-		    map->entries[i]->local_w_mem_desc.length) {
+		if ((uint64_t)map->entries[i]->remote.remote_wr_me.start <= address &&
+		    (uint64_t)end_address <= (uint64_t)map->entries[i]->remote.remote_wr_me.start +
+		    map->entries[i]->local.local_w_mem_desc.length) {
 			SPDK_PTL_DEBUG("Found *REMOTE* mem desc for portals!");
 			return map->entries[i];
 		}

@@ -8,15 +8,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 struct spdk_rdma_utils_mem_map;
-
-struct ptl_pd_mem_desc;
+struct ptl_mem_desc;
 struct ptl_pd;
 struct ptl_pd_mem_desc_map;
 struct ptl_pd_mem_desc_map_ops;
-typedef struct ptl_pd_mem_desc_map *(*ptl_pd_mem_desc_map_create)(uint32_t num_entries);
+typedef struct ptl_pd_mem_desc_map *(*ptl_pd_mem_desc_map_create)(uint32_t num_entries,
+		const char *name);
 typedef bool (*ptl_pd_mem_desc_map_add)(struct ptl_pd_mem_desc_map *map,
-					struct ptl_pd_mem_desc *mem_desc);
-typedef struct ptl_pd_mem_desc *(*ptl_pd_mem_desc_map_get)(struct ptl_pd_mem_desc_map *map,
+					struct ptl_mem_desc *mem_desc);
+typedef struct ptl_mem_desc *(*ptl_pd_mem_desc_map_get)(struct ptl_pd_mem_desc_map *map,
 		uint64_t address, size_t length,
 		bool is_remote_operation);
 typedef bool (*ptl_mem_desc_map_destroy)(struct ptl_pd_mem_desc_map *mem_desc_map);
@@ -26,18 +26,6 @@ struct ptl_pd_mem_desc_map_ops {
 	ptl_pd_mem_desc_map_add add;
 	ptl_pd_mem_desc_map_get get;
 	ptl_mem_desc_map_destroy destroy;
-};
-
-struct ptl_pd_mem_desc {
-	ptl_md_t local_w_mem_desc;
-	ptl_me_t remote_wr_me;
-	ptl_handle_md_t local_w_mem_handle;
-	ptl_handle_md_t remote_rw_mem_handle;
-	ptl_handle_ct_t remote_rw_ct_handle;
-	bool remote_read;
-	bool remote_write;
-	bool local_write;
-	bool is_valid;
 };
 
 
@@ -55,6 +43,10 @@ struct ptl_pd {
 	**/
 	struct ptl_eq *ptl_eq;
 	struct spdk_rdma_utils_mem_map *mem_map;
+	/**
+	* This is where we keep for accounting purposes the
+	* coarse grain memory allocations of SPDK
+	*/
 	struct ptl_pd_mem_desc_map *mem_desc_map;
 	struct ptl_pd_mem_desc_map_ops ops;
 	bool in_use;

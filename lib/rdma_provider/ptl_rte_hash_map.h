@@ -7,13 +7,13 @@
 struct ptl_pd_mem_desc;
 struct ptl_pd_mem_desc_map;
 
-struct ptl_pd_mem_desc_map *ptl_rte_map_create(uint32_t num_entries);
+struct ptl_pd_mem_desc_map *ptl_rte_map_create(uint32_t num_entries, const char *name);
 
-bool ptl_rte_map_add(struct ptl_pd_mem_desc_map *map, struct ptl_pd_mem_desc *mem_desc);
+bool ptl_rte_map_add(struct ptl_pd_mem_desc_map *map, struct ptl_mem_desc *mem_desc);
 
-struct ptl_pd_mem_desc *ptl_rte_map_get(struct ptl_pd_mem_desc_map *map, uint64_t address,
-					size_t length,
-					bool is_remote_operation);
+struct ptl_mem_desc *ptl_rte_map_get(struct ptl_pd_mem_desc_map *map, uint64_t address,
+				     size_t length,
+				     bool is_remote_operation);
 
 bool ptl_rte_map_destroy(struct ptl_pd_mem_desc_map *mem_desc_map);
 #endif
