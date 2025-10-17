@@ -10,5 +10,7 @@ typedef enum ptl_obj_type {
 	PTL_CQ,
 	PTL_CM_ID,
 	PTL_SRQ,
+	PTL_MEM_DESC_LOCAL,
+	PTL_MEM_DESC_REMOTE
 } ptl_obj_type_e;
 #endif
