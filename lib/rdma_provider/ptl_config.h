@@ -46,6 +46,17 @@
  */
 #define PTL_ENABLE_IOVEC_RECEIVE 0  /* set to 0 to disable iovec-based receives */
 
+
+/**
+ * PTL_ENABLE_BIND_PER_OP
+ *
+ * Enables an experimental feature where the buffer is bound on the fly
+ * prior to any PtlGet or PtlPut operation. This feature may be removed
+ * in future commits if it proves to add a lot of overhead.
+ */
+#define PTL_ENABLE_BIND_PER_OP 0
+
+
 /**
  * Portal index number where clients use during rdma_connect to notify the
  * targer a)about their presence and b) enable the target to build a lookup

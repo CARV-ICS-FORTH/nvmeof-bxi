@@ -1,9 +1,10 @@
 #ifndef PTL_CONTEXT_H
 #define PTL_CONTEXT_H
 #include "../../include/spdk/nvme_spec.h"
-#include "portals4.h"
+#include "ptl_config.h"
 #include "ptl_object_types.h"
 #include <infiniband/verbs.h>
+#include <portals4.h>
 #include <stdbool.h>
 #define PTL_CONTEXT_SERVER_PID 0
 #define PTL_IOVEC_SIZE 2
@@ -36,6 +37,12 @@ struct ptl_context_op_meta {
 	ptl_obj_type_e obj_type;
 	uint64_t wr_id;
 	int cq_id;
+
+#if PTL_ENABLE_BIND_PER_OP
+	ptl_md_t md_desc;
+	ptl_handle_md_t md_handle;
+#endif
+
 	union {
 		struct ptl_context_send_op send_op;
 		struct ptl_context_recv_op recv_op;
