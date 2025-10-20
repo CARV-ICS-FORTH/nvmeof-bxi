@@ -619,20 +619,13 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 	ptl_process_t destination = {.phys.nid = ptl_qp->remote_nid, .phys.pid = ptl_qp->remote_pid};
 	size_t local_offset;
 	int rc;
-	struct ptl_context_op_meta *rdma_read_meta;
+	struct ptl_context_op_meta *rdma_read_meta = NULL;
+	struct ptl_mem_desc * ptl_mem_desc;
+	ptl_addr_t md_start;
+	ptl_handle_md_t local_md_handle;
 
 	// SPDK_PTL_CHECK_SGE_LENGTH(wr);
 
-	struct ptl_mem_desc * ptl_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map,
-					     wr->sg_list[0].addr,
-					     wr->sg_list[0].length, false);
-
-	if (NULL == ptl_mem_desc) {
-		SPDK_PTL_FATAL("Failed to find descriptor");
-	}
-
-
-	rdma_read_meta = NULL;
 	if (wr->send_flags & IBV_SEND_SIGNALED) {
 		rdma_read_meta = calloc(1UL, sizeof(*rdma_read_meta));
 		rdma_read_meta->obj_type = PTL_SEND_OP;
@@ -640,15 +633,24 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 		rdma_read_meta->send_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
 		rdma_read_meta->send_op.total_parts = wr->num_sge;
 	}
+
 	for (int i = 0; i < wr->num_sge; i++) {
-		local_offset = wr->sg_list[i].addr - (uint64_t)ptl_mem_desc->local.local_w_mem_desc.start;
+
+		ptl_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr, wr->sg_list[i].length,
+					       false);
+		if (NULL == ptl_mem_desc) {
+			SPDK_PTL_FATAL("Failed to find descriptor");
+		}
+		md_start = ptl_mem_desc->local.local_w_mem_desc.start;
+		local_md_handle = ptl_mem_desc->local.local_w_mem_handle;
+
+		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 		SPDK_PTL_DEBUG("NVMe: Performing an RDMA read from node nid: %d pid: %d portal index: %d local offset: %lu match_bits: %lu is it signaled?: %s qp_num: %d",
 			       destination.phys.nid, destination.phys.pid, ptl_qp->remote_pte, local_offset, match_bits,
 			       rdma_read_meta ? "YES" : "NO", ptl_qp->ptl_cm_id->ptl_qp_num);
 		/*XXX TODO XXX, set match bits correct here!XXX TODO XXX*/
-		rc = PtlGet(ptl_mem_desc->local.local_w_mem_handle, local_offset, wr->sg_list[i].length,
-			    destination,
-			    ptl_qp->remote_pte, match_bits, wr->wr.rdma.remote_addr, rdma_read_meta);
+		rc = PtlGet(local_md_handle, local_offset, wr->sg_list[i].length, destination, ptl_qp->remote_pte,
+			    match_bits, wr->wr.rdma.remote_addr, rdma_read_meta);
 		if (PTL_OK != rc) {
 			SPDK_PTL_FATAL("Remote RDMA read failed Sorry!");
 		}
@@ -663,6 +665,8 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 	size_t local_offset;
 	ptl_process_t destination = {.phys.nid = ptl_qp->remote_nid, .phys.pid = ptl_qp->remote_pid};
 	struct ptl_context_op_meta *rdma_write_meta;
+	ptl_addr_t md_start;
+	ptl_handle_md_t md_handle;
 	int rc;
 	uint64_t remote_addr =  wr->wr.rdma.remote_addr;
 
@@ -673,7 +677,10 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 		if (NULL == ptl_mem_desc) {
 			SPDK_PTL_FATAL("Failed to find descriptor");
 		}
-		local_offset = wr->sg_list[i].addr - (uint64_t)ptl_mem_desc->local.local_w_mem_desc.start;
+		md_start = ptl_mem_desc->local.local_w_mem_desc.start;
+		md_handle = ptl_mem_desc->local.local_w_mem_handle;
+
+		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 
 		rdma_write_meta = NULL;
 		if (wr->send_flags & IBV_SEND_SIGNALED && i == (wr->num_sge - 1)) {
@@ -691,7 +698,7 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 			       wr->sg_list[i].length, remote_addr, rdma_write_meta ? "YES" : "NO");
 
 
-		rc = PtlPut(ptl_mem_desc->local.local_w_mem_handle,
+		rc = PtlPut(md_handle,
 			    local_offset,// local offset
 			    wr->sg_list[i].length,
 			    PTL_ACK_REQ,
