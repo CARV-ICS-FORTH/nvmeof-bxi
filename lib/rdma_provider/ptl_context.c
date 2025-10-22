@@ -52,6 +52,10 @@ static uint64_t ptl_cnxt_calculate_crc64(const void *data, size_t length)
 	return crc ^ 0xFFFFFFFFFFFFFFFFULL;
 }
 
+static inline void ptl_cnxt_destroy_op_meta(struct ptl_context_op_meta *op_meta)
+{
+	free(op_meta);
+}
 
 static void ptl_cnxt_keep_event(struct ptl_cq *ptl_cq, struct ibv_wc *wc,
 				struct ptl_context_op_meta *op_meta)
@@ -214,7 +218,7 @@ static struct ptl_context_op_meta *ptl_cnxt_process_reply(ptl_event_t event, str
 	}
 
 	if (false == rdma_read_meta->signal_app) {
-		free(rdma_read_meta);
+		ptl_cnxt_destroy_op_meta(rdma_read_meta);
 		return NULL;
 	}
 
@@ -298,7 +302,7 @@ static struct ptl_context_op_meta *ptl_cnxt_process_ack(ptl_event_t event, struc
 
 	if (false == send_meta->signal_app) {
 		SPDK_PTL_DEBUG("App does not want to be signaled freeing the buffer");
-		free(send_meta);
+		ptl_cnxt_destroy_op_meta(send_meta);
 		return NULL;
 	}
 
@@ -547,7 +551,7 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 			       ptl_late_wc->wc.wr_id);
 		wc[events_processed++] = ptl_late_wc->wc;
 		SPDK_PTL_DEBUG("Late event: %d", ptl_print_event(ptl_late_wc->op_meta, true));
-		free(ptl_late_wc->op_meta);
+		ptl_cnxt_destroy_op_meta(ptl_late_wc->op_meta);
 		ptl_late_wc->op_meta = NULL;
 		free(ptl_late_wc);
 		ptl_late_wc = NULL;
@@ -570,7 +574,7 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 			}
 
 			SPDK_PTL_DEBUG("PtlCQ Delivered on-time event: %d", ptl_print_event(op_meta, false));
-			free(op_meta);
+			ptl_cnxt_destroy_op_meta(op_meta);
 			op_meta = NULL;
 			++events_processed;
 
