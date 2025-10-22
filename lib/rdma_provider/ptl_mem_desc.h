@@ -1,6 +1,7 @@
 #ifndef PTL_MEM_DESC_H
 #define PTL_MEM_DESC_H
 #include "ptl_object_types.h"
+#include <infiniband/verbs.h>
 #include <portals4.h>
 #include <stdbool.h>
 
@@ -16,6 +17,7 @@
 struct ptl_mem_desc_local {
 	ptl_md_t local_w_mem_desc;
 	ptl_handle_md_t local_w_mem_handle;
+	struct ibv_mr fake_mr;
 	int associated_pte;
 };
 
@@ -23,7 +25,7 @@ struct ptl_mem_desc_remote {
 	ptl_me_t remote_wr_me;
 	ptl_handle_md_t remote_rw_mem_handle;
 	ptl_handle_ct_t remote_rw_ct_handle;
-
+	struct ibv_mr fake_mr;
 };
 
 

@@ -48,13 +48,11 @@ struct ptl_context_rdma_read_op {
 struct ptl_context_op_meta {
 	ptl_obj_type_e obj_type;
 	uint64_t wr_id;
-	int cq_id;
-
 #if PTL_ENABLE_BIND_PER_OP
-	ptl_md_t md_desc;
-	ptl_handle_md_t md_handle;
+	ptl_md_t md_desc[PTL_MAX_SG_LIST];
+	ptl_handle_md_t md_handle[PTL_MAX_SG_LIST];
 #endif
-
+	int cq_id;
 	union {
 		struct ptl_context_send_op send_op;
 		struct ptl_context_recv_op recv_op;

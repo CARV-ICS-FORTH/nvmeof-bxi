@@ -50,12 +50,24 @@
 /**
  * PTL_ENABLE_BIND_PER_OP
  *
- * Enables an experimental feature where the buffer is bound on the fly
- * prior to any PtlGet or PtlPut operation. This feature may be removed
- * in future commits if it proves to add a lot of overhead.
+ * EXPERIMENTAL: Enables on-the-fly buffer binding immediately before each
+ * PtlGet or PtlPut operation.
+ *
+ * Limitations:
+ * - Not supported on BXIv2: frequent small descriptor postings can exhaust
+ *   resources and lead to PTL_NO_SPACE errors.
+ *
+ * Status and roadmap:
+ * - The code path is retained for potential future integration with the
+ *   BXIv3 PtlPutOnce feature, which is expected to address the descriptor
+ *   pressure issues observed on BXIv2.
+ *
+ * This feature may be removed or altered in future commits if the overhead
+ * or platform limitations prove prohibitive.
  */
 #define PTL_ENABLE_BIND_PER_OP 0
 
+#define PTL_MAX_SG_LIST 16
 
 /**
  * Portal index number where clients use during rdma_connect to notify the

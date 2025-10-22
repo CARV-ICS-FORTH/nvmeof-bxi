@@ -67,9 +67,7 @@ struct ptl_mem_desc *ptl_mem_desc_create_local(void *vaddr, size_t size, bool bi
 	mem_desc->local.local_w_mem_desc.start = vaddr;
 	mem_desc->local.local_w_mem_desc.options = 0;
 	mem_desc->local.local_w_mem_desc.length = size;
-	if (false == bind) {
-		return mem_desc;
-	}
+
 	mem_desc->local.local_w_mem_desc.eq_handle = event_queue;
 	/*I do not need counting events for now*/
 	// rc = PtlCTAlloc(ptl_cnxt_get_ni_handle(ptl_context), &mem_desc->local.local_w_mem_desc.ct_handle);
@@ -77,13 +75,15 @@ struct ptl_mem_desc *ptl_mem_desc_create_local(void *vaddr, size_t size, bool bi
 	// 	SPDK_PTL_FATAL("Failed to allocate a counting event");
 	// }
 
-	ret = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_context), &mem_desc->local.local_w_mem_desc,
-			&mem_desc->local.local_w_mem_handle);
-	if (PTL_OK != ret) {
-		SPDK_PTL_FATAL("Failed to register virtual addr %p of size: %lu reason: %d",
-			       vaddr, size, ret);
+	if (bind) {
+		ret = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_context), &mem_desc->local.local_w_mem_desc,
+				&mem_desc->local.local_w_mem_handle);
+		if (PTL_OK != ret) {
+			SPDK_PTL_FATAL("Failed to register virtual addr %p of size: %lu reason: %d",
+				       vaddr, size, ret);
+		}
 	}
-	mem_desc->is_bind = true;
+	mem_desc->is_bind = bind;
 	return mem_desc;
 }
 
@@ -95,10 +95,11 @@ void ptl_mem_desc_clean(struct ptl_mem_desc *mem_desc)
 	if (mem_desc->obj_type == PTL_MEM_DESC_LOCAL) {
 		SPDK_PTL_DEBUG("PTL_MEM_DESC: Cleaning up *LOCAL* memory descriptor from ptl_pd_mem_desc %p",
 			       mem_desc);
-
-		rc = PtlMDRelease(mem_desc->local.local_w_mem_handle);
-		if (rc != PTL_OK) {
-			SPDK_PTL_FATAL("Failed with code: %d", rc);
+		if (mem_desc->is_bind) {
+			rc = PtlMDRelease(mem_desc->local.local_w_mem_handle);
+			if (rc != PTL_OK) {
+				SPDK_PTL_FATAL("Failed with code: %d", rc);
+			}
 		}
 	} else {
 

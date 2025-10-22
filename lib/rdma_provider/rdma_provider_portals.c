@@ -35,7 +35,7 @@
         SPDK_PTL_FATAL("Corrupted PORTALS SRQ"); \
     }
 
-#define SPDK_PTL_CHECK_SGE_LENGTH(wr) \
+#define SPDK_PTL_IS_SGE_LENGTH_ONE(wr) \
 	do { \
 		if ((wr)->num_sge != 1) { \
 			for (int i = 0; i < (wr)->num_sge; i++) { \
@@ -48,6 +48,18 @@
 		} \
 	} while (0)
 
+#define SPDK_PTL_CHECK_SGE_LENGTH(wr) \
+	do { \
+		if ((wr)->num_sge > PTL_MAX_SG_LIST) { \
+			for (int i = 0; i < (wr)->num_sge; i++) { \
+				SPDK_PTL_DEBUG("Opcode: wr[%d] = %d, addr: %lu length is: %d", \
+					       i, (wr)->opcode, (wr)->sg_list[i].addr, \
+					       (wr)->sg_list[i].length); \
+			} \
+			SPDK_PTL_FATAL("Num sges are %d larget than MAX: %d: %d", wr->num_sge, PTL_MAX_SG_LIST,\
+				       (wr)->num_sge); \
+		} \
+	} while (0)
 
 // static uint64_t rdma_ptl_calculate_crc64(const void *data, size_t length)
 // {
@@ -632,10 +644,12 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 	size_t local_offset;
 	int rc;
 	struct ptl_context_op_meta *rdma_read_meta = NULL;
-	struct ptl_mem_desc * ptl_mem_desc;
+
 	ptl_addr_t md_start;
-	ptl_handle_md_t local_md_handle;
+	ptl_handle_md_t md_handle;
 	uint64_t remote_addr;
+
+	SPDK_PTL_CHECK_SGE_LENGTH(wr);
 
 	rdma_read_meta = calloc(1UL, sizeof(*rdma_read_meta));
 	rdma_read_meta->obj_type = PTL_RDMA_READ_OP;
@@ -644,22 +658,37 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 	rdma_read_meta->rdma_read_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
 	rdma_read_meta->rdma_read_op.total_parts = wr->num_sge;
 	remote_addr = wr->wr.rdma.remote_addr;
-	for (int i = 0; i < wr->num_sge; i++) {
 
-		ptl_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr, wr->sg_list[i].length,
-					       false);
+	for (int i = 0; i < wr->num_sge; i++) {
+#if PTL_ENABLE_BIND_PER_OP
+		rdma_read_meta->md_desc[i].start = (ptl_addr_t)wr->sg_list[i].addr;
+		rdma_read_meta->md_desc[i].options = 0;
+		rdma_read_meta->md_desc[i].length = wr->sg_list[i].length;
+		rdma_read_meta->md_desc[i].eq_handle = ptl_cq_get_static_event_queue();
+		int rc = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), &rdma_read_meta->md_desc[i],
+				   &rdma_read_meta->md_handle[i]);
+		if (PTL_OK != rc) {
+			SPDK_PTL_FATAL("Failed to registed src buffer with code: %d", rc);
+		}
+		md_start = rdma_read_meta->md_desc[i].start;
+		md_handle = rdma_read_meta->md_handle[i];
+#else
+		struct ptl_mem_desc * ptl_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr,
+						     wr->sg_list[i].length,
+						     false);
 		if (NULL == ptl_mem_desc) {
 			SPDK_PTL_FATAL("Failed to find descriptor");
 		}
 		md_start = ptl_mem_desc->local.local_w_mem_desc.start;
-		local_md_handle = ptl_mem_desc->local.local_w_mem_handle;
+		md_handle = ptl_mem_desc->local.local_w_mem_handle;
+#endif
 
 		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 		SPDK_PTL_DEBUG("NVMe: Performing an RDMA read from node nid: %d pid: %d portal index: %d local offset: %lu match_bits: %lu is it signaled?: %s qp_num: %d",
 			       destination.phys.nid, destination.phys.pid, ptl_qp->remote_pte, local_offset, match_bits,
 			       rdma_read_meta ? "YES" : "NO", ptl_qp->ptl_cm_id->ptl_qp_num);
 		/*XXX TODO XXX, set match bits correct here!XXX TODO XXX*/
-		rc = PtlGet(local_md_handle, local_offset, wr->sg_list[i].length, destination, ptl_qp->remote_pte,
+		rc = PtlGet(md_handle, local_offset, wr->sg_list[i].length, destination, ptl_qp->remote_pte,
 			    match_bits, remote_addr, rdma_read_meta);
 		if (PTL_OK != rc) {
 			SPDK_PTL_FATAL("Remote RDMA read failed Sorry!");
@@ -692,8 +721,11 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 	struct ptl_context_op_meta *rdma_write_meta;
 	ptl_addr_t md_start;
 	ptl_handle_md_t md_handle;
-	int rc;
 	uint64_t remote_addr =  wr->wr.rdma.remote_addr;
+	int rc;
+
+	SPDK_PTL_CHECK_SGE_LENGTH(wr);
+
 	rdma_write_meta = calloc(1UL, sizeof(*rdma_write_meta));
 	rdma_write_meta->obj_type = PTL_RDMA_WRITE_OP;
 	rdma_write_meta->wr_id = wr->wr_id;
@@ -703,6 +735,19 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 	rdma_write_meta->rdma_write_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
 
 	for (int i = 0; i < wr->num_sge; i++) {
+#if PTL_ENABLE_BIND_PER_OP
+		rdma_write_meta->md_desc[i].start = (ptl_addr_t)wr->sg_list[i].addr;
+		rdma_write_meta->md_desc[i].options = 0;
+		rdma_write_meta->md_desc[i].length = wr->sg_list[i].length;
+		rdma_write_meta->md_desc[i].eq_handle = ptl_cq_get_static_event_queue();
+		rc = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), &rdma_write_meta->md_desc[i],
+			       &rdma_write_meta->md_handle[i]);
+		if (PTL_OK != rc) {
+			SPDK_PTL_FATAL("Failed to registed src buffer with code: %d", rc);
+		}
+		md_start = rdma_write_meta->md_desc[i].start;
+		md_handle = rdma_write_meta->md_handle[i];
+#else
 		ptl_mem_desc =
 			ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr,
 					wr->sg_list[i].length, false);
@@ -711,6 +756,7 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 		}
 		md_start = ptl_mem_desc->local.local_w_mem_desc.start;
 		md_handle = ptl_mem_desc->local.local_w_mem_handle;
+#endif
 
 		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 
@@ -752,10 +798,14 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 	uint64_t match_bits;
 	struct ptl_qp *ptl_qp = ptl_qp_get_from_ibv_qp(spdk_rdma_qp->qp);
 	struct ptl_pd *ptl_pd = ptl_qp_get_pd(ptl_qp);
-	struct ptl_mem_desc * ptl_mem_desc;
 	ptl_process_t target = {.phys.nid = ptl_qp->remote_nid, .phys.pid = ptl_qp->remote_pid};
+	ptl_addr_t md_start;
+	ptl_handle_md_t md_handle;
 	struct ptl_context_op_meta *send_meta;
 	uint64_t local_offset;
+#if !PTL_ENABLE_BIND_PER_OP
+	struct ptl_mem_desc * ptl_mem_desc;
+#endif
 
 
 	if (spdk_unlikely(NULL == spdk_rdma_qp->send_wrs.first)) {
@@ -780,33 +830,48 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 			continue;
 		}
 
-		SPDK_PTL_CHECK_SGE_LENGTH(wr);
+		SPDK_PTL_IS_SGE_LENGTH_ONE(wr);
+
+		send_meta = calloc(1UL, sizeof(*send_meta));
+		send_meta->obj_type = PTL_SEND_OP;
+		send_meta->wr_id = wr->wr_id;
+		send_meta->send_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
+		send_meta->cq_id = ptl_qp->send_cq->cq_id;
+		send_meta->signal_app = wr->send_flags & IBV_SEND_SIGNALED;
 
 		for (int i = 0; i < wr->num_sge; i++) {
+
+#if PTL_ENABLE_BIND_PER_OP
+			send_meta->md_desc[i].start = (ptl_addr_t)wr->sg_list[i].addr;
+			send_meta->md_desc[i].options = 0;
+			send_meta->md_desc[i].length = wr->sg_list[i].length;
+			send_meta->md_desc[i].eq_handle = ptl_cq_get_static_event_queue();
+			int rc = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), &send_meta->md_desc[i],
+					   &send_meta->md_handle[i]);
+			if (PTL_OK != rc) {
+				SPDK_PTL_FATAL("Failed to registed src buffer with code: %d", rc);
+			}
+			md_start = send_meta->md_desc[i].start;
+			md_handle = send_meta->md_handle[i];
+#else
 			ptl_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr, wr->sg_list[i].length,
 						       false);
-
 			if (NULL == ptl_mem_desc) {
 				SPDK_PTL_FATAL("MEM desc not found!");
 			}
+			md_start = ptl_mem_desc->local.local_w_mem_desc.start;
+			md_handle = ptl_mem_desc->local.local_w_mem_handle;
+#endif
 
 
-			SPDK_PTL_DEBUG("OK: \n%d", wr->sg_list[0].length == 64 ?
+			SPDK_PTL_DEBUG("OK: \n%d", wr->sg_list[i].length == 64 ?
 				       ptl_print_nvme_cmd((const struct spdk_nvme_cmd *)wr->sg_list[i].addr, "NVMe-cmd-send-og",
 							  ptl_qp->send_cq->cq_id) :
 				       ptl_print_nvme_cpl((const struct spdk_nvme_cpl *)wr->sg_list[i].addr, "NVMe-cpl-send-og",
 							  ptl_qp->send_cq->cq_id));
 
 
-			local_offset = wr->sg_list[i].addr - (uint64_t)ptl_mem_desc->local.local_w_mem_desc.start;
-
-
-			send_meta = calloc(1UL, sizeof(*send_meta));
-			send_meta->obj_type = PTL_SEND_OP;
-			send_meta->wr_id = wr->wr_id;
-			send_meta->send_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
-			send_meta->cq_id = ptl_qp->send_cq->cq_id;
-			send_meta->signal_app = wr->send_flags & IBV_SEND_SIGNALED;
+			local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 
 			SPDK_PTL_DEBUG(
 				"%s: Performing a SEND (PtlPut) operation to nid: "
@@ -821,7 +886,7 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				ptl_uuid_get_target_qp_num(match_bits),
 				local_offset, send_meta ? "YES" : "NO");
 
-			rc = PtlPut(ptl_mem_desc->local.local_w_mem_handle,
+			rc = PtlPut(md_handle,
 				    local_offset,//local offset
 				    wr->sg_list[i].length,//length
 				    PTL_ACK_REQ,

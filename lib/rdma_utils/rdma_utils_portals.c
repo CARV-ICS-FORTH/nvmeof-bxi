@@ -200,7 +200,11 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 		if (rdma_utils_ptl_is_local_write(access_flags)) {
 
 			SPDK_PTL_DEBUG("IBV_LOCAL_WRITE: Creating a local ptl_mem_desc");
+#if PTL_ENABLE_BIND_PER_OP
+			ptl_mem_desc_local = ptl_mem_desc_create_local(vaddr, size, false, ptl_cq_get_static_event_queue());
+#else
 			ptl_mem_desc_local = ptl_mem_desc_create_local(vaddr, size, true, ptl_cq_get_static_event_queue());
+#endif
 			if (false == ptl_pd->ops.add(ptl_pd->mem_desc_map, ptl_mem_desc_local)) {
 				SPDK_PTL_FATAL("Failed to keep memory handle in portals context");
 			}
@@ -233,10 +237,12 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 		//
 		//(uint64_t)mr);
 done:
-		rc = ptl_mem_desc_local->local.local_w_mem_handle.handle ? spdk_mem_map_set_translation(map,
-			(uint64_t)vaddr,
-			size,
-			(uint64_t)ptl_mem_desc_local->local.local_w_mem_handle.handle) : -1;
+		rc = spdk_mem_map_set_translation(map, (uint64_t)vaddr, size,
+						  (uint64_t)&ptl_mem_desc_local->local.fake_mr);
+		// rc = ptl_mem_desc_local->local.local_w_mem_handle.handle ? spdk_mem_map_set_translation(map,
+		// 	(uint64_t)vaddr,
+		// 	size,
+		// 	(uint64_t)ptl_mem_desc_local->local.local_w_mem_handle.handle) : -1;
 		SPDK_PTL_DEBUG("DONE with memory registration in Portals");
 		break;
 	case SPDK_MEM_MAP_NOTIFY_UNREGISTER:
