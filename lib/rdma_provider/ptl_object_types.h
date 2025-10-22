@@ -3,6 +3,8 @@
 typedef enum ptl_obj_type {
 	PTL_RECV_OP = 100,
 	PTL_SEND_OP,
+	PTL_RDMA_WRITE_OP,
+	PTL_RDMA_READ_OP,
 	PTL_CONTEXT,
 	PTL_PD,
 	PTL_QP,

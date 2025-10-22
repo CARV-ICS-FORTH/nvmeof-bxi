@@ -29,6 +29,18 @@ struct ptl_context_send_op {
 	void *addr;
 	int qp_num;
 	int length;
+	bool signal_app;
+};
+
+struct ptl_context_rdma_write_op {
+	uint32_t total_parts;
+	uint32_t parts_acked;
+	void *addr;
+	int qp_num;
+	int length;
+};
+
+struct ptl_context_rdma_read_op {
 	uint32_t total_parts;
 	uint32_t parts_acked;
 };
@@ -46,7 +58,10 @@ struct ptl_context_op_meta {
 	union {
 		struct ptl_context_send_op send_op;
 		struct ptl_context_recv_op recv_op;
+		struct ptl_context_rdma_write_op rdma_write_op;
+		struct ptl_context_rdma_write_op rdma_read_op;
 	};
+	bool signal_app;
 };
 
 

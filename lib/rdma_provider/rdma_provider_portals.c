@@ -612,7 +612,19 @@ static void spdk_rdma_print_wr_flags(struct ibv_send_wr *wr)
 }
 
 
-
+/**
+ * Performs RDMA read operations using Portals PtlGet.
+ *
+ * NOTE: Currently sends a separate RDMA read message for each scatter-gather
+ * element (SGE) as a temporary workaround until full iovec support is available
+ * in BXIv3. The operation metadata tracks all parts to properly handle completion
+ * when all data has been read.
+ *
+ * @param ptl_pd The Portals protection domain
+ * @param ptl_qp The Portals queue pair
+ * @param wr The send work request containing SGE list and remote address
+ * @param match_bits Match bits for the Portals operation
+ */
 static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_qp *ptl_qp,
 		struct ibv_send_wr *wr, uint64_t match_bits)
 {
@@ -623,17 +635,15 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 	struct ptl_mem_desc * ptl_mem_desc;
 	ptl_addr_t md_start;
 	ptl_handle_md_t local_md_handle;
+	uint64_t remote_addr;
 
-	// SPDK_PTL_CHECK_SGE_LENGTH(wr);
-
-	if (wr->send_flags & IBV_SEND_SIGNALED) {
-		rdma_read_meta = calloc(1UL, sizeof(*rdma_read_meta));
-		rdma_read_meta->obj_type = PTL_SEND_OP;
-		rdma_read_meta->wr_id = wr->wr_id;
-		rdma_read_meta->send_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
-		rdma_read_meta->send_op.total_parts = wr->num_sge;
-	}
-
+	rdma_read_meta = calloc(1UL, sizeof(*rdma_read_meta));
+	rdma_read_meta->obj_type = PTL_RDMA_READ_OP;
+	rdma_read_meta->wr_id = wr->wr_id;
+	rdma_read_meta->signal_app = wr->send_flags & IBV_SEND_SIGNALED;
+	rdma_read_meta->rdma_read_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
+	rdma_read_meta->rdma_read_op.total_parts = wr->num_sge;
+	remote_addr = wr->wr.rdma.remote_addr;
 	for (int i = 0; i < wr->num_sge; i++) {
 
 		ptl_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr, wr->sg_list[i].length,
@@ -650,14 +660,29 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 			       rdma_read_meta ? "YES" : "NO", ptl_qp->ptl_cm_id->ptl_qp_num);
 		/*XXX TODO XXX, set match bits correct here!XXX TODO XXX*/
 		rc = PtlGet(local_md_handle, local_offset, wr->sg_list[i].length, destination, ptl_qp->remote_pte,
-			    match_bits, wr->wr.rdma.remote_addr, rdma_read_meta);
+			    match_bits, remote_addr, rdma_read_meta);
 		if (PTL_OK != rc) {
 			SPDK_PTL_FATAL("Remote RDMA read failed Sorry!");
 		}
+		remote_addr += wr->sg_list[i].length;
 	}
 }
 
 
+
+/**
+ * Performs RDMA write operations using Portals PtlPut.
+ *
+ * NOTE: Currently sends a separate RDMA write message for each scatter-gather
+ * element (SGE) as a temporary workaround until full iovec support is available
+ * in BXIv3. The operation metadata tracks all parts and counts acknowledgments
+ * to properly notify the application only when all data has been written.
+ *
+ * @param ptl_pd The Portals protection domain
+ * @param ptl_qp The Portals queue pair
+ * @param wr The send work request containing SGE list and remote address
+ * @param match_bits Match bits for the Portals operation
+ */
 static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_qp *ptl_qp,
 		struct ibv_send_wr *wr, uint64_t match_bits)
 {
@@ -669,6 +694,13 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 	ptl_handle_md_t md_handle;
 	int rc;
 	uint64_t remote_addr =  wr->wr.rdma.remote_addr;
+	rdma_write_meta = calloc(1UL, sizeof(*rdma_write_meta));
+	rdma_write_meta->obj_type = PTL_RDMA_WRITE_OP;
+	rdma_write_meta->wr_id = wr->wr_id;
+	rdma_write_meta->cq_id = ptl_qp->send_cq->cq_id;
+	rdma_write_meta->signal_app = wr->send_flags & IBV_SEND_SIGNALED;
+	rdma_write_meta->rdma_write_op.total_parts = wr->num_sge;
+	rdma_write_meta->rdma_write_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
 
 	for (int i = 0; i < wr->num_sge; i++) {
 		ptl_mem_desc =
@@ -682,14 +714,6 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 
 		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 
-		rdma_write_meta = NULL;
-		if (wr->send_flags & IBV_SEND_SIGNALED && i == (wr->num_sge - 1)) {
-			rdma_write_meta = calloc(1UL, sizeof(*rdma_write_meta));
-			rdma_write_meta->obj_type = PTL_SEND_OP;
-			rdma_write_meta->wr_id = wr->wr_id;
-			rdma_write_meta->send_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
-			rdma_write_meta->cq_id = ptl_qp->send_cq->cq_id;
-		}
 		SPDK_PTL_DEBUG("Performing an RDMA WRITE (sg[%d]) to node "
 			       "nid: %d pid: %d portal index: %d local offset: "
 			       "%lu length in B: %u remote_addr: %lu is it signaled?: %s",
@@ -777,19 +801,12 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 			local_offset = wr->sg_list[i].addr - (uint64_t)ptl_mem_desc->local.local_w_mem_desc.start;
 
 
-			send_meta = NULL;
-			if (wr->send_flags & IBV_SEND_SIGNALED) {
-				send_meta = calloc(1UL, sizeof(*send_meta));
-				send_meta->obj_type = PTL_SEND_OP;
-				send_meta->wr_id = wr->wr_id;
-				send_meta->send_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
-				send_meta->cq_id = ptl_qp->send_cq->cq_id;
-				/*XXX TODO XXX, DEBUG purposes*/
-				// send_meta->send_op.crc_checksum = rdma_ptl_calculate_crc64((void*)wr->sg_list[i].addr,
-				// 				  wr->sg_list[i].length);
-				// send_meta->send_op.addr = (void *)wr->sg_list[i].addr;
-				// send_meta->send_op.length = wr->sg_list[i].length;
-			}
+			send_meta = calloc(1UL, sizeof(*send_meta));
+			send_meta->obj_type = PTL_SEND_OP;
+			send_meta->wr_id = wr->wr_id;
+			send_meta->send_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
+			send_meta->cq_id = ptl_qp->send_cq->cq_id;
+			send_meta->signal_app = wr->send_flags & IBV_SEND_SIGNALED;
 
 			SPDK_PTL_DEBUG(
 				"%s: Performing a SEND (PtlPut) operation to nid: "

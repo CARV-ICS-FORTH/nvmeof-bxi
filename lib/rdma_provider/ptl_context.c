@@ -179,33 +179,42 @@ static struct ptl_context_op_meta *ptl_cnxt_process_fetch_atomic_overflow(ptl_ev
 	return NULL;
 }
 
+
+/**
+ * Handles PTL_EVENT_REPLY events, which indicate that a PtlGet operation
+ * issued by the initiator has successfully transferred the data into its
+ * memory. This notification confirms the RDMA read completion.
+ *
+ * @param event The Portals event containing reply information
+ * @param wc Work completion structure to be filled with operation results
+ * @param ptl_cq The Portals completion queue
+ * @return Pointer to the operation metadata, or NULL if no context was provided
+ */
 static struct ptl_context_op_meta *ptl_cnxt_process_reply(ptl_event_t event, struct ibv_wc *wc,
 		struct ptl_cq *ptl_cq)
 {
-	/**
-	 * Notification at the initiator that the read issued by it has
-	 * moved the data in its memory
-	 */
-	struct ptl_context_op_meta *rdma_read_meta;
+	struct ptl_context_op_meta *rdma_read_meta = event.user_ptr;
 
-	if (event.user_ptr == NULL) {
+	if (rdma_read_meta == NULL) {
 		SPDK_PTL_DEBUG("Caution RDMA read without a context app does not want a signal ok.");
 		return NULL;
 	}
 
-	// memset(wc, 0xFF, sizeof(*wc));
+	if (rdma_read_meta->obj_type != PTL_RDMA_READ_OP) {
+		SPDK_PTL_FATAL("Corrupted obj type should have been a PTL_RDMA_READ_OP");
+	}
+
 
 	if (event.ni_fail_type != PTL_NI_OK) {
 		SPDK_PTL_FATAL("Operation failed with code: %d", event.ni_fail_type);
 	}
 
-
-	rdma_read_meta = event.user_ptr;
-	if (rdma_read_meta->obj_type != PTL_SEND_OP) {
-		SPDK_PTL_FATAL("Corrupted object");
+	if (++rdma_read_meta->rdma_read_op.parts_acked < rdma_read_meta->rdma_read_op.total_parts) {
+		return NULL;
 	}
 
-	if (++rdma_read_meta->send_op.parts_acked < rdma_read_meta->send_op.total_parts) {
+	if (false == rdma_read_meta->signal_app) {
+		free(rdma_read_meta);
 		return NULL;
 	}
 
@@ -233,28 +242,66 @@ static struct ptl_context_op_meta *ptl_cnxt_process_send(ptl_event_t event, stru
 	return NULL;
 }
 
+
+/**
+ * Process a PTL_EVENT_ACK for an initiator-issued PtlPut.
+ *
+ * This handler is invoked when the initiator receives a PTL_EVENT_ACK generated
+ * for a PtlPut operation that explicitly requested an acknowledgment. In Portals 4,
+ * PTL_EVENT_ACK is an initiator-side event that indicates the target has matched the
+ * incoming PUT against its match list (ME/LE) and completed the delivery to the target
+ * memory according to Portals 4 semantics.
+ *
+ * Notes:
+ * - Applies to PtlPut regardless of whether the initiator’s usage corresponds to a
+ *   send or an (RMA) PUT. In both cases, the ACK confirms data are in the memory of the
+ *   Target.
+ * - This is stronger than local send completion (PTL_EVENT_SEND). PTL_EVENT_ACK means
+ *   the target has received, matched, and placed the data into its memory.
+ * - You will not receive PTL_EVENT_ACK for PtlGet; GET completion at the initiator is
+ *   indicated by PTL_EVENT_REPLY instead.
+ *
+ * On success (event.ni_fail_type == PTL_NI_OK), this function populates the provided
+ * ibv_wc with a successful SEND completion semantics for the original PUT, using the
+ * metadata carried in event.user_ptr, and returns the associated ptl_context_op_meta.
+ * On failure, it reports the Portals NI failure code.
+ */
 static struct ptl_context_op_meta *ptl_cnxt_process_ack(ptl_event_t event, struct ibv_wc *wc,
 		struct ptl_cq *ptl_cq)
 {
 	struct ptl_context_op_meta *send_meta;
 
 	if (NULL == event.user_ptr) {
-		SPDK_PTL_DEBUG("NVMe: PtlPut without context? App does not want any signal");
+		SPDK_PTL_DEBUG("NVMe: PTL_EVENT_ACK without context?");
 		return NULL;
 	}
-
 	send_meta = event.user_ptr;
-	if (send_meta->obj_type != PTL_SEND_OP) {
-		SPDK_PTL_FATAL("Corrupted object type this is not a PTL_LE_SEND_OP");
-	}
-	SPDK_PTL_DEBUG("NVMe: Got a PTL_EVENT_ACK event filling wc with code %d event type: %d from local qp num: %d",
-		       event.ni_fail_type, event.type, send_meta->send_op.qp_num);
 
-	// memset(wc, 0x00, sizeof(*wc));
+	if (send_meta->obj_type != PTL_SEND_OP && send_meta->obj_type != PTL_RDMA_WRITE_OP) {
+		SPDK_PTL_FATAL("Corrupted object type: %d this is not a PTL_SEND_OP or PTL_RDMA_WRITE_OP",
+			       send_meta->obj_type);
+	}
+
+	SPDK_PTL_DEBUG("NVMe: Got a PTL_EVENT_ACK event for an %s operation. Filling "
+		       "wc with code %d event type: %d from local qp num: %d",
+		       send_meta->obj_type == PTL_SEND_OP ? "SEND" : "RDMA_WRITE",
+		       event.ni_fail_type, event.type, send_meta->send_op.qp_num);
 
 	if (event.ni_fail_type != PTL_NI_OK) {
 		SPDK_PTL_FATAL("Operation failed with code: %d", event.ni_fail_type);
 	}
+
+	if (PTL_RDMA_WRITE_OP == send_meta->obj_type &&
+	    ++send_meta->rdma_write_op.parts_acked < send_meta->rdma_write_op.total_parts) {
+		return NULL;
+	}
+
+	if (false == send_meta->signal_app) {
+		SPDK_PTL_DEBUG("App does not want to be signaled freeing the buffer");
+		free(send_meta);
+		return NULL;
+	}
+
 	wc->status =
 		event.ni_fail_type == PTL_NI_OK ? IBV_WC_SUCCESS : IBV_WC_LOC_PROT_ERR;
 	wc->opcode = IBV_WC_SEND;
@@ -457,6 +504,10 @@ static int ptl_print_event(struct ptl_context_op_meta *op_meta, bool is_late)
 			: ptl_print_nvme_cpl(
 				op_meta->recv_op.io_vector[0].iov_base,
 				is_late ? prefix_cpl_recv_late : prefix_cpl_recv, op_meta->cq_id));
+	} else if (op_meta->obj_type == PTL_RDMA_WRITE_OP) {
+		SPDK_PTL_INFO("NVMe-send: An RDMA write completed ok move on");
+	} else if (op_meta->obj_type == PTL_RDMA_READ_OP) {
+		SPDK_PTL_INFO("NVMe-recv: An RDMA read completed ok move on");
 	} else {
 		SPDK_PTL_FATAL("Corrupted op meta");
 	}
