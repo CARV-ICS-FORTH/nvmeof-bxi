@@ -24,8 +24,6 @@ static DEFINE_RATELIMIT_STATE(ges_unimpl_rs, GES_UNIMPL_RATELIMIT_PERIOD,
     __func__, ##__VA_ARGS__);    \
     } while (0)
 
-/* --- Minimal opaque type ---- */
-struct rdma_cm_portals_id { int dummy; };
 
 /* --- Module‑param toggle for success/failure ---- */
 static bool ges_fail_fast = true;
@@ -41,21 +39,22 @@ static inline int ges_ret(int fail_code)
 }
 
 /* --- API stubs ---- */
-int rdma_cm_portals_create_id(struct net *net, void *handler, void *context,
-    enum rdma_ucm_port_space ps,
-    struct rdma_cm_portals_id **out)
+
+struct rdma_cm_id *
+__rdma_cm_portals_create_kernel_id(struct net *net, rdma_cm_event_handler event_handler,
+			void *context, enum rdma_ucm_port_space ps,
+			enum ib_qp_type qp_type, const char *caller)
 {
     (void)net;
-    (void)handler;
+    (void)event_handler;
     (void)context;
     (void)ps;
-    (void)out;
     RDMACM_IB_UNIMPL("Sorry");
-    return -EOPNOTSUPP;
+    return ERR_PTR(-EOPNOTSUPP);
 }
-EXPORT_SYMBOL_GPL(rdma_cm_portals_create_id);
+EXPORT_SYMBOL_GPL(__rdma_cm_portals_create_kernel_id);
 
-int rdma_cm_portals_destroy_id(struct rdma_cm_portals_id *id)
+int rdma_cm_portals_destroy_id(struct rdma_cm_id *id)
 {
     (void)id;
     RDMACM_IB_UNIMPL("Sorry");
@@ -63,7 +62,7 @@ int rdma_cm_portals_destroy_id(struct rdma_cm_portals_id *id)
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_destroy_id);
 
-int rdma_cm_portals_resolve_addr(struct rdma_cm_portals_id *id,
+int rdma_cm_portals_resolve_addr(struct rdma_cm_id *id,
     const void *src, const void *dst,
     unsigned long timeout_ms)
 {
@@ -76,7 +75,7 @@ int rdma_cm_portals_resolve_addr(struct rdma_cm_portals_id *id,
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_resolve_addr);
 
-int rdma_cm_portals_resolve_route(struct rdma_cm_portals_id *id,
+int rdma_cm_portals_resolve_route(struct rdma_cm_id *id,
     unsigned long timeout_ms)
 {
     (void)id;
@@ -86,7 +85,7 @@ int rdma_cm_portals_resolve_route(struct rdma_cm_portals_id *id,
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_resolve_route);
 
-int rdma_cm_portals_connect_locked(struct rdma_cm_portals_id *id,
+int rdma_cm_portals_connect_locked(struct rdma_cm_id *id,
     struct rdma_conn_param *param)
 {
     (void)id;
@@ -96,7 +95,7 @@ int rdma_cm_portals_connect_locked(struct rdma_cm_portals_id *id,
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_connect_locked);
 
-int rdma_cm_portals_disconnect(struct rdma_cm_portals_id *id)
+int rdma_cm_portals_disconnect(struct rdma_cm_id *id)
 {
     (void)id;
     RDMACM_IB_UNIMPL("Sorry");
@@ -104,7 +103,7 @@ int rdma_cm_portals_disconnect(struct rdma_cm_portals_id *id)
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_disconnect);
 
-int rdma_cm_portals_create_qp(struct rdma_cm_portals_id *id,
+int rdma_cm_portals_create_qp(struct rdma_cm_id *id,
     struct ib_pd *pd,
     struct ib_qp_init_attr *attr)
 {
@@ -116,7 +115,7 @@ int rdma_cm_portals_create_qp(struct rdma_cm_portals_id *id,
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_create_qp);
 
-int rdma_cm_portals_destroy_qp(struct rdma_cm_portals_id *id)
+int rdma_cm_portals_destroy_qp(struct rdma_cm_id *id)
 {
     (void)id;
     RDMACM_IB_UNIMPL("Sorry");
@@ -134,7 +133,7 @@ const char *rdma_cm_portals_event_msg(int ev)
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_event_msg);
 
-const void *rdma_cm_portals_reject_msg(struct rdma_cm_portals_id *id, int status)
+const void *rdma_cm_portals_reject_msg(struct rdma_cm_id *id, int status)
 {
     (void)id;
     (void)status;
@@ -143,18 +142,18 @@ const void *rdma_cm_portals_reject_msg(struct rdma_cm_portals_id *id, int status
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_reject_msg);
 
-const void *rdma_cm_portals_consumer_reject_data(struct rdma_cm_portals_id *id,
-    const void *ev, size_t *len)
+
+const void *rdma_cm_portals_consumer_reject_data(struct rdma_cm_id *id, struct rdma_cm_event *ev, u8 *data_len)
 {
     (void)id;
     (void)ev;
-    (void)len;
+    (void)data_len;
     RDMACM_IB_UNIMPL("Sorry");
     return ERR_PTR(-EOPNOTSUPP);
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_consumer_reject_data);
 
-int rdma_cm_portals_set_service_type(struct rdma_cm_portals_id *id, u8 tos)
+int rdma_cm_portals_set_service_type(struct rdma_cm_id *id, u8 tos)
 {
     (void)id;
     (void)tos;
@@ -162,6 +161,17 @@ int rdma_cm_portals_set_service_type(struct rdma_cm_portals_id *id, u8 tos)
     return -EOPNOTSUPP;
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_set_service_type);
+
+
+int rdma_cm_portals_connect(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
+{
+  (void)id;
+  (void)conn_param;
+  RDMACM_IB_UNIMPL("Sorry");
+  return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(rdma_cm_portals_connect);
+
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("RDMACM implementation over Portals4 shim (no-op / fail-fast)");

@@ -93,44 +93,6 @@ void ib_portals_cq_pool_put(struct ib_cq *cq, int cqe)
 }
 EXPORT_SYMBOL_GPL(ib_portals_cq_pool_put);
 
-/* QP + MR pools */
-int ib_portals_mr_pool_init(struct ib_qp *qp, void *pool, int n, int max_sge, bool sig)
-{
-    (void)qp;
-    (void)pool;
-    (void)n;
-    (void)max_sge;
-    (void)sig;
-    IB_PORTALS4_UNIMPL("Sorry!");
-    return -EOPNOTSUPP;
-}
-EXPORT_SYMBOL_GPL(ib_portals_mr_pool_init);
-
-void ib_portals_mr_pool_destroy(struct ib_qp *qp, void *pool)
-{
-    (void)qp;
-    (void)pool;
-    IB_PORTALS4_UNIMPL("Sorry!");
-}
-EXPORT_SYMBOL_GPL(ib_portals_mr_pool_destroy);
-
-void ib_portals_mr_pool_put(struct ib_qp *qp, void *pool, struct ib_mr *mr)
-{
-    (void)qp;
-    (void)pool;
-    (void)mr;
-    IB_PORTALS4_UNIMPL("Sorry!");
-}
-EXPORT_SYMBOL_GPL(ib_portals_mr_pool_put);
-
-struct ib_mr *ib_portals_mr_pool_get(struct ib_qp *qp, void *pool)
-{
-    (void)qp;
-    (void)pool;
-    IB_PORTALS4_UNIMPL("Sorry!");
-    return ERR_PTR(-EOPNOTSUPP);
-}
-EXPORT_SYMBOL_GPL(ib_portals_mr_pool_get);
 
 /* QP */
 int ib_portals_destroy_qp(struct ib_qp *qp)
@@ -246,25 +208,24 @@ int ib_portals_process_cq_direct(struct ib_cq *cq, int budget)
 EXPORT_SYMBOL_GPL(ib_portals_process_cq_direct);
 
 /* MR map helpers used in FRWR path */
-int ib_portals_map_mr_sg(struct ib_mr *mr, struct scatterlist *sg, int nents, void *sg_offset, size_t *length)
+
+int ib_portals_map_mr_sg(struct ib_mr *mr, struct scatterlist *sg, int sg_nents,unsigned int *sg_offset, unsigned int page_size)
 {
   (void)mr;
   (void)sg;
-  (void)nents;
   (void)sg_offset;
-  (void)length;
   IB_PORTALS4_UNIMPL("Sorry!");
   return -EOPNOTSUPP;
 }
 EXPORT_SYMBOL_GPL(ib_portals_map_mr_sg);
 
-int ib_portals_map_mr_sg_pi(struct ib_mr *mr, struct scatterlist *sg, int nents, void *meta, size_t *length)
+
+int ib_portals_map_mr_sg_pi(struct ib_mr *mr, struct scatterlist *data_sg,
+		    int data_sg_nents, unsigned int *data_sg_offset,
+		    struct scatterlist *meta_sg, int meta_sg_nents,
+		    unsigned int *meta_sg_offset, unsigned int page_size)
 {
   (void)mr;
-  (void)sg;
-  (void)nents;
-  (void)meta;
-  (void)length;
   IB_PORTALS4_UNIMPL("Sorry!");
   return -EOPNOTSUPP;
 }
