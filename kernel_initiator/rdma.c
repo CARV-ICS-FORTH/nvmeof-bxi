@@ -2355,7 +2355,7 @@ out_put_ctrl:
 }
 
 static struct nvmf_transport_ops nvme_rdma_transport = {
-	.name		= "rdma",
+	.name		= "portals4",
 	.module		= THIS_MODULE,
 	.required_opts	= NVMF_OPT_TRADDR,
 	.allowed_opts	= NVMF_OPT_TRSVCID | NVMF_OPT_RECONNECT_DELAY |
@@ -2436,5 +2436,5 @@ static void __exit nvme_rdma_cleanup_module(void)
 module_init(nvme_rdma_init_module);
 module_exit(nvme_rdma_cleanup_module);
 
-MODULE_DESCRIPTION("NVMe host RDMA transport driver");
+MODULE_DESCRIPTION("NVMe host RDMA transport driver for Portals4");
 MODULE_LICENSE("GPL v2");

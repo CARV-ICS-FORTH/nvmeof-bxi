@@ -11,6 +11,8 @@
 #include <linux/err.h>
 #include <rdma/rdma_cm.h>
 #include <rdma/rdma_user_cm.h>
+
+#include "rdma_cm_portals.h"
 /* --- Rate-limited "unimplemented" logging ---- */
 #define GES_UNIMPL_RATELIMIT_PERIOD  HZ
 #define GES_UNIMPL_RATELIMIT_BURST   10
@@ -20,8 +22,8 @@ static DEFINE_RATELIMIT_STATE(ges_unimpl_rs, GES_UNIMPL_RATELIMIT_PERIOD,
 #define RDMACM_IB_UNIMPL(fmt, ...)    \
     do {    \
     if (__ratelimit(&ges_unimpl_rs))    \
-    pr_warn("rdma_cm GES: UNIMPLEMENTED: %s: " fmt "\n",    \
-    __func__, ##__VA_ARGS__);    \
+    pr_warn("[%s:%s:%d]UNIMPLEMENTED " fmt "\n",    \
+    __FILE__,__func__,__LINE__, ##__VA_ARGS__);    \
     } while (0)
 
 
@@ -62,16 +64,19 @@ int rdma_cm_portals_destroy_id(struct rdma_cm_id *id)
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_destroy_id);
 
-int rdma_cm_portals_resolve_addr(struct rdma_cm_id *id,
-    const void *src, const void *dst,
-    unsigned long timeout_ms)
+
+
+int rdma_cm_portals_resolve_addr(struct rdma_cm_id *id, struct sockaddr *src_addr,
+		      const struct sockaddr *dst_addr,
+		      unsigned long timeout_ms)
 {
     (void)id;
-    (void)src;
-    (void)dst;
+    (void)src_addr;
+    (void)dst_addr;
     (void)timeout_ms;
-    RDMACM_IB_UNIMPL("Sorry");
+    RDMACM_IB_UNIMPL("Sorry is id NULL? %s",id?"NO":"YES");
     return -EOPNOTSUPP;
+
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_resolve_addr);
 

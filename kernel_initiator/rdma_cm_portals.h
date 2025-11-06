@@ -14,7 +14,7 @@
 
 
 #define rdma_cm_portals_create_id(net, event_handler, context, ps, qp_type)               \
-	__rdma_create_kernel_id(net, event_handler, context, ps, qp_type,      \
+	__rdma_cm_portals_create_kernel_id(net, event_handler, context, ps, qp_type,      \
 				KBUILD_MODNAME)
 
 struct rdma_cm_id *
@@ -25,7 +25,7 @@ __rdma_cm_portals_create_kernel_id(struct net *net, rdma_cm_event_handler event_
 
 int rdma_cm_portals_destroy_id(struct rdma_cm_id *id);
 
-int rdma_cm_portals_resolve_addr(struct rdma_cm_id *id, const void *src, const void *dst, unsigned long timeout_ms);
+int rdma_cm_portals_resolve_addr(struct rdma_cm_id *id, struct sockaddr *src_addr, const struct sockaddr *dst_addr, unsigned long timeout_ms);
 
 int rdma_cm_portals_resolve_route(struct rdma_cm_id *id, unsigned long timeout_ms);
 

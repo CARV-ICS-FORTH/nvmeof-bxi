@@ -12,6 +12,8 @@
 #include <linux/ratelimit.h>
 #include <linux/err.h>
 
+#include "ib_portals.h"
+
 #define GES_UNIMPL_RATELIMIT_PERIOD  HZ
 #define GES_UNIMPL_RATELIMIT_BURST   10
 
@@ -20,8 +22,8 @@ static DEFINE_RATELIMIT_STATE(ges_unimpl_rs, GES_UNIMPL_RATELIMIT_PERIOD, GES_UN
 #define IB_PORTALS4_UNIMPL(fmt, ...)    \
     do {    \
     if (__ratelimit(&ges_unimpl_rs))    \
-    pr_warn("Portals4/ib: UNIMPLEMENTED: %s: " fmt "\n",    \
-    __func__, ##__VA_ARGS__);    \
+    pr_warn("Portals4/ib: UNIMPLEMENTED: %s:%d %s: " fmt "\n",    \
+    __FILE__, __LINE__, __func__, ##__VA_ARGS__);    \
     } while (0)
 
 #define IB_PORTALS4_WARN_ONCE(fmt, ...)    \
@@ -29,14 +31,32 @@ static DEFINE_RATELIMIT_STATE(ges_unimpl_rs, GES_UNIMPL_RATELIMIT_PERIOD, GES_UN
     static bool __once;    \
     if (!__once) {    \
     __once = true;    \
-    pr_warn("Portals4/ib: %s: " fmt "\n", __func__, ##__VA_ARGS__); \
+    pr_warn("Portals4/ib: %s:%d %s: " fmt "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
     WARN_ON(1);    \
     }    \
     } while (0)
 
 
+#define IB_PORTALS4_WARN(fmt, ...) \
+    pr_warn("%s:%s:%d: " fmt "\n", __FILE__, __func__, __LINE__, ##__VA_ARGS__)
+
+// Add near the top of ib_portals.c (after includes)
+
+#include <linux/mutex.h>
+#include <linux/list.h>
+
+struct ib_portals_client_entry {
+    struct ib_client *client;
+    struct list_head node;
+};
+
+static LIST_HEAD(ib_portals_client_list);
+static DEFINE_MUTEX(ib_portals_client_lock);
+
+
+
 /* Mapped to ib_alloc_pd/ib_dealloc_pd */
-struct ib_portals_pd *ib_portals_alloc_pd(void *ibdev, gfp_t gfp)
+struct ib_pd *ib_portals_alloc_pd(void *ibdev, gfp_t gfp)
 {
   (void)ibdev;
   (void)gfp;
@@ -55,7 +75,8 @@ void ib_portals_dealloc_pd(struct ib_pd *pd)
 EXPORT_SYMBOL_GPL(ib_portals_dealloc_pd);
 
 /* CQ */
-struct ib_cq *ib_portals_alloc_cq(void *ibdev, void *cq_context, int cqe, int comp_vector)
+
+struct ib_cq *ib_portals_alloc_cq(void *ibdev, void *cq_context, int cqe, int comp_vector, enum ib_poll_context poll_ctx)
 {
     (void)ibdev;
     (void)cq_context;
@@ -74,11 +95,12 @@ void ib_portals_free_cq(struct ib_cq *cq)
 EXPORT_SYMBOL_GPL(ib_portals_free_cq);
 
 /* Some code uses a CQ pool helper; make them no-ops compatible */
-struct ib_cq *ib_portals_cq_pool_get(void *ibdev, int cqe, int comp_vector)
+struct ib_cq *ib_portals_cq_pool_get(struct ib_device *dev, unsigned int nr_cqe, int comp_vector_hint, 
+  enum ib_poll_context poll_ctx)
 {
-    (void)ibdev;
-    (void)cqe;
-    (void)comp_vector;
+    (void)dev;
+    (void)nr_cqe;
+    (void)comp_vector_hint;
     IB_PORTALS4_UNIMPL("Sorry!");
     return ERR_PTR(-EOPNOTSUPP);
 }
@@ -269,18 +291,77 @@ int ib_portals_check_mr_status(struct ib_mr *mr, int check, void *status)
 }
 EXPORT_SYMBOL_GPL(ib_portals_check_mr_status);
 
-int ib_portals_register_client(void *client)
+
+
+int ib_portals_register_client(struct  ib_client *client)
 {
-  (void)client;
-  IB_PORTALS4_UNIMPL("Sorry!");
-  return -EOPNOTSUPP;
+  struct ib_portals_client_entry *client_entry;
+
+  if (!client) {
+      IB_PORTALS4_WARN("Portals4/ib: register_client: NULL ib_client");
+      return -EINVAL;
+  }
+
+  if (!client->name) {
+      IB_PORTALS4_WARN("Portals4/ib: register_client: NULL client name");
+      return -EINVAL;
+  }
+  pr_info("Portals4/ib: register_client name=%s add=%ps remove=%ps get_net_dev_by_params=%ps\n",
+            client->name, client->add, client->remove, client->get_net_dev_by_params);
+
+  if (!client->add){
+      IB_PORTALS4_WARN("Portals4/ib: client '%s' has no add() callback", client->name);
+  }
+
+  if (!client->remove){
+      IB_PORTALS4_WARN("Portals4/ib: client '%s' has no remove() callback", client->name);
+  }
+
+  client_entry = kzalloc(sizeof(*client_entry), GFP_KERNEL);
+  if (!client_entry)
+      return -ENOMEM;
+
+  client_entry->client = client;
+
+  mutex_lock(&ib_portals_client_lock);
+  list_add_tail(&client_entry->node, &ib_portals_client_list);
+  mutex_unlock(&ib_portals_client_lock);
+
+  IB_PORTALS4_WARN("Portals4/ib: registered client '%s'", client->name);
+  return 0;
 }
 EXPORT_SYMBOL_GPL(ib_portals_register_client);
 
-void ib_portals_unregister_client(void *client)
+
+void ib_portals_unregister_client(struct ib_client *client)
 {
-  (void)client;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  struct ib_portals_client_entry *client_entry, *tmp;
+  if (!client) {
+      IB_PORTALS4_WARN("NULL ib_client");
+      return;
+  }
+
+  if (!client->name) {
+      IB_PORTALS4_WARN("NULL client name");
+      return;
+  }
+
+  // Semantics: real ib_core would call remove(dev, client_data) for each device
+  // still present. Without device tracking yet, just detach from registry.
+
+  mutex_lock(&ib_portals_client_lock);
+  list_for_each_entry_safe(client_entry, tmp, &ib_portals_client_list, node) {
+  if (client_entry->client == client) {
+      if(client_entry->client->remove){
+        IB_PORTALS4_UNIMPL("Sorry! I don't know how to call the remove callback");
+      }
+      list_del(&client_entry->node);
+      kfree(client_entry);
+      pr_info("Portals4/ib: unregistered client '%s'\n", client->name);
+      break;
+  }
+}
+  mutex_unlock(&ib_portals_client_lock);
 }
 EXPORT_SYMBOL_GPL(ib_portals_unregister_client);
 
