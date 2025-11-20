@@ -1,0 +1,60 @@
+#include "ptl_qp.h"
+#include "asm-generic/errno-base.h"
+#include "ptl_cm_id.h"
+#include "ptl_cq.h"
+#include "ptl_object_types.h"
+#include <linux/container_of.h>
+#include <linux/kernel.h>  /* pr_err, pr_info, etc. */
+#include <linux/module.h>  /* MODULE_* macros if this is a module */
+#include <linux/slab.h>    /* kzalloc, kfree */
+#include <rdma/ib_verbs.h> /* struct ib_device, ib_alloc_pd, CQ, QP, etc. */
+#include <rdma/rdma_cm.h>  /* struct rdma_cm_id, rdma_create_qp, events */
+
+static atomic_t ptl_id_counter = ATOMIC_INIT(0);
+
+struct ptl_qp *ptl_qp_create(struct ptl_cm_id *ptl_id, struct ptl_pd *ptl_pd,
+                             struct ib_qp_init_attr *attr) {
+  struct ptl_qp *ptl_qp;
+
+  if (!ptl_id) {
+    PTL_FATAL("ptl_qp_create: invalid ptl_id or cm_id");
+    return ERR_PTR(-EINVAL);
+  }
+
+  /* Ensure the cm_id is bound to a device */
+  if (!ptl_id->bxiv3_dev) {
+    PTL_FATAL("ptl_qp_create: cm_id not bound to device");
+    return ERR_PTR(-EINVAL);
+  }
+
+  ptl_qp = kzalloc(sizeof(*ptl_qp), GFP_KERNEL);
+  if (!ptl_qp) {
+    PTL_FATAL("ptl_qp_create: failed to allocate qp struct");
+    return ERR_PTR(-ENOMEM);
+  }
+  ptl_qp->object_type = PTL_QP;
+
+  if (attr->send_cq) {
+    ptl_qp->send_cq = container_of(attr->send_cq, struct ptl_cq, fake_cq);
+    if (ptl_qp->send_cq->obj_type != PTL_CQ) {
+      PTL_FATAL("Corrupted send cq");
+      goto error;
+    }
+  }
+
+  if (attr->recv_cq) {
+    ptl_qp->recv_cq = container_of(attr->recv_cq, struct ptl_cq, fake_cq);
+    if (ptl_qp->recv_cq->obj_type != PTL_CQ) {
+      PTL_FATAL("Corrupted send cq");
+      goto error;
+    }
+  }
+
+  ptl_qp->ptl_id = ptl_id;
+  ptl_qp->qpn = atomic_inc_return(&ptl_id_counter);
+
+  return ptl_qp;
+error:
+  kfree(ptl_qp);
+  return ERR_PTR(-EINVAL);
+}
