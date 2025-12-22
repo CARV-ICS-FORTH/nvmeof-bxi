@@ -1,7 +1,7 @@
 #ifndef PTL_CONFIG_H
 #define PTL_CONFIG_H
-
-#define PTL_TARGET_PID 2056
+#define BXIV3 1
+#define PTL_TARGET_PID 10
 
 #define PTL_SPDK_PROTOCOL_VERSION 1UL
 /**
@@ -75,13 +75,13 @@
  * table from queue pair id to nid,pid that Portals uses for point to point
  * communication.
  */
-#define PTL_CP_SERVER_PTE 128
+#define PTL_CP_SERVER_PTE 0
 
 /**
  * Number of recv buffers posted through PtlLEAppend for receiving new
  *connection info from clients.
  **/
-#define PTL_CONTROL_PLANE_NUM_RECV_BUFFERS 2048U
+#define PTL_CONTROL_PLANE_NUM_RECV_BUFFERS 512U
 
 /**
  * Size of the Portals event queue
