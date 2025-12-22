@@ -2,7 +2,7 @@
 #define PTL_CONNECTION_H
 #include <rdma/rdma_cma.h>
 #include <stdint.h>
-typedef enum {PTL_OPEN_CONNECTION = 0, PTL_OPEN_CONNECTION_REPLY, PTL_CLOSE_CONNECTION, PTL_CLOSE_CONNECTION_REPLY, PTL_NUM_MSGS} ptl_conn_msg_type_e;
+typedef enum {NVMeOF_cmd = 0, NVMeOF_cpl, PTL_OPEN_CONNECTION, PTL_OPEN_CONNECTION_REPLY, PTL_CLOSE_CONNECTION, PTL_CLOSE_CONNECTION_REPLY, PTL_NUM_MSGS} ptl_conn_msg_type_e;
 
 struct ptl_conn_comm_pair_info {
 	/*Initiator of the communication info*/

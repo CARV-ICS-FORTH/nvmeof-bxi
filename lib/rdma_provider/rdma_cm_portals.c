@@ -42,7 +42,8 @@
 	PTL_ME_OP_PUT | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_MAY_ALIGN | PTL_ME_IS_ACCESSIBLE | PTL_ME_MANAGE_LOCAL | \
 		PTL_ME_NO_TRUNCATE | PTL_LE_USE_ONCE
 
-#define RDMA_PTL_MSG_BUFFER_SIZE 256UL
+#define RDMA_PTL_MSG_BUFFER_SIZE 512UL
+// #define RDMA_PTL_MSG_BUFFER_SIZE 1024UL
 
 #define PTL_CP_SERVER_LOCK(X) do { \
     int ret = pthread_mutex_lock(X); \
@@ -60,7 +61,7 @@
 
 volatile int is_target;
 
-const char *ptl_msg_types[PTL_NUM_MSGS] = {"PTL_OPEN_CONNECTION", "PTL_OPEN_CONNECTION_REPLY", "PTL_OPEN_CONNECTION", "PTL_OPEN_CONNECTION_REPLY"};
+const char *ptl_msg_types[PTL_NUM_MSGS] = {"NVMeoF_cmd", "NVMeOF_cpl", "PTL_OPEN_CONNECTION", "PTL_OPEN_CONNECTION_REPLY", "PTL_OPEN_CONNECTION", "PTL_OPEN_CONNECTION_REPLY"};
 static void rdma_ptl_write_event_to_fd(int fd)
 {
 	uint64_t value = 1;
@@ -263,6 +264,8 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
 	ptl_process_t target;
 	ptl_md_t md;
+	ptl_hdr_data_t object_type = send_buffer->conn_msg.msg_header.msg_type;
+	;
 	int rc;
 	struct ptl_conn_comm_pair_info *peer_info = &send_buffer->conn_msg.msg_header.peer_info;
 	target.phys.nid = peer_info->dest.nid;
@@ -298,10 +301,10 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 		    PTL_ACK_REQ,/* acknowledgment requested */
 		    target, /* target process */
 		    peer_info->dest.pte,  /* portal table index */
-		    0, /* match bits */
+		    0x01ULL, /* match bits */
 		    0, /* remote offset */
 		    send_buffer, /* user ptr */
-		    0);
+		    object_type);
 
 	if (rc != PTL_OK) {
 		SPDK_PTL_FATAL("PtlPut failed with code: %d\n", rc);
@@ -350,9 +353,9 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 	ptl_id->rma_match_bits = conn_open->rma_match_bits;
 	ptl_id->remote_cq_id = conn_open->cq_id;
 	SPDK_PTL_DEBUG("MATCH_BITS: The remote guy has MEs for recv in match_bits: "
-		       "%lu and for RMA: %lu and has subscribed in cq_id: %d",
+		       "%lu and for RMA: %lu and has subscribed in cq_id: %d private date len is: %u",
 		       ptl_id->recv_match_bits, ptl_id->rma_match_bits,
-		       ptl_id->remote_cq_id);
+		       ptl_id->remote_cq_id, conn_open->conn_param.private_data_len);
 	ptl_id->uuid = ptl_uuid_set_cq_num(ptl_id->uuid, ptl_id->remote_cq_id);
 
 	rdma_cm_find_matching_local_ip(&ptl_id->fake_cm_id.route.addr.dst_addr,
@@ -621,6 +624,7 @@ static void *rdma_run_ptl_cp_server(void *args)
 		/* Wait for events on the control plane event queue */
 		memset(&event, 0x00, sizeof(event));
 		rc = PtlEQWait(ptl_control_plane_server.eq_handle, &event);
+		SPDK_PTL_DEBUG("Got something");
 
 		if (rc != PTL_OK) {
 			SPDK_PTL_FATAL(
@@ -633,21 +637,22 @@ static void *rdma_run_ptl_cp_server(void *args)
 			SPDK_PTL_DEBUG("[%s] CP server: Got an autounlink event Re-register buffer...",
 				       ptl_control_plane_server.role);
 			/* Re-register the receive buffer by appending a new list entry */
-			ptl_le_t le;
-			memset(&le, 0, sizeof(ptl_le_t));
-			le.ignore_bits = RDMA_PTL_IGNORE;
-			le.match_bits = RDMA_PTL_MATCH;
-			le.match_id.phys.nid = PTL_NID_ANY;
-			le.match_id.phys.pid = PTL_PID_ANY;
-			le.min_free = 0;
-			le.start = event.start;
-			le.length = RDMA_PTL_MSG_BUFFER_SIZE;
-			le.ct_handle = PTL_CT_NONE;
-			le.uid = PTL_UID_ANY;
-			le.options = PTL_SRV_ME_OPTS;
+			ptl_me_t match_entry;
+			memset(&match_entry, 0, sizeof(match_entry));
+			match_entry.ignore_bits = 0;//RDMA_PTL_IGNORE;
+			match_entry.match_bits = 0x01ULL;//RDMA_PTL_MATCH;
+			match_entry.match_id.phys.nid = PTL_NID_ANY;
+			match_entry.match_id.phys.pid = PTL_PID_ANY;
+			match_entry.match_id.rank = PTL_RANK_ANY;
+			match_entry.min_free = 0;
+			match_entry.start = event.start;
+			match_entry.length = RDMA_PTL_MSG_BUFFER_SIZE;
+			match_entry.ct_handle = PTL_CT_NONE;
+			match_entry.uid = PTL_UID_ANY;
+			match_entry.options = PTL_SRV_ME_OPTS;
 
-			rc = PtlLEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt),
-					 PTL_CP_SERVER_PTE, &le, PTL_PRIORITY_LIST,
+			rc = PtlMEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt),
+					 PTL_CP_SERVER_PTE, &match_entry, PTL_PRIORITY_LIST,
 					 event.user_ptr, event.user_ptr);
 			if (rc != PTL_OK) {
 				SPDK_PTL_FATAL(
@@ -729,7 +734,7 @@ static void rdma_ptl_boot_cp_server(struct  ptl_cm_id *cm_id, const char *role)
 {
 
 	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
-	ptl_le_t le;
+	ptl_me_t match_entry;
 	int rc;
 
 	PTL_CP_SERVER_LOCK(&ptl_control_plane_server.init_lock);
@@ -765,23 +770,27 @@ static void rdma_ptl_boot_cp_server(struct  ptl_cm_id *cm_id, const char *role)
 		SPDK_PTL_FATAL("Error allocating portal for connection server %d reason: %d",
 			       PTL_CP_SERVER_PTE, rc);
 	}
+	rc = PtlPTEnable(ptl_cnxt_get_ni_handle(ptl_cnxt), ptl_control_plane_server.pt_index);
+	if (PTL_OK != rc) {
+		SPDK_PTL_FATAL("Failed to enable PTE");
+	}
 
 	for (uint32_t i = 0; i < ptl_control_plane_server.num_conn_info; i++) {
 
-		memset(&le, 0, sizeof(ptl_le_t));
-		le.ignore_bits = RDMA_PTL_IGNORE;
-		le.match_bits = RDMA_PTL_MATCH;
-		le.match_id.phys.nid = PTL_NID_ANY;
-		le.match_id.phys.pid = PTL_PID_ANY;
-		le.min_free = 0;
-		le.start = &ptl_control_plane_server.recv_buffers[i];
-		le.length = RDMA_PTL_MSG_BUFFER_SIZE;
-		le.ct_handle = PTL_CT_NONE;
-		le.uid = PTL_UID_ANY;
-		le.options = PTL_SRV_ME_OPTS;
+		memset(&match_entry, 0, sizeof(match_entry));
+		match_entry.ignore_bits = 0;//RDMA_PTL_IGNORE;
+		match_entry.match_bits = 0x01ULL;//RDMA_PTL_MATCH;
+		match_entry.match_id.phys.nid = PTL_NID_ANY;
+		match_entry.match_id.phys.pid = PTL_PID_ANY;
+		match_entry.min_free = 0;
+		match_entry.start = &ptl_control_plane_server.recv_buffers[i];
+		match_entry.length = RDMA_PTL_MSG_BUFFER_SIZE;
+		match_entry.ct_handle = PTL_CT_NONE;
+		match_entry.uid = PTL_UID_ANY;
+		match_entry.options = PTL_SRV_ME_OPTS;
 
 		// Append LE for receiving control messages
-		rc = PtlLEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_CP_SERVER_PTE, &le,
+		rc = PtlMEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_CP_SERVER_PTE, &match_entry,
 				 PTL_PRIORITY_LIST, &ptl_control_plane_server.le_handle[i], &ptl_control_plane_server.le_handle[i]);
 		if (rc != PTL_OK) {
 			SPDK_PTL_FATAL("PtlLEAppend failed in control plane server with code: %d\n", rc);
@@ -1208,19 +1217,25 @@ static int rdma_ptl_find_nid(struct sockaddr *addr)
 		// For IPv4, get the last byte directly from the address
 		last_byte = ((uint8_t *)&sin->sin_addr.s_addr)[3];
 		SPDK_PTL_DEBUG("IPv4 last byte: %d", last_byte);
-		return last_byte;
+		goto exit;
 
 	case AF_INET6:
 		sin6 = (struct sockaddr_in6 *)addr;
 		// For IPv6, get the last byte from the 16-byte address
 		last_byte = sin6->sin6_addr.s6_addr[15];
 		SPDK_PTL_DEBUG("IPv6 last byte: %d", last_byte);
-		return last_byte;
+		goto exit;
 
 	default:
 		SPDK_PTL_FATAL("Unsupported address family: %d", addr->sa_family);
+		return -1;
 	}
+exit:
+#if BXIV3
+	return last_byte << 7;
+#else
 	return -1;
+#endif
 }
 
 static int rdma_ptl_find_dst_nid(struct rdma_cm_id *id)
