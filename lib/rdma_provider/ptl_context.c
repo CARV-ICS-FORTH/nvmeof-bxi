@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <infiniband/verbs.h>
 #include <portals4.h>
+#include <portals4_bxiext.h>
 #include <pthread.h>
 #include <spdk/util.h>
 #include <stdbool.h>
@@ -607,7 +608,7 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 struct ptl_context *ptl_cnxt_get(void)
 {
 	static pthread_mutex_t cnxt_lock = PTHREAD_MUTEX_INITIALIZER;
-	// ptl_ni_limits_t desired;
+	ptl_ni_limits_t desired;
 	ptl_ni_limits_t actual;
 	int ret;
 	const char *srv_pid;
@@ -639,17 +640,36 @@ struct ptl_context *ptl_cnxt_get(void)
 	ptl_context.pid = atoi(srv_pid);
 	ptl_context.nid = atoi(srv_nid);
 
-	// memset(&desired, 0, sizeof(ptl_ni_limits_t));
+	memset(&desired, 0, sizeof(ptl_ni_limits_t));
 
-	// desired.max_waw_ordered_size = 4096UL;
-	// desired.max_war_ordered_size = 4096UL;
+	desired.max_entries = 479075;
+	//This affects EQAlloc
+	desired.max_eqs = 1024;
+	//This affect MDBind
+	desired.max_mds = 479075;
+	//This affects max ptes?
+	desired.max_pt_index = 511;
+	// desired.max_list_size = 479075;
+	// desired.max_unexpected_headers = 479075;
+	// desired.max_cts = 1024;
+	// desired.max_iovecs = 1073741823;
+	// desired.max_triggered_ops = 479075;
+	// desired.max_msg_size = 68719476735UL;
+	// desired.max_atomic_size = 0;
+	// desired.max_fetch_atomic_size = 0;
+	// desired.max_waw_ordered_size = 0;
+	// desired.max_war_ordered_size = 0;
+	// desired.max_volatile_size = 60;
+	desired.features = PTL_BXI3_SERVICE;
+	// desired.bxi_max_cqs = 1;
+	// desired.bxi_compute_line = 2374264728;
+	// desired.cq_mode = 32767;
+	// desired.host_cq_size = 139646804452922;
 
-	// desired.features = PTL_TOTAL_DATA_ORDERING;
-
-	// ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
-	// 		(int)atoi(srv_pid), NULL, &actual, &ptl_context.ni_handle);
 	ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
-			ptl_context.pid, NULL, &actual, &ptl_context.ni_handle);
+			ptl_context.pid, &desired, &actual, &ptl_context.ni_handle);
+	// ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
+	// 		PTL_PID_ANY, NULL, &actual, &ptl_context.ni_handle);
 
 	if (ret != PTL_OK) {
 		SPDK_PTL_FATAL("RDMACM: PtlNIInit failed with code: %d for nid: %d and pid: %d", ret,
