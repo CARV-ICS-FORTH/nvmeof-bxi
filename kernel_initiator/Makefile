@@ -1,6 +1,6 @@
 # Build bxiv3_initiator.ko from rdma.c and portals shims (ib_portals.c, rdma_cm_portals.c)
 obj-m += bxiv3_initiator.o
-bxiv3_initiator-y := rdma.o ib_portals.o rdma_cm_portals.o mr_portals_pool.o ptl_cm_id.o ptl_pd.o ptl_bxiv3_device.o ptl_cq_pool.o ptl_cq.o ptl_qp.o
+bxiv3_initiator-y := rdma.o ib_portals.o rdma_cm_portals.o mr_portals_pool.o ptl_cm_id.o ptl_pd.o ptl_bxiv3_device.o ptl_cq_pool.o ptl_cq.o ptl_qp.o ptl_uuid.o
 
 # Kernel build tree for standard includes
 KDIR ?= /lib/modules/$(shell uname -r)/build
@@ -50,7 +50,8 @@ ccflags-y += -I$(KDIR)/drivers/infiniband/core -I$(KDIR)/include/rdma
 
 # Warnings
 ccflags-y += -Wall -Wextra -Wno-unused-parameter -Wno-type-limits -Wno-sign-compare
-
+# Enable debug symbols for crash line information
+ccflags-y += -g
 # Optional: build with DEBUG to enable pr_debug sites, etc.
 # ccflags-y += -DDEBUG
 
