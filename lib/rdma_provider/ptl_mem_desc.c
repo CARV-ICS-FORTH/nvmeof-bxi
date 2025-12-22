@@ -47,10 +47,12 @@ struct ptl_mem_desc *ptl_mem_desc_create_remote(void *start, size_t size, bool r
 		SPDK_PTL_FATAL("PtlMEAppend for RMA operations failed with error code: %d", rc);
 	}
 	SPDK_PTL_INFO("PtlMEAppend for RMA operation is successful!");
+#if !BXIV3
 	rc = PtlCTAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt), &mem_desc->remote.remote_wr_me.ct_handle);
 	if (PTL_OK != rc) {
 		SPDK_PTL_FATAL("Failed to allocate a counting event");
 	}
+#endif
 	return mem_desc;
 }
 
