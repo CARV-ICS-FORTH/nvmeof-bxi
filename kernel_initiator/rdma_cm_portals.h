@@ -18,8 +18,8 @@
                                      KBUILD_MODNAME)
 
 struct rdma_cm_id *__rdma_cm_portals_create_kernel_id(
-    struct net *net, rdma_cm_event_handler event_handler, void *context,
-    enum rdma_ucm_port_space ps, enum ib_qp_type qp_type, const char *caller);
+        struct net *net, rdma_cm_event_handler event_handler, void *context,
+        enum rdma_ucm_port_space ps, enum ib_qp_type qp_type, const char *caller);
 
 int rdma_cm_portals_destroy_id(struct rdma_cm_id *id);
 
