@@ -10,49 +10,28 @@
 #include <linux/types.h>
 #include <rdma/rdma_cm.h>
 typedef enum {
-  PTL_CM_DISCONNECTING = 0,
-  PTL_CM_DISCONNECTED,
-  PTL_CM_CONNECTING,
-  PTL_CM_CONNECTED,
-  PTL_CM_UNCONNECTED,
-  PTL_CM_GUARD
+	PTL_CM_DISCONNECTING = 0,
+	PTL_CM_DISCONNECTED,
+	PTL_CM_CONNECTING,
+	PTL_CM_CONNECTED,
+	PTL_CM_UNCONNECTED,
+	PTL_CM_GUARD
 } ptl_cm_id_e;
 
 struct ptl_cm_id {
-  ptl_obj_type_e object_type;
-  struct rdma_cm_id fake_cm_id;
-  struct net *net;
-  rdma_cm_event_handler event_handler;
-  void *event_handler_context;
-  int nid;
-  int pid;
-  struct ptl_bxiv3_device *bxiv3_dev;
-  struct ptl_qp *ptl_qp;
-  //  struct ptl_conn_msg conn_msg;
-  // struct rdma_cm_ptl_event_channel *ptl_channel;
-
-  /*As in verbs, each ptl_cm_id associates with a single ptl_pd */
-  // struct ptl_pd *ptl_pd;
-  // struct ptl_qp *ptl_qp;
-  // struct ptl_context *ptl_context;
-  // u64 uuid;
-  // /*Where the remote peer has MEs for recv*/
-  // u64 recv_match_bits;
-  // /*Where the remote peer has MEs for RMA operations*/
-  // u64 rma_match_bits;
-  // /**
-  // * CQ id of the remote peer where it has subscribed for events.
-  // * Its purpose is to encoded in the match bits in the PtlPut operations
-  // */
-  // int remote_cq_id;
-  // /*Which are MY match bits for recv operations*/
-  // u64 my_match_bits;
-  ptl_cm_id_e cm_id_state;
-  // int ptl_qp_num;
-  // struct ptl_cq *cq;
-  // struct rdma_conn_param conn_param;
-  // //needed for connection setup
-  // const void *fake_data;
+	ptl_obj_type_e object_type;
+	struct rdma_cm_id fake_cm_id;
+	struct net *net;
+	rdma_cm_event_handler event_handler;
+	void *event_handler_context;
+	int nid;
+	int pid;
+	int target_nid;
+	int target_pid;
+	struct ptl_bxiv3_device *bxiv3_dev;
+	struct ptl_qp *ptl_qp;
+	ptl_cm_id_e cm_id_state;
+	struct rdma_conn_param param;
 };
 
 struct ptl_cm_id *ptl_cm_id_create(struct net *net,

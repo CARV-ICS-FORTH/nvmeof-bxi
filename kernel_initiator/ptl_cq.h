@@ -4,19 +4,22 @@
 #include <portals4.h>
 #include <portals4_bxiext.h>
 #include <rdma/ib_verbs.h>
+struct ptl_bxiv3_device;
 struct ptl_cq {
-  ptl_obj_type_e obj_type;
-  /*Backpointer of where this ptl_cq belongs to */
-  struct ptl_cq_pool *cq_pool;
-  /* We keep a one-on-one mapping: Each CQ is bound to a single PTE. */
-  ptl_pt_index_t pte;
-  /* How many completion queue entries does this cq has */
-  int nr_cqes;
-  ptl_handle_eq_t eq;
-  struct list_head head;
-  struct ib_cq fake_cq;
-  ptl_eq_intr_index_t intr_index;
-  enum ib_poll_context poll_ctx;
+	ptl_obj_type_e obj_type;
+	/*Backpointer of where this ptl_cq belongs to */
+	struct ptl_cq_pool *cq_pool;
+	struct ptl_bxiv3_device *bxiv3_dev;
+	/* We keep a one-on-one mapping: Each CQ is bound to a single PTE. */
+	ptl_pt_index_t pte;
+	/*Warning in the kernel cq_id = pte*/
+	int ptl_cq_id;
+	/* How many completion queue entries does this cq has */
+	int nr_cqes;
+	ptl_handle_eq_t eq;
+	struct list_head head;
+	struct ib_cq fake_cq;
+	enum ib_poll_context poll_ctx;
 };
 
 /**
@@ -34,9 +37,9 @@ struct ptl_cq {
  *
  * Return: Pointer to the newly created ptl_cq object, or NULL on failure.
  */
-struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool, int nr_cqes,
-                             ptl_pt_index_t pte, enum ib_poll_context poll_ctx,
-                             cpumask_t *cpu_mask);
+struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
+                             struct ptl_bxiv3_device *bxiv3_dev, int nr_cqes,
+                             ptl_pt_index_t pte, enum ib_poll_context poll_ctx);
 
 /**
  * ptl_cq_destroy - Destroy a Portals completion queue object
