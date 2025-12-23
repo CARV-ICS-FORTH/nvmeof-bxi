@@ -51,8 +51,8 @@ void ib_portals_dma_sync_single_for_device(struct ib_device *ibdev,
                                            enum dma_data_direction dir);
 
 /* Posting send/recv */
-int ib_portals_post_send(struct ib_qp *qp, void *wr, void *bad);
-int ib_portals_post_recv(struct ib_qp *qp, void *wr, void *bad);
+int ib_portals_post_send(struct ib_qp *qp, struct ib_send_wr *wr, struct ib_send_wr **bad_wr);
+int ib_portals_post_recv(struct ib_qp *qp, struct ib_recv_wr *wr, struct ib_recv_wr **bad_wr);
 
 /* CQ processing */
 int ib_portals_process_cq_direct(struct ib_cq *cq, int budget);
