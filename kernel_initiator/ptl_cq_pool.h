@@ -8,15 +8,15 @@
 #define PTL_CQ_POOL_ENABLED 0
 #define PTL_CQ_POOL_DISABLED 1
 struct ptl_cq_pool {
-  ptl_obj_type_e obj_type;
-  struct ptl_bxiv3_device *bxiv3_device;
-  struct list_head ptl_cq_list_free;
-  struct list_head ptl_cq_list_reserved;
-  u32 num_free_cqs;
-  u32 num_reserved_cqs;
-  struct list_head head;
-  spinlock_t cq_list_lock;
-  unsigned long pool_state;
+	ptl_obj_type_e obj_type;
+	struct ptl_bxiv3_device *bxiv3_device;
+	struct list_head ptl_cq_list_free;
+	struct list_head ptl_cq_list_reserved;
+	u32 num_free_cqs;
+	u32 num_reserved_cqs;
+	struct list_head head;
+	spinlock_t cq_list_lock;
+	unsigned long pool_state;
 };
 
 struct ptl_cq_pool *ptl_cq_pool_create(struct ptl_bxiv3_device *bxiv3_dev);
