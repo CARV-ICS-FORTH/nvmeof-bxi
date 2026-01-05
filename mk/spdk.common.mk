@@ -174,7 +174,7 @@ endif
 
 ifeq ($(CONFIG_RDMA),y)
 ifeq ($(CONFIG_RDMA_PROV),portals)
-	SYS_LIBS += -L$(RDMA_CM_PORTALS_PREFIX) -libverbs_portals -lrdmacm_portals
+	SYS_LIBS += -L$(RDMA_CM_PORTALS_PREFIX) -libverbs_portals -lrdmacm_portals -lspdk_ptl_core
 	SYS_LIBS += -L$(PORTALS_LIB_PREFIX) -lportals
 	#gesalous
 	LDFLAGS += -Wl,-rpath=$(PORTALS_LIB_PREFIX)

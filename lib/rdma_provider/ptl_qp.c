@@ -9,7 +9,7 @@
 #include <stdlib.h>
 
 struct ptl_qp *ptl_qp_create(struct ptl_pd *ptl_pd, struct ptl_cq *send_queue,
-			     struct ptl_cq *receive_queue, struct ptl_conn_comm_pair_info * comm_pair_info)
+			     struct ptl_cq *receive_queue, int remote_nid, int remote_pid, int remote_pte)
 {
 	assert(ptl_pd);
 	assert(send_queue);
@@ -29,9 +29,9 @@ struct ptl_qp *ptl_qp_create(struct ptl_pd *ptl_pd, struct ptl_cq *send_queue,
 	ptl_qp->recv_cq = receive_queue;
 	ptl_qp->fake_qp.recv_cq = ptl_cq_get_ibv_cq(receive_queue);
 
-	ptl_qp->remote_nid = comm_pair_info->dst_nid;
-	ptl_qp->remote_pid = comm_pair_info->dst_pid;
-	ptl_qp->remote_pt_index = comm_pair_info->dst_pte;
+	ptl_qp->remote_nid = remote_nid;
+	ptl_qp->remote_pid = remote_pid;
+	ptl_qp->remote_pte = remote_pte;
 	return ptl_qp;
 }
 

@@ -1,9 +1,10 @@
 #ifndef PTL_CONTEXT_H
 #define PTL_CONTEXT_H
 #include "../../include/spdk/nvme_spec.h"
-#include "portals4.h"
+#include "ptl_config.h"
 #include "ptl_object_types.h"
 #include <infiniband/verbs.h>
+#include <portals4.h>
 #include <stdbool.h>
 #define PTL_CONTEXT_SERVER_PID 0
 #define PTL_IOVEC_SIZE 2
@@ -12,31 +13,53 @@ struct ibv_context;
 struct ibv_pd;
 
 struct ptl_context_recv_op {
+	ptl_iovec_t io_vector[PTL_IOVEC_SIZE];
+	ptl_me_t me;/*Used for creating the ME*/
+	ptl_handle_me_t me_handle;/*The returned handle*/
 	uint64_t bytes_received;
 	int initiator_qp_num;
 	int target_qp_num;
-	bool reveive_done;
 	/*In which cqid I wait for the receive event*/
 	int cq_id;
-	ptl_iovec_t io_vector[PTL_IOVEC_SIZE];
+	bool receive_done;
 };
 
 struct ptl_context_send_op {
-	int qp_num;
-	/*only for DEBUG purposes*/
 	uint64_t crc_checksum;
 	void *addr;
+	int qp_num;
 	int length;
+	bool signal_app;
+};
+
+struct ptl_context_rdma_write_op {
+	uint32_t total_parts;
+	uint32_t parts_acked;
+	void *addr;
+	int qp_num;
+	int length;
+};
+
+struct ptl_context_rdma_read_op {
+	uint32_t total_parts;
+	uint32_t parts_acked;
 };
 
 struct ptl_context_op_meta {
 	ptl_obj_type_e obj_type;
 	uint64_t wr_id;
+#if PTL_ENABLE_BIND_PER_OP
+	ptl_md_t md_desc[PTL_MAX_SG_LIST];
+	ptl_handle_md_t md_handle[PTL_MAX_SG_LIST];
+#endif
 	int cq_id;
 	union {
 		struct ptl_context_send_op send_op;
 		struct ptl_context_recv_op recv_op;
+		struct ptl_context_rdma_write_op rdma_write_op;
+		struct ptl_context_rdma_write_op rdma_read_op;
 	};
+	bool signal_app;
 };
 
 
@@ -49,7 +72,13 @@ struct ptl_context {
 	struct ptl_pd *ptl_pd;
 	struct ibv_context fake_ibv_cnxt;
 	struct ibv_cq fake_cq;
-	struct spdk_rdma_provider_srq *srq;
+	/**
+	 * Keeps which PTEs have not been assigned to a shared receive queue
+	 * and their correspoding size. 0 free, 1 in use
+	**/
+	uint8_t *pte_allocation_table;
+	uint32_t ptl_allocation_table_size;
+	// struct spdk_rdma_provider_srq *srq;
 	int pid;
 	int nid;
 	bool initialized;
@@ -75,7 +104,9 @@ static inline int ptl_cnxt_get_pid(struct ptl_context *cnxt)
 }
 
 
-
-
+/**
+  * Allocates a free pte typically for use for a new srq
+**/
+int ptl_cnxt_allocate_pte(struct ptl_context *cnxt);
 #endif
 

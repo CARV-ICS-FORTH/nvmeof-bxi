@@ -20,7 +20,7 @@ LIBNAME = nvmf
 LOCAL_SYS_LIBS =
 ifeq ($(CONFIG_RDMA),y)
 ifeq ($(CONFIG_RDMA_PROV),portals)
-	LOCAL_SYS_LIBS += -L$(RDMA_CM_PORTALS_PREFIX) -libverbs_portals -lrdmacm_portals
+	LOCAL_SYS_LIBS += -L$(RDMA_CM_PORTALS_PREFIX) -libverbs_portals -lrdmacm_portals -lspdk_ptl_core
 else
 	LOCAL_SYS_LIBS += -libverbs -lrdmacm
 endif

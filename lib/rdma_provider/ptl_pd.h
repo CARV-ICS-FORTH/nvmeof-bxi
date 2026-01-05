@@ -7,27 +7,33 @@
 #include <spdk/util.h>
 #include <stdbool.h>
 #include <stdint.h>
-#define PTL_PD_MAX_MEM_DESC 32
 struct spdk_rdma_utils_mem_map;
+struct ptl_mem_desc;
+struct ptl_pd;
+struct ptl_pd_mem_desc_map;
+struct ptl_pd_mem_desc_map_ops;
+typedef struct ptl_pd_mem_desc_map *(*ptl_pd_mem_desc_map_create)(uint32_t num_entries,
+		const char *name);
+typedef bool (*ptl_pd_mem_desc_map_add)(struct ptl_pd_mem_desc_map *map,
+					struct ptl_mem_desc *mem_desc);
+typedef struct ptl_mem_desc *(*ptl_pd_mem_desc_map_get)(struct ptl_pd_mem_desc_map *map,
+		uint64_t address, size_t length,
+		bool is_remote_operation);
+typedef bool (*ptl_mem_desc_map_destroy)(struct ptl_pd_mem_desc_map *mem_desc_map);
 
-struct ptl_pd_mem_desc {
-	ptl_md_t local_w_mem_desc;
-	ptl_me_t remote_wr_me;
-	ptl_handle_md_t local_w_mem_handle;
-	ptl_handle_md_t remote_rw_mem_handle;
-	ptl_handle_ct_t remote_rw_ct_handle;
-	bool remote_read;
-	bool remote_write;
-	bool local_write;
-	bool is_valid;
+struct ptl_pd_mem_desc_map_ops {
+	ptl_pd_mem_desc_map_create create;
+	ptl_pd_mem_desc_map_add add;
+	ptl_pd_mem_desc_map_get get;
+	ptl_mem_desc_map_destroy destroy;
 };
+
 
 struct ptl_pd {
 	ptl_obj_type_e object_type;
 	struct ibv_pd fake_pd;
-	struct ptl_pd_mem_desc *ptl_mem_desc[PTL_PD_MAX_MEM_DESC];
+
 	struct ptl_context *ptl_cnxt;
-	uint32_t num_ptl_mem_desc;
 
 	/**
 	* ptl_pd object keeps references to the ptl_md_handle_t. A major difference with the ibv_pd,
@@ -37,10 +43,19 @@ struct ptl_pd {
 	**/
 	struct ptl_eq *ptl_eq;
 	struct spdk_rdma_utils_mem_map *mem_map;
+	/**
+	* This is where we keep for accounting purposes the
+	* coarse grain memory allocations of SPDK
+	*/
+	struct ptl_pd_mem_desc_map *mem_desc_map;
+	struct ptl_pd_mem_desc_map_ops ops;
 	bool in_use;
 };
 
-struct ptl_pd *ptl_pd_create(struct ptl_context *ptl_context);
+
+
+
+struct ptl_pd *ptl_pd_create(struct ptl_context *ptl_context, struct ptl_pd_mem_desc_map_ops *ops);
 
 static inline bool ptl_pd_in_use(struct ptl_pd *ptl_pd)
 {
@@ -90,8 +105,4 @@ static inline struct ptl_eq *ptl_pd_get_ptl_cq(struct ptl_pd *ptl_pd)
 	}
 	return ptl_pd->ptl_eq;
 }
-bool ptl_pd_add_mem_desc(struct ptl_pd *ptl_pd, struct ptl_pd_mem_desc *mem_desc);
-
-struct ptl_pd_mem_desc *ptl_pd_get_mem_desc(struct ptl_pd *ptl_pd, uint64_t address,
-		size_t length, bool is_local_operation, bool is_remote_operation);
 #endif

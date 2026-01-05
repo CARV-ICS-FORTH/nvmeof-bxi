@@ -30,7 +30,6 @@ struct ptl_cq *ptl_cq_get(int ptl_cq_id)
 
 static void ptl_cq_initialize_static(void)
 {
-
 	ptl_handle_ni_t nic;
 	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
 	int ret;

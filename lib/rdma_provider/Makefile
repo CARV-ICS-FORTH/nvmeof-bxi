@@ -11,30 +11,32 @@ SO_VER := 8
 SO_MINOR := 0
 
 SPDK_MAP_FILE = $(abspath $(CURDIR)/spdk_rdma_provider.map)
-
+include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk
 LIBNAME = rdma_provider
 
-# librdamcm library settings
-WRAPPER_LIBNAME = rdmacm_portals
-WRAPPER_SRCS = rdma_cm_portals.c
-WRAPPER_SRCS += ptl_cm_id.c
-WRAPPER_SRCS += ptl_context.c
-WRAPPER_SRCS += dlist.c
-WRAPPER_SRCS += deque.c
-WRAPPER_SRCS += ptl_cq.c
-WRAPPER_SRCS += ptl_pd.c
-WRAPPER_SRCS += ptl_qp.c
-WRAPPER_SRCS += ptl_srq.c
-WRAPPER_SRCS += ptl_uuid.c
-WRAPPER_SRCS += ptl_print_nvme_commands.c
-WRAPPER_SO = lib$(WRAPPER_LIBNAME).so
+# Portals core library settings (shared by both providers)
+CORE_LIBNAME = spdk_ptl_core
+CORE_SRCS = ptl_cm_id.c
+CORE_SRCS += ptl_context.c
+CORE_SRCS += dlist.c
+CORE_SRCS += deque.c
+CORE_SRCS += ptl_cq.c
+CORE_SRCS += ptl_pd.c
+CORE_SRCS += ptl_qp.c
+CORE_SRCS += ptl_srq.c
+CORE_SRCS += ptl_uuid.c
+CORE_SRCS += ptl_mem_desc.c
+CORE_SRCS += ptl_print_nvme_commands.c
+CORE_SO = lib$(CORE_LIBNAME).so
 
+# librdmacm library settings
+RDMACM_LIBNAME = rdmacm_portals
+RDMACM_SRCS = rdma_cm_portals.c
+RDMACM_SO = lib$(RDMACM_LIBNAME).so
 
-# librdamcm library settings
+# libibverbs library settings
 VERBS_LIBNAME = ibverbs_portals
 VERBS_SRCS = verbs_mockup.c
-VERBS_SRCS += ptl_cq.c
-VERBS_SRCS += ptl_pd.c
 VERBS_SO = lib$(VERBS_LIBNAME).so
 
 
@@ -51,14 +53,15 @@ C_SRCS += rdma_provider_mlx5_dv.c
 LOCAL_SYS_LIBS += -lmlx5
 else ifeq ($(CONFIG_RDMA_PROV),portals)
 C_SRCS = rdma_provider_portals.c
-# Build wrapper library for development
-EXTRA_TARGETS = $(VERBS_SO) $(WRAPPER_SO)
+C_SRCS += ptl_rte_hash_map.c
+EXTRA_TARGETS = $(CORE_SO) $(VERBS_SO) $(RDMACM_SO)
 # gesalous, not needed everything set in mk/spdk.common.mk
 LOCAL_SYS_LIBS = -L$(PORTALS_LIB_PREFIX) -lportals
-LOCAL_SYS_LIBS = -L$(RDMA_CM_PORTALS_PREFIX) -libverbs_portals -lrdmacm_portals
+LOCAL_SYS_LIBS = -L$(RDMA_CM_PORTALS_PREFIX) -lspdk_ptl_core -libverbs_portals -lrdmacm_portals -lspdk_ptl_core
 # gesalous, not needed everything set in mk/spdk.common.mk
 # LDFLAGS += -Wl,-rpath,$(PORTALS_LIB_PREFIX)
 # LDFLAGS += -Wl,-rpath,-L$(RDMA_CM_PORTALS_PREFIX) 
+CFLAGS += -I$(CONFIG_DPDK_INC_DIR)
 CFLAGS += -I$(PORTALS_INCLUDE_PREFIX)
 
 else
@@ -85,36 +88,43 @@ LOCAL_SYS_LIBS += -lcxgb4
 endif
 endif
 
-# Build verbs_mockup shared library
-$(VERBS_SO): $(VERBS_SRCS)
-	$(CC) -shared -o $@ $^ -fPIC $(CFLAGS)
-
-$(WRAPPER_SO): $(WRAPPER_SRCS)
-	$(CC) -shared -o $@ $^ -fPIC -ldl $(CFLAGS) \
+# Build portals core shared library (must be built first)
+$(CORE_SO): $(CORE_SRCS)
+	$(CC) -shared -o $@ $^ -fPIC $(CFLAGS) \
 		-I$(PORTALS_INCLUDE_PREFIX) \
 		-L$(PORTALS_LIB_PREFIX) -lportals \
 		-Wl,-rpath,$(PORTALS_LIB_PREFIX)
 
+$(VERBS_SO): $(VERBS_SRCS) $(CORE_SO)
+	$(CC) -shared -o $@ $^ -fPIC $(CFLAGS) \
+	    -L. -lspdk_ptl_core -Wl,-rpath,'$$ORIGIN'
+
+$(RDMACM_SO): $(RDMACM_SRCS) $(CORE_SO)
+	$(CC) -shared -o $@ $^ -fPIC $(CFLAGS) \
+	    -L. -lspdk_ptl_core -ldl -Wl,-rpath,'$$ORIGIN'
+
+
+.PHONY: core_clean
+core_clean:
+	$(RM) $(CORE_SO)
 
 .PHONY: verbs_clean
 verbs_clean:
 	$(RM) $(VERBS_SO)
 
-.PHONY: wrapper_clean
-wrapper_clean:
-	$(RM) $(WRAPPER_SO)
+.PHONY: rdmacm_clean
+rdmacm_clean:
+	$(RM) $(RDMACM_SO)
 
 
-clean: verbs_clean wrapper_clean
+clean: core_clean verbs_clean rdmacm_clean
 
-# Add wrapper library to all target if we're using portals
+# Add verbs, rdmacm impl over portals to all targets if we're using portals
 ifeq ($(CONFIG_RDMA_PROV),portals)
 all: $(EXTRA_TARGETS)
 endif
 
-# Explicit target for building the wrapper library
-.PHONY: wrapper
-wrapper: $(WRAPPER_SO)
+.PHONY: rdmacm
+rdmacm: $(RDMACM_SO)
 
 include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk
-

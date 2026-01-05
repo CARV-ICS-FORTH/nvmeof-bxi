@@ -14,7 +14,7 @@
 #include <unistd.h>
 #define CLOCK_FREQ 2900000000.0
 #define STARTING_LBA 8192UL
-#define PROGRESS_REPORTING_PERIOD 4096U
+#define PROGRESS_REPORTING_PERIOD 65536U
 
 
 #define RTEST_PTL_INFO(fmt, ...)                                             \
@@ -358,9 +358,11 @@ static void run_io_loop(bool check_data)
 
 	double estimated_time_seconds = (double)total_cycles / CLOCK_FREQ;
 	double throughput_mbps = (double)total_bytes / (1024.0 * 1024.0) / estimated_time_seconds;
+  double iops = g_completed_ios / estimated_time_seconds;
 
 	RTEST_PTL_INFO("Estimated time: %.6f seconds", estimated_time_seconds);
 	RTEST_PTL_INFO("Estimated throughput: %.2f MB/s", throughput_mbps);
+	RTEST_PTL_INFO("Estimated IOPs: %.2f", iops);
 
 	// Cleanup buffers
 	for (i = 0; i < g_queue_depth; i++) {

@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <infiniband/verbs.h>
 #include <portals4.h>
+#include <portals4_bxiext.h>
 #include <pthread.h>
 #include <spdk/util.h>
 #include <stdbool.h>
@@ -52,6 +53,22 @@ static uint64_t ptl_cnxt_calculate_crc64(const void *data, size_t length)
 	return crc ^ 0xFFFFFFFFFFFFFFFFULL;
 }
 
+static inline void ptl_cnxt_destroy_op_meta(struct ptl_context_op_meta *op_meta)
+{
+#if PTL_ENABLE_BIND_PER_OP
+	if (op_meta->obj_type == PTL_RECV_OP) {
+		goto destroy;
+	}
+	for (uint32_t i = 0; i < PTL_MAX_SG_LIST; i++) {
+		if (NULL == op_meta->md_handle[i].handle) {
+			break;
+		}
+		PtlMDRelease(op_meta->md_handle[i]);
+	}
+destroy:
+#endif
+	free(op_meta);
+}
 
 static void ptl_cnxt_keep_event(struct ptl_cq *ptl_cq, struct ibv_wc *wc,
 				struct ptl_context_op_meta *op_meta)
@@ -107,21 +124,13 @@ static struct ptl_context_op_meta *ptl_cnxt_process_put(ptl_event_t event, struc
 	}
 
 
-	if (event.start != recv_meta->recv_op.io_vector) {
+	if (event.start != recv_meta->recv_op.io_vector[0].iov_base) {
 		SPDK_PTL_FATAL(
 			"Corrupted receive event.start: %p event.legnth: %lu "
 			"iovector[0] = %p iovector size[0] = %lu pte: %d",
 			event.start, event.rlength, recv_meta->recv_op.io_vector[0].iov_base,
 			recv_meta->recv_op.io_vector[0].iov_len, event.pt_index);
 	}
-
-//  if (event.start != recv_op->io_vector[0].iov_base) {
-	// 	SPDK_PTL_FATAL(
-	// 		"Corrupted receive event.start: %p event.legnth: %lu "
-	// 		"iovector[0] = %p iovector size[0] = %lu pte: %d",
-	// 		event.start, event.rlength, recv_op->io_vector[0].iov_base,
-	// 		recv_op->io_vector[0].iov_len, event.pt_index);
-	// }
 
 	recv_meta->recv_op.initiator_qp_num =  ptl_uuid_get_initiator_qp_num(event.match_bits);
 	recv_meta->recv_op.target_qp_num = ptl_uuid_get_target_qp_num(event.match_bits);
@@ -136,8 +145,7 @@ static struct ptl_context_op_meta *ptl_cnxt_process_put(ptl_event_t event, struc
 			       recv_meta->recv_op.initiator_qp_num, recv_meta->recv_op.target_qp_num);
 	}
 	recv_meta->recv_op.bytes_received = event.rlength;
-	//debug
-	recv_meta->recv_op.reveive_done = true;
+	recv_meta->recv_op.receive_done = true;
 
 	return NULL;
 }
@@ -188,31 +196,45 @@ static struct ptl_context_op_meta *ptl_cnxt_process_fetch_atomic_overflow(ptl_ev
 	return NULL;
 }
 
+
+/**
+ * Handles PTL_EVENT_REPLY events, which indicate that a PtlGet operation
+ * issued by the initiator has successfully transferred the data into its
+ * memory. This notification confirms the RDMA read completion.
+ *
+ * @param event The Portals event containing reply information
+ * @param wc Work completion structure to be filled with operation results
+ * @param ptl_cq The Portals completion queue
+ * @return Pointer to the operation metadata, or NULL if no context was provided
+ */
 static struct ptl_context_op_meta *ptl_cnxt_process_reply(ptl_event_t event, struct ibv_wc *wc,
 		struct ptl_cq *ptl_cq)
 {
-	/**
-	 * Notification at the initiator that the read issued by it has
-	 * moved the data in its memory
-	 */
-	struct ptl_context_op_meta *rdma_read_meta;
+	struct ptl_context_op_meta *rdma_read_meta = event.user_ptr;
 
-	if (event.user_ptr == NULL) {
+	if (rdma_read_meta == NULL) {
 		SPDK_PTL_DEBUG("Caution RDMA read without a context app does not want a signal ok.");
 		return NULL;
 	}
 
-	memset(wc, 0xFF, sizeof(*wc));
+	if (rdma_read_meta->obj_type != PTL_RDMA_READ_OP) {
+		SPDK_PTL_FATAL("Corrupted obj type should have been a PTL_RDMA_READ_OP");
+	}
+
 
 	if (event.ni_fail_type != PTL_NI_OK) {
 		SPDK_PTL_FATAL("Operation failed with code: %d", event.ni_fail_type);
 	}
 
-
-	rdma_read_meta = event.user_ptr;
-	if (rdma_read_meta->obj_type != PTL_SEND_OP) {
-		SPDK_PTL_FATAL("Corrupted object");
+	if (++rdma_read_meta->rdma_read_op.parts_acked < rdma_read_meta->rdma_read_op.total_parts) {
+		return NULL;
 	}
+
+	if (false == rdma_read_meta->signal_app) {
+		ptl_cnxt_destroy_op_meta(rdma_read_meta);
+		return NULL;
+	}
+
 	wc->status =
 		event.ni_fail_type == PTL_NI_OK ? IBV_WC_SUCCESS : IBV_WC_LOC_PROT_ERR;
 	wc->opcode = IBV_WC_RDMA_READ;
@@ -225,7 +247,7 @@ static struct ptl_context_op_meta *ptl_cnxt_process_reply(ptl_event_t event, str
 	}
 	wc->src_qp = 0;/*XXX TODO XXX*/
 	SPDK_PTL_DEBUG("NVMe: RDMA read done (PTL_EVENT_REPLY). Number of bytes received: %lu. Filling wc with code %d qp_num: %d",
-		       event.rlength, event.ni_fail_type, rdma_read_op->qp_num);
+		       event.rlength, event.ni_fail_type, rdma_read_meta->send_op.qp_num);
 
 
 	return rdma_read_meta;
@@ -237,28 +259,66 @@ static struct ptl_context_op_meta *ptl_cnxt_process_send(ptl_event_t event, stru
 	return NULL;
 }
 
+
+/**
+ * Process a PTL_EVENT_ACK for an initiator-issued PtlPut.
+ *
+ * This handler is invoked when the initiator receives a PTL_EVENT_ACK generated
+ * for a PtlPut operation that explicitly requested an acknowledgment. In Portals 4,
+ * PTL_EVENT_ACK is an initiator-side event that indicates the target has matched the
+ * incoming PUT against its match list (ME/LE) and completed the delivery to the target
+ * memory according to Portals 4 semantics.
+ *
+ * Notes:
+ * - Applies to PtlPut regardless of whether the initiator’s usage corresponds to a
+ *   send or an (RMA) PUT. In both cases, the ACK confirms data are in the memory of the
+ *   Target.
+ * - This is stronger than local send completion (PTL_EVENT_SEND). PTL_EVENT_ACK means
+ *   the target has received, matched, and placed the data into its memory.
+ * - You will not receive PTL_EVENT_ACK for PtlGet; GET completion at the initiator is
+ *   indicated by PTL_EVENT_REPLY instead.
+ *
+ * On success (event.ni_fail_type == PTL_NI_OK), this function populates the provided
+ * ibv_wc with a successful SEND completion semantics for the original PUT, using the
+ * metadata carried in event.user_ptr, and returns the associated ptl_context_op_meta.
+ * On failure, it reports the Portals NI failure code.
+ */
 static struct ptl_context_op_meta *ptl_cnxt_process_ack(ptl_event_t event, struct ibv_wc *wc,
 		struct ptl_cq *ptl_cq)
 {
 	struct ptl_context_op_meta *send_meta;
 
 	if (NULL == event.user_ptr) {
-		SPDK_PTL_DEBUG("NVMe: PtlPut without context? App does not want any signal");
+		SPDK_PTL_DEBUG("NVMe: PTL_EVENT_ACK without context?");
 		return NULL;
 	}
-
 	send_meta = event.user_ptr;
-	if (send_meta->obj_type != PTL_SEND_OP) {
-		SPDK_PTL_FATAL("Corrupted object type this is not a PTL_LE_SEND_OP");
-	}
-	SPDK_PTL_DEBUG("NVMe: Got a PTL_EVENT_ACK event filling wc with code %d event type: %d from local qp num: %d",
-		       event.ni_fail_type, event.type, send_op->qp_num);
 
-	// memset(wc, 0x00, sizeof(*wc));
+	if (send_meta->obj_type != PTL_SEND_OP && send_meta->obj_type != PTL_RDMA_WRITE_OP) {
+		SPDK_PTL_FATAL("Corrupted object type: %d this is not a PTL_SEND_OP or PTL_RDMA_WRITE_OP",
+			       send_meta->obj_type);
+	}
+
+	SPDK_PTL_DEBUG("NVMe: Got a PTL_EVENT_ACK event for an %s operation. Filling "
+		       "wc with code %d event type: %d from local qp num: %d",
+		       send_meta->obj_type == PTL_SEND_OP ? "SEND" : "RDMA_WRITE",
+		       event.ni_fail_type, event.type, send_meta->send_op.qp_num);
 
 	if (event.ni_fail_type != PTL_NI_OK) {
 		SPDK_PTL_FATAL("Operation failed with code: %d", event.ni_fail_type);
 	}
+
+	if (PTL_RDMA_WRITE_OP == send_meta->obj_type &&
+	    ++send_meta->rdma_write_op.parts_acked < send_meta->rdma_write_op.total_parts) {
+		return NULL;
+	}
+
+	if (false == send_meta->signal_app) {
+		SPDK_PTL_DEBUG("App does not want to be signaled freeing the buffer");
+		ptl_cnxt_destroy_op_meta(send_meta);
+		return NULL;
+	}
+
 	wc->status =
 		event.ni_fail_type == PTL_NI_OK ? IBV_WC_SUCCESS : IBV_WC_LOC_PROT_ERR;
 	wc->opcode = IBV_WC_SEND;
@@ -304,8 +364,11 @@ static struct ptl_context_op_meta *ptl_cnxt_process_auto_unlink(ptl_event_t even
 		SPDK_PTL_FATAL("Corrupted recv_op");
 	}
 
-	if (false == recv_meta->recv_op.reveive_done) {
-		SPDK_PTL_FATAL("AUTO_UNLINK without a prior receive!");
+	if (false == recv_meta->recv_op.receive_done) {
+		SPDK_PTL_FATAL("AUTO_UNLINK without a prior receive for "
+			       "{buffer:%lu, len: %lu cq id: %d} event fail type: %d",
+			       (size_t)recv_meta->recv_op.io_vector[0].iov_base,
+			       recv_meta->recv_op.io_vector[0].iov_len, ptl_cq->cq_id, event.ni_fail_type);
 	}
 
 	if (event.ni_fail_type != PTL_NI_OK) {
@@ -323,9 +386,9 @@ static struct ptl_context_op_meta *ptl_cnxt_process_auto_unlink(ptl_event_t even
 	SPDK_PTL_DEBUG("NVMe-cmd-recv: RECV (PtlPut+AUTO_UNLINK) operation is "
 		       "between the pair initiator_qp_num = %d target_qp_num = "
 		       "%d is target? %s size: %lu B wc->qp_num = %d recv_buffer = %lu",
-		       recv_op->initiator_qp_num,
-		       recv_op->target_qp_num, is_target ? "YES" : "NO",
-		       recv_op->bytes_received, wc->qp_num, (uint64_t)recv_op->io_vector[0].iov_base);
+		       recv_meta->recv_op.initiator_qp_num,
+		       recv_meta->recv_op.target_qp_num, is_target ? "YES" : "NO",
+		       recv_meta->recv_op.bytes_received, wc->qp_num, (uint64_t)recv_meta->recv_op.io_vector[0].iov_base);
 
 	if (wc->qp_num == 0) {
 		SPDK_PTL_FATAL(
@@ -458,6 +521,10 @@ static int ptl_print_event(struct ptl_context_op_meta *op_meta, bool is_late)
 			: ptl_print_nvme_cpl(
 				op_meta->recv_op.io_vector[0].iov_base,
 				is_late ? prefix_cpl_recv_late : prefix_cpl_recv, op_meta->cq_id));
+	} else if (op_meta->obj_type == PTL_RDMA_WRITE_OP) {
+		SPDK_PTL_INFO("NVMe-send: An RDMA write completed ok move on");
+	} else if (op_meta->obj_type == PTL_RDMA_READ_OP) {
+		SPDK_PTL_INFO("NVMe-recv: An RDMA read completed ok move on");
 	} else {
 		SPDK_PTL_FATAL("Corrupted op meta");
 	}
@@ -494,10 +561,10 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 			break;
 		}
 		SPDK_PTL_DEBUG("PtlCQ: Delivered late event for ptl_cq id: %d wr_id = %lu", ptl_cq->cq_id,
-			       late_wc->wr_id);
+			       ptl_late_wc->wc.wr_id);
 		wc[events_processed++] = ptl_late_wc->wc;
 		SPDK_PTL_DEBUG("Late event: %d", ptl_print_event(ptl_late_wc->op_meta, true));
-		free(ptl_late_wc->op_meta);
+		ptl_cnxt_destroy_op_meta(ptl_late_wc->op_meta);
 		ptl_late_wc->op_meta = NULL;
 		free(ptl_late_wc);
 		ptl_late_wc = NULL;
@@ -520,7 +587,7 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 			}
 
 			SPDK_PTL_DEBUG("PtlCQ Delivered on-time event: %d", ptl_print_event(op_meta, false));
-			free(op_meta);
+			ptl_cnxt_destroy_op_meta(op_meta);
 			op_meta = NULL;
 			++events_processed;
 
@@ -541,7 +608,7 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 struct ptl_context *ptl_cnxt_get(void)
 {
 	static pthread_mutex_t cnxt_lock = PTHREAD_MUTEX_INITIALIZER;
-	// ptl_ni_limits_t desired;
+	ptl_ni_limits_t desired;
 	ptl_ni_limits_t actual;
 	int ret;
 	const char *srv_pid;
@@ -552,7 +619,6 @@ struct ptl_context *ptl_cnxt_get(void)
 	}
 
 	ptl_context.object_type = PTL_CONTEXT;
-	// ptl_context.portals_idx_send_recv = PTL_PT_INDEX;
 	SPDK_PTL_DEBUG("Calling PtlInit()");
 	ret = PtlInit();
 	if (ret != PTL_OK) {
@@ -574,17 +640,36 @@ struct ptl_context *ptl_cnxt_get(void)
 	ptl_context.pid = atoi(srv_pid);
 	ptl_context.nid = atoi(srv_nid);
 
-	// memset(&desired, 0, sizeof(ptl_ni_limits_t));
+	memset(&desired, 0, sizeof(ptl_ni_limits_t));
 
-	// desired.max_waw_ordered_size = 4096UL;
-	// desired.max_war_ordered_size = 4096UL;
+	desired.max_entries = 479075;
+	//This affects EQAlloc
+	desired.max_eqs = 1024;
+	//This affect MDBind
+	desired.max_mds = 479075;
+	//This affects max ptes?
+	desired.max_pt_index = 511;
+	// desired.max_list_size = 479075;
+	// desired.max_unexpected_headers = 479075;
+	// desired.max_cts = 1024;
+	// desired.max_iovecs = 1073741823;
+	// desired.max_triggered_ops = 479075;
+	// desired.max_msg_size = 68719476735UL;
+	// desired.max_atomic_size = 0;
+	// desired.max_fetch_atomic_size = 0;
+	// desired.max_waw_ordered_size = 0;
+	// desired.max_war_ordered_size = 0;
+	// desired.max_volatile_size = 60;
+	desired.features = PTL_BXI3_SERVICE;
+	// desired.bxi_max_cqs = 1;
+	// desired.bxi_compute_line = 2374264728;
+	// desired.cq_mode = 32767;
+	// desired.host_cq_size = 139646804452922;
 
-	// desired.features = PTL_TOTAL_DATA_ORDERING;
-
-	// ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
-	// 		(int)atoi(srv_pid), NULL, &actual, &ptl_context.ni_handle);
 	ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
-			ptl_context.pid, NULL, &actual, &ptl_context.ni_handle);
+			ptl_context.pid, &desired, &actual, &ptl_context.ni_handle);
+	// ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
+	// 		PTL_PID_ANY, NULL, &actual, &ptl_context.ni_handle);
 
 	if (ret != PTL_OK) {
 		SPDK_PTL_FATAL("RDMACM: PtlNIInit failed with code: %d for nid: %d and pid: %d", ret,
@@ -595,7 +680,7 @@ struct ptl_context *ptl_cnxt_get(void)
 	if (ret != PTL_OK) {
 		SPDK_PTL_FATAL("PtlGetPhysId failed: %d", ret);
 	}
-	SPDK_PTL_INFO("Server Physical NID: %d, PID: %d\n", actual_phys_id.phys.nid,
+	SPDK_PTL_INFO("Server Physical NID: %u, PID: %u\n", actual_phys_id.phys.nid,
 		      actual_phys_id.phys.pid);
 
 	// Check if PTL_TOTAL_DATA_ORDERING is supported
@@ -610,12 +695,34 @@ struct ptl_context *ptl_cnxt_get(void)
 
 	ptl_context.fake_ibv_cnxt.ops.poll_cq = ptl_cnxt_poll_cq;
 	ptl_context.fake_cq.context = &ptl_context.fake_ibv_cnxt;
-
+	SPDK_PTL_DEBUG("Initializing PTE allocation table...");
+	ptl_context.ptl_allocation_table_size = actual.max_pt_index;
+	ptl_context.pte_allocation_table = calloc(ptl_context.ptl_allocation_table_size,
+					   sizeof(*ptl_context.pte_allocation_table));
+	ptl_context.pte_allocation_table[PTL_CP_SERVER_PTE] = 1;
 	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context");
 	ptl_context.initialized = true;
 exit:
 	pthread_mutex_unlock(&cnxt_lock);
 	return &ptl_context;
+}
+
+int ptl_cnxt_allocate_pte(struct ptl_context *cnxt)
+{
+	if (cnxt->pte_allocation_table[PTL_PT_INDEX]) {
+		SPDK_PTL_FATAL("PTE: %d already taken current version does not support allocating more than one PTEs",
+			       PTL_PT_INDEX);
+	}
+	cnxt->pte_allocation_table[PTL_PT_INDEX] = 1;
+	return PTL_PT_INDEX;
+	// for (uint32_t i = 0; i < cnxt->ptl_allocation_table_size; i++) {
+	// 	if (cnxt->pte_allocation_table[i] == 1) {
+	// 		continue;
+	// 	}
+	// 	cnxt->pte_allocation_table[i] = 1;
+	// 	return i;
+	// }
+	// return -1;
 }
 
 struct ibv_context *ptl_cnxt_get_ibv_context(struct ptl_context *cnxt)

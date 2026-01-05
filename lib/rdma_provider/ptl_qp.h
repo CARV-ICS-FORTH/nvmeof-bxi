@@ -16,10 +16,10 @@ struct ptl_qp {
 	size_t remote_alignment_size;
 	int remote_nid; /*node id for Portals*/
 	int remote_pid; /* pid for Portals*/
-	int remote_pt_index; /*Portals index for destination*/
+	int remote_pte; /*Portals index for destination*/
 };
 struct ptl_qp *ptl_qp_create(struct ptl_pd *ptl_pd, struct ptl_cq *send_queue,
-			     struct ptl_cq *receive_queue, struct ptl_conn_comm_pair_info *info);
+			     struct ptl_cq *receive_queue, int nid, int pid, int pte);
 
 static inline struct ibv_qp *ptl_qp_get_ibv_qp(struct ptl_qp *ptl_qp)
 {

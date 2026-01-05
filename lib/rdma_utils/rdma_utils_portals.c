@@ -7,7 +7,9 @@
 #include "../rdma_provider/ptl_context.h"
 #include "../rdma_provider/ptl_cq.h"
 #include "../rdma_provider/ptl_log.h"
+#include "../rdma_provider/ptl_mem_desc.h"
 #include "../rdma_provider/ptl_pd.h"
+#include "../rdma_provider/ptl_rte_hash_map.h"
 #include "../rdma_provider/ptl_uuid.h"
 #include "spdk/file.h"
 #include "spdk/likely.h"
@@ -20,9 +22,11 @@
 #include <portals4.h>
 #include <rdma/rdma_cma.h>
 #include <rdma/rdma_verbs.h>
+#include <rte_hash.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
+
 #define PTL_SIZE_MAX ((1UL<<48)-1)
 struct rdma_utils_device {
 	struct ibv_pd			*pd;
@@ -145,53 +149,17 @@ static inline bool rdma_utils_ptl_is_access_zero_based(uint32_t access_flags)
 }
 
 static int
-rdma_utils_ptl_clean_mem_desc(struct ptl_pd_mem_desc *ptl_pd_mem_desc)
-{
-	int rc;
-	if (ptl_pd_mem_desc->local_write == false) {
-		goto remote;
-	}
-	SPDK_PTL_DEBUG("Cleaning up local write staff from ptl_pd_mem_desc %p", ptl_pd_mem_desc);
-
-	rc = PtlCTFree(ptl_pd_mem_desc->local_w_mem_desc.ct_handle);
-	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("Error freeing counting event with error code: %d\n", rc);
-	}
-	rc = PtlMDRelease(ptl_pd_mem_desc->local_w_mem_handle);
-	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("Failed with code: %d", rc);
-	}
-remote:
-	if (ptl_pd_mem_desc->remote_write || ptl_pd_mem_desc->remote_read) {
-		return 0;
-	}
-
-	SPDK_PTL_DEBUG("Cleaning up also remote read/write memory areas");
-	rc = PtlCTFree(ptl_pd_mem_desc->remote_rw_ct_handle);
-	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("Error freeing counting event with error code: %d\n", rc);
-	}
-	rc = PtlMEUnlink(ptl_pd_mem_desc->remote_rw_mem_handle);
-	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("Error freeing memory entry with error code: %d\n", rc);
-	}
-	return 0;
-}
-
-static int
 rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 		      enum spdk_mem_map_notify_action action,
 		      void *vaddr, size_t size)
 {
-	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
 	struct ptl_pd *ptl_pd;
 	struct spdk_rdma_utils_mem_map *rmap = cb_ctx;
 	struct ibv_pd *pd = rmap->pd;
-	struct ibv_mr *mr;
-	struct ptl_context * ptl_context;
-	struct ptl_pd_mem_desc * ptl_pd_mem_desc  = NULL;
+	struct ptl_mem_desc * ptl_mem_desc_local  = NULL;
+	struct ptl_mem_desc * ptl_mem_desc_remote  = NULL;
+	struct ptl_mem_desc * ptl_mem_desc;
 	int rc = -1;
-	int ret;
 	int access_flags;
 
 	SPDK_PTL_DEBUG("RDMAUTILSPTL: Registering memory vaddr is: %p size is: %lu action is: %d", vaddr,
@@ -210,7 +178,6 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 	rdma_utils_ptl_is_access_zero_based(access_flags);
 
 	ptl_pd = ptl_pd_get_from_ibv_pd(rmap->pd);
-	ptl_context = ptl_cnxt_get_from_ibvpd(rmap->pd);
 	spdk_ptl_print_access_flags(access_flags);
 
 	switch (action) {
@@ -229,27 +196,18 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 		access_flags |= IBV_ACCESS_RELAXED_ORDERING;
 #endif
 		/*Check first if a ptl_pd_mem_desc has been already created for this vaddr*/
-		ptl_pd_mem_desc = calloc(1UL, sizeof(*ptl_pd_mem_desc));
 
 		if (rdma_utils_ptl_is_local_write(access_flags)) {
-			SPDK_PTL_DEBUG("IBV_LOCAL_WRITE requested calling PtlMDBind()");
-			/* Portals staff follows*/
-			ptl_pd_mem_desc->local_w_mem_desc.start = vaddr;
-			ptl_pd_mem_desc->local_w_mem_desc.options = 0;
-			ptl_pd_mem_desc->local_w_mem_desc.length = size;
-			ptl_pd_mem_desc->local_w_mem_desc.eq_handle = ptl_cq_get_static_event_queue();
-			rc = PtlCTAlloc(ptl_cnxt_get_ni_handle(ptl_context), &ptl_pd_mem_desc->local_w_mem_desc.ct_handle);
-			if (PTL_OK != rc) {
-				SPDK_PTL_FATAL("Failed to allocate a counting event");
-			}
 
-			ret = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_context), &ptl_pd_mem_desc->local_w_mem_desc,
-					&ptl_pd_mem_desc->local_w_mem_handle);
-			if (PTL_OK != ret) {
-				SPDK_PTL_FATAL("Failed to register virtual addr %p of size: %lu",
-					       vaddr, size);
+			SPDK_PTL_DEBUG("IBV_LOCAL_WRITE: Creating a local ptl_mem_desc");
+#if PTL_ENABLE_BIND_PER_OP
+			ptl_mem_desc_local = ptl_mem_desc_create_local(vaddr, size, false, ptl_cq_get_static_event_queue());
+#else
+			ptl_mem_desc_local = ptl_mem_desc_create_local(vaddr, size, true, ptl_cq_get_static_event_queue());
+#endif
+			if (false == ptl_pd->ops.add(ptl_pd->mem_desc_map, ptl_mem_desc_local)) {
+				SPDK_PTL_FATAL("Failed to keep memory handle in portals context");
 			}
-			ptl_pd_mem_desc->local_write = true;
 		}
 
 		if (false == rdma_utils_ptl_is_remote_write(access_flags) &&
@@ -259,47 +217,12 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 
 		}
 		SPDK_PTL_DEBUG("Memory registration for RMA operations requested....exposing the whole address space");
-		memset(&ptl_pd_mem_desc->remote_wr_me, 0x00, sizeof(ptl_pd_mem_desc->remote_wr_me));
-		ptl_pd_mem_desc->remote_wr_me.ignore_bits = PTL_UUID_IGNORE_MASK;
-		// ptl_pd_mem_desc->remote_wr_me.match_bits = ptl_uuid_set_op_type(PTL_UUID_IGNORE_MASK, PTL_RMA);
-		ptl_pd_mem_desc->remote_wr_me.match_bits = PTL_UUID_RMA_MASK;
-		ptl_pd_mem_desc->remote_wr_me.match_id.phys.nid = PTL_NID_ANY;
-		ptl_pd_mem_desc->remote_wr_me.match_id.phys.pid = PTL_PID_ANY;
-		ptl_pd_mem_desc->remote_wr_me.min_free = 0;
-		ptl_pd_mem_desc->remote_wr_me.start = NULL;
-		ptl_pd_mem_desc->remote_wr_me.length = PTL_SIZE_MAX;
-		ptl_pd_mem_desc->remote_wr_me.uid = PTL_UID_ANY;
+		ptl_mem_desc_remote = ptl_mem_desc_create_remote(0, PTL_SIZE_MAX,
+				      rdma_utils_ptl_is_remote_read(access_flags), rdma_utils_ptl_is_remote_write(access_flags));
 
-		ptl_pd_mem_desc->remote_read = rdma_utils_ptl_is_remote_read(access_flags);
-		ptl_pd_mem_desc->remote_write = rdma_utils_ptl_is_remote_write(access_flags);
-
-		/*Create and associate counting events*/
-		// ret = PtlCTAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt), &ptl_pd_mem_desc->remote_rw_ct_handle);
-		// if (ret != PTL_OK) {
-		// 	SPDK_PTL_FATAL("Failed to allocate counting event");
-		// }
-		// ptl_pd_mem_desc->remote_wr_me.ct_handle = ptl_pd_mem_desc->remote_rw_ct_handle;
-		ptl_pd_mem_desc->remote_wr_me.ct_handle = PTL_CT_NONE;
-		ptl_pd_mem_desc->remote_wr_me.options = PTL_RMA_ME_OPTS;
-		if (ptl_pd_mem_desc->remote_read) {
-			SPDK_PTL_DEBUG("Enabling READ access for the remote region as requested");
-			ptl_pd_mem_desc->remote_wr_me.options     |= PTL_ME_OP_GET;
+		if (false == ptl_pd->ops.add(ptl_pd->mem_desc_map, ptl_mem_desc_remote)) {
+			SPDK_PTL_FATAL("Failed to keep memory handle in portals context");
 		}
-		if (ptl_pd_mem_desc->remote_write) {
-			SPDK_PTL_DEBUG("Enabling WRITE access for the remote region as requested");
-			ptl_pd_mem_desc->remote_wr_me.options     |= PTL_ME_OP_PUT;
-		}
-		rc = PtlMEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_PT_INDEX, &ptl_pd_mem_desc->remote_wr_me,
-				 PTL_PRIORITY_LIST, NULL, &ptl_pd_mem_desc->remote_rw_mem_handle);
-		if (rc != PTL_OK) {
-			SPDK_PTL_FATAL("PtlMEAppend for RMA operations failed with error code: %d", rc);
-		}
-		SPDK_PTL_INFO("PtlMEAppend for RMA operation is successful!");
-		rc = PtlCTAlloc(ptl_cnxt_get_ni_handle(ptl_context), &ptl_pd_mem_desc->remote_wr_me.ct_handle);
-		if (PTL_OK != rc) {
-			SPDK_PTL_FATAL("Failed to allocate a counting event");
-		}
-
 		SPDK_PTL_DEBUG("Remote Memory Access ENABLED. REMOTE_WRITE: %s REMOTE_READ: %s",
 			       rdma_utils_ptl_is_remote_write(access_flags) ? "YES" : "NO",
 			       rdma_utils_ptl_is_remote_read(access_flags) ? "YES" : "NO");
@@ -314,33 +237,30 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 		//
 		//(uint64_t)mr);
 done:
-		rc = ptl_pd_mem_desc->local_w_mem_handle.handle ? spdk_mem_map_set_translation(map, (uint64_t)vaddr,
-			size,
-			(uint64_t)ptl_pd_mem_desc->local_w_mem_handle.handle) : -1;
-		if (false == ptl_pd_add_mem_desc(ptl_pd, ptl_pd_mem_desc)) {
-			SPDK_PTL_FATAL("Failed to keep memory handle in portals context");
-		}
+		rc = spdk_mem_map_set_translation(map, (uint64_t)vaddr, size,
+						  (uint64_t)&ptl_mem_desc_local->local.fake_mr);
+		// rc = ptl_mem_desc_local->local.local_w_mem_handle.handle ? spdk_mem_map_set_translation(map,
+		// 	(uint64_t)vaddr,
+		// 	size,
+		// 	(uint64_t)ptl_mem_desc_local->local.local_w_mem_handle.handle) : -1;
 		SPDK_PTL_DEBUG("DONE with memory registration in Portals");
 		break;
 	case SPDK_MEM_MAP_NOTIFY_UNREGISTER:
-		ptl_pd_mem_desc = ptl_pd_get_mem_desc(ptl_pd, (uint64_t)vaddr, 0,
-						      rdma_utils_ptl_is_local_write(access_flags),
-						      rdma_utils_ptl_is_remote_read(access_flags) || rdma_utils_ptl_is_local_write(access_flags));
-		if (ptl_pd_mem_desc == NULL) {
+		/*XXX TODO XXX clean the small ones too*/
+		ptl_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map, (uint64_t)vaddr, 0,
+					       rdma_utils_ptl_is_remote_read(access_flags));
+		if (ptl_mem_desc == NULL) {
 			SPDK_PTL_FATAL("Mem desc not found! (It should have)");
 		}
 
-		if (rdma_utils_ptl_clean_mem_desc(ptl_pd_mem_desc)) {
-			SPDK_PTL_FATAL("Failed to clean ptl_mem_desc");
-		}
+		ptl_mem_desc_clean(ptl_mem_desc);
 		if (rmap->hooks == NULL || rmap->hooks->get_rkey == NULL) {
-			mr = (struct ibv_mr *)spdk_mem_map_translate(map, (uint64_t)vaddr, NULL);
+			struct ibv_mr *mr = (struct ibv_mr *)spdk_mem_map_translate(map, (uint64_t)vaddr, NULL);
 			// if (mr) {
 			// 	ibv_dereg_mr(mr);
 			// }
 		}
 		rc = spdk_mem_map_clear_translation(map, (uint64_t)vaddr, size);
-		memset(ptl_pd_mem_desc, 0x00, sizeof(*ptl_pd_mem_desc));
 		SPDK_PTL_DEBUG("Cleaned memory area!");
 		break;
 	default:
@@ -383,6 +303,18 @@ spdk_rdma_utils_create_mem_map(struct ibv_pd *pd, struct spdk_nvme_rdma_hooks *h
 
 	struct spdk_rdma_utils_mem_map *map;
 	struct ptl_pd *ptl_pd;
+
+	/*We want to update our ptl_pd object with which mem_map it relates to*/
+	ptl_pd = ptl_pd_get_from_ibv_pd(pd);
+	/*Create the map that stores the MDs for Portals*/
+	if (NULL == ptl_pd->mem_desc_map) {
+		SPDK_PTL_DEBUG("Setting RTE_HASH table");
+		ptl_pd->ops.create =  ptl_rte_map_create;
+		ptl_pd->ops.add = ptl_rte_map_add;
+		ptl_pd->ops.get = ptl_rte_map_get;
+		ptl_pd->ops.destroy = ptl_rte_map_destroy;
+		ptl_pd->mem_desc_map = ptl_pd->ops.create(256, "huge_map");
+	}
 
 	/*No IWARP support this is PORTALS*/
 	// if (pd->context->device->transport_type == IBV_TRANSPORT_IWARP) {
@@ -430,11 +362,11 @@ spdk_rdma_utils_create_mem_map(struct ibv_pd *pd, struct spdk_nvme_rdma_hooks *h
 	}
 	LIST_INSERT_HEAD(&g_rdma_utils_mr_maps, map, link);
 
+	/*We want to update our ptl_pd object with which mem_map it relates to*/
+	ptl_pd_set_mem_map(ptl_pd, map);
 	pthread_mutex_unlock(&g_rdma_mr_maps_mutex);
 	SPDK_PTL_DEBUG("Ok created mem_map updated field for PORTALS PD (struct ptl_pd)");
-	/*We want to update our ptl_pd object with which mem_map it relates to*/
-	ptl_pd = ptl_pd_get_from_ibv_pd(pd);
-	ptl_pd_set_mem_map(ptl_pd, map);
+
 	return map;
 }
 
@@ -656,7 +588,7 @@ spdk_rdma_utils_get_pd(struct ibv_context *context)
 	struct ptl_context * ptl_context = ptl_cnxt_get_from_ibcnxt(context);
 	if (NULL == ptl_context->ptl_pd) {
 		SPDK_PTL_DEBUG("PTL PD IS NULLQ creating it");
-		ptl_context->ptl_pd = ptl_pd_create(ptl_context);
+		ptl_context->ptl_pd = ptl_pd_create(ptl_context, NULL);
 	}
 	return ptl_pd_get_ibv_pd(ptl_context->ptl_pd);
 	// struct ptl_context *ptl_context;

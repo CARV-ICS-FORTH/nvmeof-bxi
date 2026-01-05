@@ -17,6 +17,7 @@ LIBNAME = rdma_utils
 # gesalous
 ifeq ($(CONFIG_RDMA_PROV),portals)
 C_SRCS = rdma_utils_portals.c
+CFLAGS += -I$(CONFIG_DPDK_INC_DIR)
 CFLAGS += -I$(PORTALS_INCLUDE_PREFIX)
 #gesalous, don't need it everything done in mk/spdk.common.mk
 # LDFLAGS += -L$(PORTALS_LIB_PREFIX)
@@ -31,7 +32,7 @@ endif
 #C_SRCS = rdma_utils.c
 
 ifeq ($(CONFIG_RDMA_PROV),portals)
-	LOCAL_SYS_LIBS += -L$(RDMA_CM_PORTALS_PREFIX) -lrdmacm_portals -libverbs_portals
+	LOCAL_SYS_LIBS += -L$(RDMA_CM_PORTALS_PREFIX) -lrdmacm_portals -libverbs_portals -lspdk_ptl_core
 else
 	LOCAL_SYS_LIBS += -libverbs -lrdmacm
 endif
