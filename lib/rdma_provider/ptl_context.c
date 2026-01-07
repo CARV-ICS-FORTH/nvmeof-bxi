@@ -29,6 +29,8 @@ struct ptl_wc {
 	struct ptl_context_op_meta *op_meta;
 };
 
+const char *help_message =
+	"ROLE=<target,initiator>(mandatory) PORTALS_NID=<nid number> (optional) PORTALS_PID=<pid number> (mandatory only for target)";
 static struct ptl_context ptl_context;
 typedef struct ptl_context_op_meta *(*process_event)(ptl_event_t event, struct ibv_wc *wc,
 		struct ptl_cq *ptl_cq);
@@ -611,11 +613,37 @@ struct ptl_context *ptl_cnxt_get(void)
 	ptl_ni_limits_t desired;
 	ptl_ni_limits_t actual;
 	int ret;
-	const char *srv_pid;
-	const char *srv_nid;
+	const char *role;/*target or initiator*/
+	const char *ptl_pid;
+	const char *ptl_nid;
 	pthread_mutex_lock(&cnxt_lock);
 	if (ptl_context.initialized) {
 		goto exit;
+	}
+
+	role = getenv("ROLE");
+	if (NULL == role) {
+		SPDK_PTL_FATAL("Sorry you need to set the role of this process (target, initiator). %s",
+			       help_message);
+	}
+
+	if (strcmp(role, "target") && strcmp(role, "initiator")) {
+		SPDK_PTL_FATAL("ROLE should be either targer or initiator. %s", help_message);
+	}
+
+	ptl_pid = getenv("PORTALS_PID");
+	if (NULL == ptl_pid && 0 == strcmp(role, "target")) {
+		SPDK_PTL_FATAL("Sorry you need to set SERVER_PID env variable for the target case. %s",
+			       help_message);
+	}
+
+	if (NULL == ptl_pid && 0 == strcmp(role, "initiator")) {
+		SPDK_PTL_WARN("The system will assign automatically a PID for the initiator role");
+	}
+
+	ptl_nid = getenv("PORTALS_NID");
+	if (NULL == ptl_nid) {
+		SPDK_PTL_FATAL("Sorry you need to set SERVER_NID env variable");
 	}
 
 	ptl_context.object_type = PTL_CONTEXT;
@@ -625,20 +653,10 @@ struct ptl_context *ptl_cnxt_get(void)
 		SPDK_PTL_FATAL("PtlInit failed");
 	}
 
-
-	srv_pid = getenv("SERVER_PID");
-
-	if (NULL == srv_pid) {
-		SPDK_PTL_FATAL("Sorry you need to set SERVER_PID env variable");
-	}
-	srv_nid = getenv("SERVER_NID");
-
-	if (NULL == srv_nid) {
-		SPDK_PTL_FATAL("Sorry you need to set SERVER_NID env variable");
-	}
 	/*XXX TODO XXX Check for errors and staff*/
-	ptl_context.pid = atoi(srv_pid);
-	ptl_context.nid = atoi(srv_nid);
+	ptl_context.pid = ptl_pid ? atoi(ptl_pid) : PTL_PID_ANY;
+	ptl_context.nid = ptl_nid ? atoi(ptl_nid) : PTL_NID_ANY;
+	ptl_context.is_target = !strcmp(role, "target");
 
 	memset(&desired, 0, sizeof(ptl_ni_limits_t));
 
@@ -672,7 +690,7 @@ struct ptl_context *ptl_cnxt_get(void)
 	// 		PTL_PID_ANY, NULL, &actual, &ptl_context.ni_handle);
 
 	if (ret != PTL_OK) {
-		SPDK_PTL_FATAL("RDMACM: PtlNIInit failed with code: %d for nid: %d and pid: %d", ret,
+		SPDK_PTL_FATAL("PtlNIInit failed with code: %d for nid: %d and pid: %d", ret,
 			       ptl_context.nid, ptl_context.pid);
 	}
 	ptl_process_t actual_phys_id;
@@ -680,8 +698,8 @@ struct ptl_context *ptl_cnxt_get(void)
 	if (ret != PTL_OK) {
 		SPDK_PTL_FATAL("PtlGetPhysId failed: %d", ret);
 	}
-	SPDK_PTL_INFO("Server Physical NID: %u, PID: %u\n", actual_phys_id.phys.nid,
-		      actual_phys_id.phys.pid);
+	SPDK_PTL_INFO("Started role: %s with {nid:%d,pid:%d}", role,
+		      actual_phys_id.phys.nid, actual_phys_id.phys.pid);
 
 	// Check if PTL_TOTAL_DATA_ORDERING is supported
 	// if (actual.features & PTL_TOTAL_DATA_ORDERING) {
@@ -700,6 +718,8 @@ struct ptl_context *ptl_cnxt_get(void)
 	ptl_context.pte_allocation_table = calloc(ptl_context.ptl_allocation_table_size,
 					   sizeof(*ptl_context.pte_allocation_table));
 	ptl_context.pte_allocation_table[PTL_CP_SERVER_PTE] = 1;
+#if !PTL_USE_MATCHING
+#endif
 	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context");
 	ptl_context.initialized = true;
 exit:

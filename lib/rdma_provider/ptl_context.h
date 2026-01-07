@@ -81,6 +81,7 @@ struct ptl_context {
 	// struct spdk_rdma_provider_srq *srq;
 	int pid;
 	int nid;
+	bool is_target;
 	bool initialized;
 };
 
