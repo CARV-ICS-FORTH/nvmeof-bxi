@@ -713,14 +713,24 @@ struct ptl_context *ptl_cnxt_get(void)
 
 	ptl_context.fake_ibv_cnxt.ops.poll_cq = ptl_cnxt_poll_cq;
 	ptl_context.fake_cq.context = &ptl_context.fake_ibv_cnxt;
-	SPDK_PTL_DEBUG("Initializing PTE allocation table...");
 	ptl_context.ptl_allocation_table_size = actual.max_pt_index;
 	ptl_context.pte_allocation_table = calloc(ptl_context.ptl_allocation_table_size,
 					   sizeof(*ptl_context.pte_allocation_table));
 	ptl_context.pte_allocation_table[PTL_CP_SERVER_PTE] = 1;
+
 #if !PTL_USE_MATCHING
+	if (false == is_target) {
+		ptl_context.portals_idx_rma = ptl_cnxt_allocate_pte(&ptl_context);
+	}
+	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context for "
+		       "initiator accepting RMA operations at PTE: %d",
+		       ptl_context.portals_idx_rma);
+#else
+	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context with matcing enabled with role: %s",
+		       role);
 #endif
-	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context");
+
+
 	ptl_context.initialized = true;
 exit:
 	pthread_mutex_unlock(&cnxt_lock);
@@ -786,8 +796,7 @@ ptl_handle_ni_t ptl_cnxt_get_ni_handle(struct ptl_context *cnxt)
 */
 int ptl_cnxt_get_rma_pte(struct ptl_context *cnxt)
 {
-	SPDK_PTL_FATAL("Sorry unimplemented");
-	return -1;
+	return cnxt->portals_idx_rma;
 }
 #endif
 

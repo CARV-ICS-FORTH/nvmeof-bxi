@@ -241,8 +241,8 @@ spdk_rdma_provider_srq_flush_recv_wrs(struct spdk_rdma_provider_srq *rdma_srq,
 		for (int i = 0; i < wr->num_sge; i++) {
 			recv_meta->recv_op.io_vector[i].iov_base = (ptl_addr_t)wr->sg_list[i].addr;
 			recv_meta->recv_op.io_vector[i].iov_len = wr->sg_list[i].length;
-			SPDK_PTL_DEBUG("iovector[%d] = : Address = %p, Length = %lu\n",
-				       i, recv_meta->recv_op.io_vector[i].iov_base, recv_meta->recv_op.io_vector[i].iov_len);
+			// SPDK_PTL_DEBUG("iovector[%d] = : Address = %p, Length = %lu\n",
+			// 	       i, recv_meta->recv_op.io_vector[i].iov_base, recv_meta->recv_op.io_vector[i].iov_len);
 		}
 
 		/*Initialize the matching entry*/
