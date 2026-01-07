@@ -1320,20 +1320,26 @@ int rdma_connect(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 	if (posix_memalign((void **)&request_buf, 4096, RDMA_PTL_MSG_BUFFER_SIZE)) {
 		SPDK_PTL_FATAL("Failed to allocate ptl_conn_request");
 	}
+	/*Fill first msg_header proper values*/
 	request_buf->conn_msg.msg_header.version = PTL_SPDK_PROTOCOL_VERSION;
 	request_buf->conn_msg.msg_header.msg_type = PTL_OPEN_CONNECTION;
 	request_buf->conn_msg.msg_header.total_msg_size = sizeof(request_buf->conn_msg) +
 		conn_param->private_data_len;
-
-
 	request_buf->conn_msg.msg_header.peer_info.src.nid = ptl_cnxt_get_nid(ptl_cnxt);
 	request_buf->conn_msg.msg_header.peer_info.src.pid = ptl_cnxt_get_pid(ptl_cnxt);
 	request_buf->conn_msg.msg_header.peer_info.src.pte = PTL_CP_SERVER_PTE;
+
+	/*Fill specific PTL_OPEN_CONNECTION fields*/
 	request_buf->conn_msg.conn_open.initiator_qp_num = ptl_id->ptl_qp_num;
 	/*Inform the target about the match bits I (the initiator) use for my recv operations*/
-	request_buf->conn_msg.conn_open.recv_match_bits = ptl_id->my_match_bits;
 	request_buf->conn_msg.conn_open.cq_id = ptl_id->ptl_qp->recv_cq->cq_id;
+#if PTL_USE_MATCHING
+	request_buf->conn_msg.conn_open.recv_match_bits = ptl_id->my_match_bits;
 	request_buf->conn_msg.conn_open.rma_match_bits = PTL_UUID_RMA_MASK;
+#else
+	request_buf->conn_msg.conn_open.nvme_cpl_pte = ptl_cnxt_allocate_pte(ptl_cnxt_get());
+	request_buf->conn_msg.conn_open.nvme_rma_ops_pte = ptl_cnxt_get_rma_pte(ptl_cnxt_get());
+#endif
 
 	memcpy(&request_buf->conn_msg.conn_open.src_addr, &id->route.addr.src_addr,
 	       sizeof(request_buf->conn_msg.conn_open.src_addr));
@@ -1364,7 +1370,7 @@ int rdma_connect(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 
 
 	// SPDK_PTL_DEBUG("[%s] CP server: Sending %s to [nid: %d pid: %d pte: %d]",
-//          ptl_msg_types[request_buf->conn_msg.msg_header.msg_type],
+	//          ptl_msg_types[request_buf->conn_msg.msg_header.msg_type],
 	// 	       ptl_control_plane_server.role, request_buf->conn_msg.msg_header.peer_info.dst_nid,
 	// 	       request_buf->conn_msg.msg_header.peer_info.dst_pid,
 	// 	       request_buf->conn_msg.msg_header.peer_info.dst_pte);

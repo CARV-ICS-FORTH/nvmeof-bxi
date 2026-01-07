@@ -11,12 +11,12 @@
 /**
  * Flag that controls if we enable matching or we don't
  */
-#define PTL_ENABLE_MATCHING 1
+#define PTL_USE_MATCHING 1
 
 /**
  * This is to ensure that both parties agree about the matching feature
  */
-#define PTL_SPDK_PROTOCOL_VERSION (1UL+PTL_ENABLE_MATCHING)
+#define PTL_SPDK_PROTOCOL_VERSION (1UL+PTL_USE_MATCHING)
 
 /*
  * PTL_ENABLE_IOVEC_RECEIVE

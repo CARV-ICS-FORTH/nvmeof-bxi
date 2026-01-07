@@ -108,5 +108,13 @@ static inline int ptl_cnxt_get_pid(struct ptl_context *cnxt)
   * Allocates a free pte typically for use for a new srq
 **/
 int ptl_cnxt_allocate_pte(struct ptl_context *cnxt);
+
+#if !PTL_USE_MATCHING
+/**
+  * Returns the PTE responsdile (that has an LE) for RMA operations
+*/
+int ptl_cnxt_get_rma_pte(struct ptl_context *cnxt);
+#endif
+
 #endif
 

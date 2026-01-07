@@ -760,4 +760,14 @@ ptl_handle_ni_t ptl_cnxt_get_ni_handle(struct ptl_context *cnxt)
 }
 
 
+#if !PTL_USE_MATCHING
+/**
+  * Returns the PTE responsdile (that has an LE) for RMA operations
+*/
+int ptl_cnxt_get_rma_pte(struct ptl_context *cnxt)
+{
+	SPDK_PTL_FATAL("Sorry unimplemented");
+	return -1;
+}
+#endif
 

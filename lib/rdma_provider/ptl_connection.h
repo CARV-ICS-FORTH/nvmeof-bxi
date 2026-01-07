@@ -25,7 +25,7 @@ struct ptl_conn_msg_header {
 
 struct ptl_conn_open {
 	struct sockaddr src_addr;
-#if PTL_ENABLE_MATCHING
+#if PTL_USE_MATCHING
 	/*Where initiator has MEs for recv operations*/
 	uint64_t recv_match_bits;
 	/*Where initiator has an ME for remote read/write operations*/
