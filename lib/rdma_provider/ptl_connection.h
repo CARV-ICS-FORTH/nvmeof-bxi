@@ -1,5 +1,6 @@
 #ifndef PTL_CONNECTION_H
 #define PTL_CONNECTION_H
+#include "ptl_config.h"
 #include <rdma/rdma_cma.h>
 #include <stdint.h>
 typedef enum {NVMeOF_cmd = 0, NVMeOF_cpl, PTL_OPEN_CONNECTION, PTL_OPEN_CONNECTION_REPLY, PTL_CLOSE_CONNECTION, PTL_CLOSE_CONNECTION_REPLY, PTL_NUM_MSGS} ptl_conn_msg_type_e;
@@ -24,10 +25,17 @@ struct ptl_conn_msg_header {
 
 struct ptl_conn_open {
 	struct sockaddr src_addr;
+#if PTL_ENABLE_MATCHING
 	/*Where initiator has MEs for recv operations*/
 	uint64_t recv_match_bits;
 	/*Where initiator has an ME for remote read/write operations*/
 	uint64_t rma_match_bits;
+#else
+	/*PTL entry where to send the nvme-cpls*/
+	int nvme_cpl_pte;
+	/*PTL entry where to send the target can send the rma operations*/
+	int nvme_rma_ops_pte;
+#endif
 	/*In which completion queue id initiator has subscribed for notifications*/
 	int cq_id;
 	int initiator_qp_num;
