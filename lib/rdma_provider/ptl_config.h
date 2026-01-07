@@ -3,12 +3,20 @@
 #define BXIV3 1
 #define PTL_TARGET_PID 10
 
-#define PTL_SPDK_PROTOCOL_VERSION 1UL
 /**
   * Portal index number where the actual nvme commands and data are transfered
 **/
 #define PTL_PT_INDEX 1
 
+/**
+ * Flag that controls if we enable matching or we don't
+ */
+#define PTL_ENABLE_MATCHING 1
+
+/**
+ * This is to ensure that both parties agree about the matching feature
+ */
+#define PTL_SPDK_PROTOCOL_VERSION (1UL+PTL_ENABLE_MATCHING)
 
 /*
  * PTL_ENABLE_IOVEC_RECEIVE
