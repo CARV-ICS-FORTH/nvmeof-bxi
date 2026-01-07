@@ -348,14 +348,19 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 	ptl_id->fake_cm_id.qp = &ptl_qp->fake_qp;
 	memcpy(&ptl_id->fake_cm_id.route.addr.dst_addr, &conn_open->src_addr,
 	       sizeof(conn_open->src_addr));
-
+#if PTL_USE_MATCHING
 	ptl_id->recv_match_bits = conn_open->recv_match_bits;
 	ptl_id->rma_match_bits = conn_open->rma_match_bits;
+#else
+	ptl_id->nvme_cpl_pte = conn_open->nvme_cpl_pte;
+	ptl_id->nvme_rma_ops_pte = conn_open->nvme_rma_ops_pte;
+#endif
 	ptl_id->remote_cq_id = conn_open->cq_id;
-	SPDK_PTL_DEBUG("MATCH_BITS: The remote guy has MEs for recv in match_bits: "
-		       "%lu and for RMA: %lu and has subscribed in cq_id: %d private date len is: %u",
-		       ptl_id->recv_match_bits, ptl_id->rma_match_bits,
-		       ptl_id->remote_cq_id, conn_open->conn_param.private_data_len);
+
+	// SPDK_PTL_DEBUG("MATCH_BITS: The remote guy has MEs for recv in match_bits: "
+	// 	       "%lu and for RMA: %lu and has subscribed in cq_id: %d private date len is: %u",
+	// 	       ptl_id->recv_match_bits, ptl_id->rma_match_bits,
+	// 	       ptl_id->remote_cq_id, conn_open->conn_param.private_data_len);
 	ptl_id->uuid = ptl_uuid_set_cq_num(ptl_id->uuid, ptl_id->remote_cq_id);
 
 	rdma_cm_find_matching_local_ip(&ptl_id->fake_cm_id.route.addr.dst_addr,
