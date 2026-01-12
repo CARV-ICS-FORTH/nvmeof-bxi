@@ -642,8 +642,13 @@ struct ptl_context *ptl_cnxt_get(void)
 	}
 
 	ptl_nid = getenv("PORTALS_NID");
-	if (NULL == ptl_nid) {
-		SPDK_PTL_FATAL("Sorry you need to set SERVER_NID env variable");
+	if (NULL == ptl_pid && 0 == strcmp(role, "target")) {
+		SPDK_PTL_FATAL("Sorry you need to set SERVER_NID env variable for the target case. %s",
+			       help_message);
+	}
+
+	if (NULL == ptl_pid && 0 == strcmp(role, "initiator")) {
+		SPDK_PTL_WARN("The system will assign automatically an NID for the initiator role");
 	}
 
 	ptl_context.object_type = PTL_CONTEXT;
@@ -684,10 +689,13 @@ struct ptl_context *ptl_cnxt_get(void)
 	// desired.cq_mode = 32767;
 	// desired.host_cq_size = 139646804452922;
 
+#if PTL_USE_MATCHING
 	ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
 			ptl_context.pid, &desired, &actual, &ptl_context.ni_handle);
-	// ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
-	// 		PTL_PID_ANY, NULL, &actual, &ptl_context.ni_handle);
+#else
+	ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_NO_MATCHING | PTL_NI_PHYSICAL,
+			ptl_context.pid, &desired, &actual, &ptl_context.ni_handle);
+#endif
 
 	if (ret != PTL_OK) {
 		SPDK_PTL_FATAL("PtlNIInit failed with code: %d for nid: %d and pid: %d", ret,
@@ -698,6 +706,8 @@ struct ptl_context *ptl_cnxt_get(void)
 	if (ret != PTL_OK) {
 		SPDK_PTL_FATAL("PtlGetPhysId failed: %d", ret);
 	}
+	ptl_context.nid = actual_phys_id.phys.nid;
+	ptl_context.pid =  actual_phys_id.phys.pid;
 	SPDK_PTL_INFO("Started role: %s with {nid:%d,pid:%d}", role,
 		      actual_phys_id.phys.nid, actual_phys_id.phys.pid);
 
@@ -718,17 +728,19 @@ struct ptl_context *ptl_cnxt_get(void)
 					   sizeof(*ptl_context.pte_allocation_table));
 	ptl_context.pte_allocation_table[PTL_CP_SERVER_PTE] = 1;
 
-#if !PTL_USE_MATCHING
+#if PTL_USE_MATCHING
+	ptl_context.portals_idx_rma = PTL_PT_INDEX;
+#else
 	if (false == is_target) {
 		ptl_context.portals_idx_rma = ptl_cnxt_allocate_pte(&ptl_context);
 	}
 	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context for "
 		       "initiator accepting RMA operations at PTE: %d",
 		       ptl_context.portals_idx_rma);
-#else
+#endif
 	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context with matcing enabled with role: %s",
 		       role);
-#endif
+
 
 
 	ptl_context.initialized = true;
@@ -739,20 +751,18 @@ exit:
 
 int ptl_cnxt_allocate_pte(struct ptl_context *cnxt)
 {
+#if PTL_USE_MATCHING
+	/*In the case of matching we use a single PTE PTL_PT_INDEX for the NVMe-cmd, NVMe-cpl, and RMA operations*/
+	cnxt->pte_allocation_table[PTL_PT_INDEX] = 1;
+	return PTL_PT_INDEX;
+#else
 	if (cnxt->pte_allocation_table[PTL_PT_INDEX]) {
 		SPDK_PTL_FATAL("PTE: %d already taken current version does not support allocating more than one PTEs",
 			       PTL_PT_INDEX);
 	}
 	cnxt->pte_allocation_table[PTL_PT_INDEX] = 1;
 	return PTL_PT_INDEX;
-	// for (uint32_t i = 0; i < cnxt->ptl_allocation_table_size; i++) {
-	// 	if (cnxt->pte_allocation_table[i] == 1) {
-	// 		continue;
-	// 	}
-	// 	cnxt->pte_allocation_table[i] = 1;
-	// 	return i;
-	// }
-	// return -1;
+#endif
 }
 
 struct ibv_context *ptl_cnxt_get_ibv_context(struct ptl_context *cnxt)
@@ -789,14 +799,11 @@ ptl_handle_ni_t ptl_cnxt_get_ni_handle(struct ptl_context *cnxt)
 	return cnxt->ni_handle;
 }
 
-
-#if !PTL_USE_MATCHING
 /**
   * Returns the PTE responsdile (that has an LE) for RMA operations
 */
 int ptl_cnxt_get_rma_pte(struct ptl_context *cnxt)
 {
-	return cnxt->portals_idx_rma;
+	return cnxt->is_target ? -1 : cnxt->portals_idx_rma;
 }
-#endif
 

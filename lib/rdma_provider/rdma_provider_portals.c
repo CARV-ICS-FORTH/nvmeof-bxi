@@ -201,6 +201,82 @@ bool spdk_rdma_provider_srq_queue_recv_wrs(
 }
 
 
+
+
+#if PTL_USE_MATCHING
+static int spdk_rdma_provider_ptl_register_match_entry(struct ptl_context_op_meta *recv_meta,
+		uint64_t match_bits, int num_sge, uint64_t wr_id, int pte, ptl_handle_ni_t nic)
+{
+	int ret;
+	recv_meta->recv_op.me.ignore_bits = PTL_UUID_IGNORE_MASK;
+	// me.match_bits = ptl_uuid_set_op_type(PTL_UUID_IGNORE_MASK, PTL_SEND_RECV);
+	recv_meta->recv_op.me.match_bits = match_bits;
+	recv_meta->recv_op.me.match_id.phys.nid = PTL_NID_ANY;
+	recv_meta->recv_op.me.match_id.phys.pid = PTL_PID_ANY;
+	recv_meta->recv_op.me.min_free = 0;
+
+#if PTL_ENABLE_IOVEC_RECEIVE
+	recv_meta->recv_op.me.start = recv_meta->recv_op.io_vector;
+	recv_meta->recv_op.me.length = num_sge;
+	recv_meta->recv_op.me.options = PTL_SRV_ME_OPTS | PTL_IOVEC;
+#else
+	recv_meta->recv_op.me.start = (ptl_addr_t)recv_meta->recv_op.io_vector[0].iov_base;
+	recv_meta->recv_op.me.length = recv_meta->recv_op.io_vector[0].iov_len;
+	recv_meta->recv_op.me.options = PTL_SRV_ME_OPTS;
+#endif
+
+	recv_meta->recv_op.me.ct_handle = PTL_CT_NONE;
+	recv_meta->recv_op.me.uid = PTL_UID_ANY;
+	recv_meta->wr_id = wr_id;
+	ret = PtlMEAppend(
+		      nic,/*Network interface handle*/
+		      pte, /*Portal table index*/
+		      &recv_meta->recv_op.me,/*match entry*/
+		      PTL_PRIORITY_LIST, /*List type (PRIORITY or OVERFLOW)*/
+		      recv_meta, /*pointer (can be used to store wr_id)*/
+		      &recv_meta->recv_op.me_handle /*Returned handle*/
+	      );
+	if (PTL_OK != ret) {
+		SPDK_PTL_FATAL("Failed to append memory entry");
+	}
+	return ret;
+}
+#else
+static int spdk_rdma_provider_ptl_register_list_entry(struct ptl_context_op_meta *recv_meta,
+		int num_sge, uint64_t wr_id, int pte, ptl_handle_ni_t nic)
+{
+	int ret;
+	recv_meta->recv_op.le.ignore_bits = PTL_UUID_IGNORE_MASK;
+	recv_meta->recv_op.le.match_id.phys.nid = PTL_NID_ANY;
+	recv_meta->recv_op.le.match_id.phys.pid = PTL_PID_ANY;
+	recv_meta->recv_op.le.min_free = 0;
+#if PTL_ENABLE_IOVEC_RECEIVE
+	recv_meta->recv_op.le.start = recv_meta->recv_op.io_vector;
+	recv_meta->recv_op.le.length = num_sge;
+	recv_meta->recv_op.le.options = PTL_SRV_ME_OPTS | PTL_IOVEC;
+#else
+	recv_meta->recv_op.le.start = (ptl_addr_t)recv_meta->recv_op.io_vector[0].iov_base;
+	recv_meta->recv_op.le.length = recv_meta->recv_op.io_vector[0].iov_len;
+	recv_meta->recv_op.le.options = PTL_SRV_ME_OPTS;
+#endif
+	recv_meta->recv_op.le.ct_handle = PTL_CT_NONE;
+	recv_meta->recv_op.le.uid = PTL_UID_ANY;
+	recv_meta->wr_id = wr_id;
+	ret = PtlLEAppend(
+		      nic,/*Network interface handle*/
+		      pte, /*Portal table index*/
+		      &recv_meta->recv_op.le,/*match entry*/
+		      PTL_PRIORITY_LIST, /*List type (PRIORITY or OVERFLOW)*/
+		      recv_meta, /*pointer (can be used to store wr_id)*/
+		      &recv_meta->recv_op.le_handle /*Returned handle*/
+	      );
+	if (PTL_OK != ret) {
+		SPDK_PTL_FATAL("Failed to append memory list entry");
+	}
+	return ret;
+}
+#endif
+
 /**
  * @brief Cleans up the ibv_recv_wr descriptors. In the vanilla implementation hardware handles the cleanup process. However,
  * since SPDK_PTL translates the ibv_recv_wr into PTLMEAppend entries, SPDK_PTL needs to do the cleanup.
@@ -244,46 +320,18 @@ spdk_rdma_provider_srq_flush_recv_wrs(struct spdk_rdma_provider_srq *rdma_srq,
 			// SPDK_PTL_DEBUG("iovector[%d] = : Address = %p, Length = %lu\n",
 			// 	       i, recv_meta->recv_op.io_vector[i].iov_base, recv_meta->recv_op.io_vector[i].iov_len);
 		}
-
-		/*Initialize the matching entry*/
-		recv_meta->recv_op.me.ignore_bits = PTL_UUID_IGNORE_MASK;
-		recv_meta->recv_op.me.match_bits = PTL_UUID_TARGET_SRQ_MATCH_BITS;
-		recv_meta->recv_op.me.match_id.phys.nid = PTL_NID_ANY;
-		recv_meta->recv_op.me.match_id.phys.pid = PTL_PID_ANY;
-		recv_meta->recv_op.me.min_free = 0;
-
-#if PTL_ENABLE_IOVEC_RECEIVE
-		recv_meta->recv_op.me.start = recv_meta->recv_op.io_vector;
-		recv_meta->recv_op.me.length = wr->num_sge;
-		recv_meta->recv_op.me.options = PTL_SRV_ME_OPTS | PTL_IOVEC;
+#if PTL_USE_MATCHING
+		ret = spdk_rdma_provider_ptl_register_match_entry(
+			      recv_meta, PTL_UUID_TARGET_SRQ_MATCH_BITS, wr->num_sge,
+			      wr->wr_id,
+			      ptl_cnxt_get_portal_index(portals_srq->ptl_context), nic);
 #else
-		recv_meta->recv_op.me.start = (void*)wr->sg_list[0].addr;
-		recv_meta->recv_op.me.length = wr->sg_list[0].length;
-		recv_meta->recv_op.me.options = (PTL_ME_OP_PUT | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_MAY_ALIGN |
-						 PTL_ME_IS_ACCESSIBLE | PTL_ME_USE_ONCE);
+		ret = spdk_rdma_provider_ptl_register_list_entry(
+			      recv_meta, wr->num_sge, wr->wr_id,
+			      ptl_cnxt_get_portal_index(portals_srq->ptl_context), nic);
 #endif
-		recv_meta->recv_op.me.ct_handle = PTL_CT_NONE;
-		recv_meta->recv_op.me.uid = PTL_UID_ANY;
-		recv_meta->wr_id = wr->wr_id;
-
-		// SPDK_PTL_DEBUG(
-		//     "(Before)Registering receive buffer {addr:%lu, length:%zu}",
-		//     (size_t)recv_meta->recv_op.io_vector[0].iov_base,
-		//     recv_meta->recv_op.io_vector[0].iov_len);
-		ret = PtlMEAppend(
-			      nic,                    // Network interface handle
-			      ptl_cnxt_get_portal_index(portals_srq->ptl_context), //Portals Table Entry
-			      &recv_meta->recv_op.me,  // List entry
-			      PTL_PRIORITY_LIST,      // List type (PRIORITY or OVERFLOW)
-			      recv_meta,              // User pointer, stores recv op meta (wr_id)
-			      &recv_meta->recv_op.me_handle   // Returned handle
-		      );
 		if (PTL_OK != ret) {
-			SPDK_PTL_FATAL(
-				"Failed to append memory entry start addr: %p "
-				"length %lu code is: %d num_of_bufs: %u until "
-				"crash of portals srq: %p",
-				recv_meta->recv_op.me.start, recv_meta->recv_op.me.length, ret, num_of_bufs, portals_srq);
+			SPDK_PTL_FATAL("Failed to register receive buffer");
 		}
 		// SPDK_PTL_DEBUG(
 		//     "(After)Registering receive buffer {addr:%lu, length:%zu}",
@@ -328,14 +376,14 @@ bool spdk_rdma_provider_qp_queue_recv_wrs(
 	}
 }
 
+
 int
 spdk_rdma_provider_qp_flush_recv_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				     struct ibv_recv_wr **bad_wr)
 {
-	// SPDK_PTL_DEBUG("PORTALS REGISTERING THE BUFFERS FOR THE *SINGLE* QUEUE PAIR CASE (NOT SRQ)");
 	struct spdk_portals_provider_qp *portals_qp;
 	ptl_handle_ni_t nic;
-	ptl_pt_index_t pt_index;
+	ptl_pt_index_t pte;
 	struct ptl_context_op_meta *recv_meta;
 	int ret;
 
@@ -354,7 +402,12 @@ spdk_rdma_provider_qp_flush_recv_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 	for (struct ibv_recv_wr *wr = spdk_rdma_qp->recv_wrs.first; wr != NULL;
 	     wr = wr->next) {
 		nic = ptl_cnxt_get_ni_handle(portals_qp->ptl_context);
-		pt_index = ptl_cnxt_get_portal_index(portals_qp->ptl_context);
+#if PTL_USE_MATCHING
+		pte = ptl_cnxt_get_portal_index(portals_qp->ptl_context);
+#else
+		/*This function is called from the initiator to register buffer for receiving nvme_cpl*/
+		pte = portals_qp->ptl_id->nvme_cpl_pte;
+#endif
 
 		if (wr->num_sge > PTL_IOVEC_SIZE) {
 			SPDK_PTL_FATAL("io_vector too small size: %d needs %d", PTL_IOVEC_SIZE, wr->num_sge);
@@ -369,48 +422,21 @@ spdk_rdma_provider_qp_flush_recv_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 			SPDK_PTL_DEBUG("SGE no: %d out of: %d: Address = %p, Length = %lu\n",
 				       i, wr->num_sge, recv_meta->recv_op.io_vector[i].iov_base, recv_meta->recv_op.io_vector[i].iov_len);
 		}
-		// Setup the list entry
-		// Initialize the matching entry
-		recv_meta->recv_op.me.ignore_bits = PTL_UUID_IGNORE_MASK;
-		// me.match_bits = ptl_uuid_set_op_type(PTL_UUID_IGNORE_MASK, PTL_SEND_RECV);
-		recv_meta->recv_op.me.match_bits = portals_qp->ptl_id->my_match_bits;
-		recv_meta->recv_op.me.match_id.phys.nid = PTL_NID_ANY;
-		recv_meta->recv_op.me.match_id.phys.pid = PTL_PID_ANY;
-		recv_meta->recv_op.me.min_free = 0;
 
-
-#if PTL_ENABLE_IOVEC_RECEIVE
-		recv_meta->recv_op.me.start = recv_meta->recv_op.io_vector;
-		recv_meta->recv_op.me.length = wr->num_sge;
-		recv_meta->recv_op.me.options = PTL_SRV_ME_OPTS | PTL_IOVEC;
+#if PTL_USE_MATCHING
+		ret = spdk_rdma_provider_ptl_register_match_entry(recv_meta,
+			portals_qp->ptl_id->my_match_bits, wr->num_sge, wr->wr_id, pte, nic);
 #else
-		recv_meta->recv_op.me.start = (ptl_addr_t)recv_meta->recv_op.io_vector[0].iov_base;
-		recv_meta->recv_op.me.length = recv_meta->recv_op.io_vector[0].iov_len;
-		recv_meta->recv_op.me.options = PTL_SRV_ME_OPTS;
+		ret = spdk_rdma_provider_ptl_register_list_entry(recv_meta, wr->num_sge, wr->wr_id, pte, nic);
 #endif
-
-		recv_meta->recv_op.me.ct_handle = PTL_CT_NONE;
-		recv_meta->recv_op.me.uid = PTL_UID_ANY;
-		recv_meta->wr_id = wr->wr_id;
-		ret = PtlMEAppend(
-			      nic,                    // Network interface handle
-			      pt_index,               // Portal table index
-			      &recv_meta->recv_op.me,                    // List entry
-			      PTL_PRIORITY_LIST,      // List type (PRIORITY or OVERFLOW)
-			      recv_meta,               // User pointer (can be used to store wr_id)
-			      &recv_meta->recv_op.me_handle              // Returned handle
-		      );
 		if (PTL_OK != ret) {
 			SPDK_PTL_FATAL("Failed to append memory entry");
 		}
-
 	}
-
 	// SPDK_PTL_DEBUG("MATCH_BITS: Registered memory for a single QP under match bits: %lu",
 	// 	       portals_qp->ptl_id->my_match_bits);
 	spdk_rdma_qp->recv_wrs.first = NULL;
 	spdk_rdma_qp->stats->recv.doorbell_updates++;
-
 	return 0;
 }
 // common end
@@ -684,11 +710,11 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 #endif
 
 		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
-		SPDK_PTL_DEBUG("NVMe: Performing an RDMA read from node nid: %d pid: %d portal index: %d local offset: %lu match_bits: %lu is it signaled?: %s qp_num: %d",
-			       destination.phys.nid, destination.phys.pid, ptl_qp->remote_pte, local_offset, match_bits,
+		SPDK_PTL_DEBUG("NVMe: Performing an RDMA read from node nid: %d pid: %d RMA_PTE:%d local offset: %lu match_bits: %lu is it signaled?: %s qp_num: %d",
+			       destination.phys.nid, destination.phys.pid, ptl_qp->remote_rma_pte, local_offset, match_bits,
 			       rdma_read_meta ? "YES" : "NO", ptl_qp->ptl_cm_id->ptl_qp_num);
 		/*XXX TODO XXX, set match bits correct here!XXX TODO XXX*/
-		rc = PtlGet(md_handle, local_offset, wr->sg_list[i].length, destination, ptl_qp->remote_pte,
+		rc = PtlGet(md_handle, local_offset, wr->sg_list[i].length, destination, ptl_qp->remote_rma_pte,
 			    match_bits, remote_addr, rdma_read_meta);
 		if (PTL_OK != rc) {
 			SPDK_PTL_FATAL("Remote RDMA read failed Sorry!");
@@ -761,10 +787,10 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 
 		SPDK_PTL_DEBUG("Performing an RDMA WRITE (sg[%d]) to node "
-			       "nid: %d pid: %d portal index: %d local offset: "
+			       "nid: %d pid: %d RMA_PTE: %d local offset: "
 			       "%lu length in B: %u remote_addr: %lu is it signaled?: %s",
 			       i, destination.phys.nid, destination.phys.pid,
-			       ptl_qp->remote_pte, local_offset,
+			       ptl_qp->remote_rma_pte, local_offset,
 			       wr->sg_list[i].length, remote_addr, rdma_write_meta ? "YES" : "NO");
 
 
@@ -773,7 +799,7 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 			    wr->sg_list[i].length,
 			    PTL_ACK_REQ,
 			    destination,// target process
-			    ptl_qp->remote_pte,//portal table index
+			    ptl_qp->remote_rma_pte,//portal table index
 			    match_bits,// match bits
 			    remote_addr,
 			    rdma_write_meta,
@@ -820,13 +846,13 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 		// spdk_rdma_print_wr_flags(wr);
 		if (wr->opcode == IBV_WR_RDMA_WRITE) {
 			spdk_rdma_provider_ptl_rdma_write(ptl_pd, ptl_qp, wr, ptl_uuid_set_match_list(match_bits,
-							  ptl_qp->ptl_cm_id->rma_match_bits));
+							  ptl_qp->ptl_cm_id->ptl_qp->rma_match_bits));
 			continue;
 		}
 
 		if (wr->opcode == IBV_WR_RDMA_READ) {
 			spdk_rdma_provider_ptl_rdma_read(ptl_pd, ptl_qp, wr, ptl_uuid_set_match_list(match_bits,
-							 ptl_qp->ptl_cm_id->rma_match_bits));
+							 ptl_qp->ptl_cm_id->ptl_qp->rma_match_bits));
 			continue;
 		}
 
@@ -881,7 +907,7 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				wr->sg_list[i].length == 16 ? "NVMe-cpl-send"
 				: "NVMe-cmd-send",
 				target.phys.nid, target.phys.pid,
-				ptl_qp->remote_pte,
+				ptl_qp->remote_msg_pte,
 				ptl_uuid_get_initiator_qp_num(match_bits),
 				ptl_uuid_get_target_qp_num(match_bits),
 				local_offset, send_meta ? "YES" : "NO");
@@ -891,8 +917,8 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				    wr->sg_list[i].length,//length
 				    PTL_ACK_REQ,
 				    target,// target process
-				    ptl_qp->remote_pte,//portal table index
-				    ptl_uuid_set_match_list(match_bits, ptl_qp->ptl_cm_id->recv_match_bits),//match bits
+				    ptl_qp->remote_msg_pte,//portal table index
+				    ptl_uuid_set_match_list(match_bits, ptl_qp->recv_match_bits),//match bits
 				    0,// remote offset, don't care let target decide
 				    send_meta,
 				    0);

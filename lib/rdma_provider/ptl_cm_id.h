@@ -34,30 +34,14 @@ struct ptl_cm_id {
 	struct ptl_qp *ptl_qp;
 	struct ptl_context *ptl_context;
 	uint64_t uuid;
-#if PTL_USE_MATCHING
-	/*Where the remote peer has MEs for recv*/
-	uint64_t recv_match_bits;
-	/*Where the remote peer has MEs for RMA operations*/
-	uint64_t rma_match_bits;
-#else
-	/**
-	 * Used only by the target. It keeps the pte where the initiator has posted
-	 * LEs for nvme completion (NVMe-cpl) messages
-	 * */
-	int nvme_cpl_pte;
-	/**
-	 * Used only by the target. It keeps the pte where the initiator has
-	 * registered and LE for rma operations (READ/WRITE)
-	 */
-	int nvme_rma_ops_pte;
-#endif
 	/**
 	* CQ id of the remote peer where it has subscribed for events.
 	* Its purpose is to encoded in the match bits in the PtlPut operations
 	*/
 	int remote_cq_id;
-	/*Which are MY match bits for recv operations*/
+#if PTL_USE_MATCHING
 	uint64_t my_match_bits;
+#endif
 	ptl_cm_id_e cm_id_state;
 	int ptl_qp_num;
 	struct ptl_cq *cq;

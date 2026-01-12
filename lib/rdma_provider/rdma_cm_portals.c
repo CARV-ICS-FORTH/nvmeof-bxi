@@ -136,7 +136,11 @@ static struct rdma_ptl_cp_server {
 	/*Dynamically allocated array of receive buffers for new connection messages (new, close, etc)*/
 	struct ptl_conn_msg *recv_buffers;
 	const char *role;
+#if PTL_USE_MATCHING
+	ptl_handle_me_t *me_handle;
+#else
 	ptl_handle_le_t *le_handle;
+#endif
 	uint32_t num_conn_info;
 	ptl_handle_eq_t eq_handle;
 	ptl_pt_index_t pt_index;
@@ -329,19 +333,21 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 	ptl_id->uuid = ptl_uuid_set_target_qp_num(ptl_id->uuid, ptl_id->ptl_qp_num);
 	ptl_id->uuid = ptl_uuid_set_initiator_qp_num(ptl_id->uuid,
 		       request_open_conn->conn_open.initiator_qp_num);
-	SPDK_PTL_DEBUG("[%s] CP server: Got an open connection request from "
-		       "nid: %d pid: %d pte: %d Creating "
+	SPDK_PTL_DEBUG("[%s] CP server: Got a PTL_OPEN_CONNECTION request from "
+		       "nid: %d pid: %d pte: %d {msg_pte: %d rma_pte: %d}. Creating "
 		       "the fake event and send the OPEN_CONNECTION_REPLY pair is: target qp num: %d initiator qp num: %d",
 		       ptl_control_plane_server.role,
 		       request_open_conn->msg_header.peer_info.src.nid,
 		       request_open_conn->msg_header.peer_info.src.pid,
 		       request_open_conn->msg_header.peer_info.src.pte,
+		       request_open_conn->conn_open.msg_pte,
+		       request_open_conn->conn_open.rma_pte,
 		       ptl_id->ptl_qp_num, request_open_conn->conn_open.initiator_qp_num);
 
 	ptl_qp = ptl_qp_create(ptl_cnxt->ptl_pd, listen_id->cq, listen_id->cq,
 			       request_open_conn->msg_header.peer_info.src.nid,
 			       request_open_conn->msg_header.peer_info.src.pid,
-			       PTL_PT_INDEX);
+			       PTL_PT_INDEX, -1);
 	ptl_id->ptl_qp = ptl_qp;
 	ptl_qp->ptl_cm_id = ptl_id;
 
@@ -349,12 +355,11 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 	memcpy(&ptl_id->fake_cm_id.route.addr.dst_addr, &conn_open->src_addr,
 	       sizeof(conn_open->src_addr));
 #if PTL_USE_MATCHING
-	ptl_id->recv_match_bits = conn_open->recv_match_bits;
-	ptl_id->rma_match_bits = conn_open->rma_match_bits;
-#else
-	ptl_id->nvme_cpl_pte = conn_open->nvme_cpl_pte;
-	ptl_id->nvme_rma_ops_pte = conn_open->nvme_rma_ops_pte;
+	ptl_id->ptl_qp->recv_match_bits = conn_open->recv_match_bits;
+	ptl_id->ptl_qp->rma_match_bits = conn_open->rma_match_bits;
 #endif
+	ptl_id->ptl_qp->remote_msg_pte = conn_open->msg_pte;
+	ptl_id->ptl_qp->remote_rma_pte = conn_open->rma_pte;
 	ptl_id->remote_cq_id = conn_open->cq_id;
 
 	// SPDK_PTL_DEBUG("MATCH_BITS: The remote guy has MEs for recv in match_bits: "
@@ -394,9 +399,14 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 	rdma_ptl_write_event_to_fd(ptl_id->ptl_channel->fake_channel.fd);
 	assert(ptl_id->ptl_channel);
 
-	// SPDK_PTL_DEBUG("CP server: Ok created the fake
-	// RDMA_CM_EVENT_CONNECT_REQUEST triggering " 	       "it through channel's async fd.
-	// QP num is: %d", 	       fake_event->id->qp->qp_num);
+	SPDK_PTL_DEBUG(
+		"Target done handling the open connection request. Some info about "
+		"the queue pair created. Remote guy is: "
+		"{nid:%d, pid:%d, msg_pte: %d, rma_pte: %d} local: {msg_pte:%d, "
+		"rma_pte:%d} ",
+		ptl_id->ptl_qp->remote_nid, ptl_id->ptl_qp->remote_pid,
+		ptl_id->ptl_qp->remote_msg_pte, ptl_id->ptl_qp->remote_rma_pte,
+		ptl_id->ptl_qp->local_msg_pte, ptl_id->ptl_qp->local_rma_pte);
 	uint64_t value = 1;
 	if (write(listen_id->ptl_channel->fake_channel.fd, &value, sizeof(value)) !=
 	    sizeof(value)) {
@@ -436,17 +446,20 @@ static void rdma_ptl_handle_open_conn_reply(struct ptl_cm_id *listen_id,
 			       ptl_control_plane_server.role, qp_num);
 	}
 	connection_id->uuid = open_conn_reply->uuid;
-	/*Inform what are the srq bits of the target*/
-	connection_id->recv_match_bits = open_conn_reply->srq_match_bits;
-	connection_id->rma_match_bits = UINT64_MAX;
-	connection_id->remote_cq_id = open_conn_reply->cq_id;
-	connection_id->uuid = ptl_uuid_set_cq_num(connection_id->uuid, connection_id->remote_cq_id);
+#if PTL_USE_MATCHING
+	connection_id->ptl_qp->recv_match_bits = open_conn_reply->srq_match_bits;
+	connection_id->ptl_qp->rma_match_bits = UINT64_MAX;
 	SPDK_PTL_DEBUG("MATCH_BITS: Target match bits for its srq are: %lu setting "
 		       "rma_match_bits to: %lu NO RMA operations from initiator to "
 		       "target allowed. Target waits receive events in cq id: %d",
-		       connection_id->recv_match_bits, connection_id->rma_match_bits, connection_id->remote_cq_id);
-	connection_id->ptl_qp->remote_pte = open_conn_reply->target_dp_pte;
-	SPDK_PTL_DEBUG("Target assigned qp: to remote PTE: %d", connection_id->ptl_qp->remote_pte);
+		       connection_id->ptl_qp->recv_match_bits, connection_id->ptl_qp->rma_match_bits,
+		       connection_id->remote_cq_id);
+#endif
+	connection_id->ptl_qp->remote_msg_pte = open_conn_reply->msg_pte;
+	connection_id->ptl_qp->remote_rma_pte = open_conn_reply->rma_pte;
+	connection_id->remote_cq_id = open_conn_reply->cq_id;
+	connection_id->uuid = ptl_uuid_set_cq_num(connection_id->uuid, connection_id->remote_cq_id);
+
 
 	memcpy(&connection_id->conn_msg, conn_msg, sizeof(*conn_msg));
 
@@ -466,17 +479,17 @@ static void rdma_ptl_handle_open_conn_reply(struct ptl_cm_id *listen_id,
 		memcpy((void*)connection_id->conn_param.private_data, private_data,
 		       open_conn_reply->conn_param.private_data_len);
 	}
-	SPDK_PTL_DEBUG("QP_CREATE: Remote side info: {nid:%d,pid:%d,pte:%d}",
-		       connection_id->ptl_qp->remote_nid,
-		       connection_id->ptl_qp->remote_pid,
-		       connection_id->ptl_qp->remote_pte);
+
+	SPDK_PTL_DEBUG(
+		"Initiator done handling the open connection reply request. Some info about "
+		"the queue pair created. Remote guy is: "
+		"{nid:%d, pid:%d, msg_pte: %d, rma_pte: %d} local: {msg_pte:%d, "
+		"rma_pte:%d} ",
+		connection_id->ptl_qp->remote_nid, connection_id->ptl_qp->remote_pid,
+		connection_id->ptl_qp->remote_msg_pte, connection_id->ptl_qp->remote_rma_pte,
+		connection_id->ptl_qp->local_msg_pte, connection_id->ptl_qp->local_rma_pte);
 	/*We are at the initiator side here, which has just received OPEN_CONNECTION_REPLY*/
 	connection_id->cm_id_state = PTL_CM_CONNECTED;
-	SPDK_PTL_DEBUG("PTL_SRQ: Initiator info about the target {nid: %d: "
-		       "pid: %d pte: %d}",
-		       connection_id->ptl_qp->remote_nid,
-		       connection_id->ptl_qp->remote_pid,
-		       connection_id->ptl_qp->remote_pte);
 	fake_event = ptl_cm_id_create_event(connection_id, NULL, RDMA_CM_EVENT_ESTABLISHED);
 	ptl_cm_id_add_event(connection_id, fake_event);
 	rdma_ptl_write_event_to_fd(connection_id->ptl_channel->fake_channel.fd);
@@ -619,6 +632,11 @@ static void *rdma_run_ptl_cp_server(void *args)
 	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
 	struct rdma_ptl_send_buffer *send_buffer;
 	ptl_event_t event;
+#if PTL_USE_MATCHING
+	ptl_me_t match_entry;
+#else
+	ptl_le_t list_entry;
+#endif
 	int rc;
 
 
@@ -627,10 +645,7 @@ static void *rdma_run_ptl_cp_server(void *args)
 	ptl_control_plane_server.status = PTL_CP_SERVER_RUNNING;
 	while (1) {
 		/* Wait for events on the control plane event queue */
-		memset(&event, 0x00, sizeof(event));
 		rc = PtlEQWait(ptl_control_plane_server.eq_handle, &event);
-		SPDK_PTL_DEBUG("Got something");
-
 		if (rc != PTL_OK) {
 			SPDK_PTL_FATAL(
 				"PtlEQWait failed in control plane server with code: %d\n", rc);
@@ -641,8 +656,7 @@ static void *rdma_run_ptl_cp_server(void *args)
 		if (event.type == PTL_EVENT_AUTO_UNLINK) {
 			SPDK_PTL_DEBUG("[%s] CP server: Got an autounlink event Re-register buffer...",
 				       ptl_control_plane_server.role);
-			/* Re-register the receive buffer by appending a new list entry */
-			ptl_me_t match_entry;
+#if PTL_USE_MATCHING
 			memset(&match_entry, 0, sizeof(match_entry));
 			match_entry.ignore_bits = 0;//RDMA_PTL_IGNORE;
 			match_entry.match_bits = 0x01ULL;//RDMA_PTL_MATCH;
@@ -659,12 +673,28 @@ static void *rdma_run_ptl_cp_server(void *args)
 			rc = PtlMEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt),
 					 PTL_CP_SERVER_PTE, &match_entry, PTL_PRIORITY_LIST,
 					 event.user_ptr, event.user_ptr);
+#else
+			memset(&list_entry, 0, sizeof(list_entry));
+			list_entry.ignore_bits = RDMA_PTL_IGNORE;
+			list_entry.match_bits = RDMA_PTL_MATCH;
+			list_entry.match_id.phys.nid = PTL_NID_ANY;
+			list_entry.match_id.phys.pid = PTL_PID_ANY;
+			list_entry.match_id.rank = PTL_RANK_ANY;
+			list_entry.min_free = 0;
+			list_entry.start = event.start;
+			list_entry.length = RDMA_PTL_MSG_BUFFER_SIZE;
+			list_entry.ct_handle = PTL_CT_NONE;
+			list_entry.uid = PTL_UID_ANY;
+			list_entry.options = PTL_SRV_ME_OPTS;
+			rc = PtlLEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt),
+					 PTL_CP_SERVER_PTE, &list_entry, PTL_PRIORITY_LIST,
+					 event.user_ptr, event.user_ptr);
+#endif
 			if (rc != PTL_OK) {
 				SPDK_PTL_FATAL(
-					"PtlLEAppend failed in control plane server with code: %d\n",
+					"Re-registering recv buffer failed in control plane server with code: %d\n",
 					rc);
 			}
-			SPDK_PTL_DEBUG("Re-registered control plane buffer");
 			continue;
 		}
 		if (event.type == PTL_EVENT_SEND) {
@@ -739,7 +769,11 @@ static void rdma_ptl_boot_cp_server(struct  ptl_cm_id *cm_id, const char *role)
 {
 
 	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
+#if PTL_USE_MATCHING
 	ptl_me_t match_entry;
+#else
+	ptl_le_t list_entry;
+#endif
 	int rc;
 
 	PTL_CP_SERVER_LOCK(&ptl_control_plane_server.init_lock);
@@ -759,9 +793,13 @@ static void rdma_ptl_boot_cp_server(struct  ptl_cm_id *cm_id, const char *role)
 	}
 	memset(ptl_control_plane_server.recv_buffers, 0x00,
 	       ptl_control_plane_server.num_conn_info * RDMA_PTL_MSG_BUFFER_SIZE);
-
+#if PTL_USE_MATCHING
+	ptl_control_plane_server.me_handle = calloc(ptl_control_plane_server.num_conn_info,
+					     sizeof(ptl_handle_me_t));
+#else
 	ptl_control_plane_server.le_handle = calloc(ptl_control_plane_server.num_conn_info,
 					     sizeof(ptl_handle_le_t));
+#endif
 	/*Create event queue for control plane messages*/
 	rc = PtlEQAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_CONTROL_PLANE_NUM_RECV_BUFFERS,
 			&ptl_control_plane_server.eq_handle);
@@ -782,6 +820,7 @@ static void rdma_ptl_boot_cp_server(struct  ptl_cm_id *cm_id, const char *role)
 
 	for (uint32_t i = 0; i < ptl_control_plane_server.num_conn_info; i++) {
 
+#if PTL_USE_MATCHING
 		memset(&match_entry, 0, sizeof(match_entry));
 		match_entry.ignore_bits = 0;//RDMA_PTL_IGNORE;
 		match_entry.match_bits = 0x01ULL;//RDMA_PTL_MATCH;
@@ -796,20 +835,33 @@ static void rdma_ptl_boot_cp_server(struct  ptl_cm_id *cm_id, const char *role)
 
 		// Append LE for receiving control messages
 		rc = PtlMEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_CP_SERVER_PTE, &match_entry,
+				 PTL_PRIORITY_LIST, &ptl_control_plane_server.me_handle[i], &ptl_control_plane_server.me_handle[i]);
+#else
+		memset(&list_entry, 0, sizeof(list_entry));
+		list_entry.ignore_bits = RDMA_PTL_IGNORE;
+		list_entry.match_bits = RDMA_PTL_MATCH;
+		list_entry.match_id.phys.nid = PTL_NID_ANY;
+		list_entry.match_id.phys.pid = PTL_PID_ANY;
+		list_entry.min_free = 0;
+		list_entry.start = &ptl_control_plane_server.recv_buffers[i];
+		list_entry.length = RDMA_PTL_MSG_BUFFER_SIZE;
+		list_entry.ct_handle = PTL_CT_NONE;
+		list_entry.uid = PTL_UID_ANY;
+		list_entry.options = PTL_SRV_ME_OPTS;
+		rc = PtlLEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_CP_SERVER_PTE, &list_entry,
 				 PTL_PRIORITY_LIST, &ptl_control_plane_server.le_handle[i], &ptl_control_plane_server.le_handle[i]);
+#endif
 		if (rc != PTL_OK) {
 			SPDK_PTL_FATAL("PtlLEAppend failed in control plane server with code: %d\n", rc);
 		}
 	}
 
-	SPDK_PTL_DEBUG("CP server: BOOTING control plane server...");
 	if (pthread_create(&ptl_control_plane_server.cp_server_cnxt, NULL,
 			   rdma_run_ptl_cp_server, cm_id)) {
 		perror("Reason of failure of booting control plane server:");
 		SPDK_PTL_FATAL("Failed to boot control plane server");
 	}
 	while (ptl_control_plane_server.status != PTL_CP_SERVER_RUNNING);
-
 
 	SPDK_PTL_DEBUG("[%s] CP server: BOOTED control plane server",
 		       ptl_control_plane_server.role);
@@ -1267,6 +1319,7 @@ int rdma_create_qp(struct rdma_cm_id *id, struct ibv_pd *pd,
 
 	struct ptl_qp *ptl_qp = ptl_id->ptl_qp;
 	struct ptl_conn_comm_pair_info comm_pair_info;
+	int local_pte;
 
 	/*DEBUG STAFF XXX TODO XXX REMOVE*/
 
@@ -1276,16 +1329,19 @@ int rdma_create_qp(struct rdma_cm_id *id, struct ibv_pd *pd,
 		SPDK_PTL_DEBUG("PTL_SRQ: Queue pair belongs to PTE: %u", ptl_id->ptl_srq->pte_number);
 	}
 	if (ptl_qp) {
-		SPDK_PTL_DEBUG("Queue pair already there nothing to do, connected to remote nid: %d pid: %d portals index: %d",
-			       ptl_qp->remote_nid, ptl_qp->remote_pid, ptl_qp->remote_pte);
+		SPDK_PTL_DEBUG("Queue pair already there nothing to do, connected to remote nid: %d pid: %d MSG_PTE: %d",
+			       ptl_qp->remote_nid, ptl_qp->remote_pid, ptl_qp->remote_msg_pte);
 		return 0;
 	}
 
 	SPDK_PTL_DEBUG("Creating queue pair... connected to remote nid: %d pid: %d portals index: %d",
 		       comm_pair_info.dest.nid, comm_pair_info.dest.pid, comm_pair_info.dest.pte);
-	/*we set remote_pte to -1 because we do not know currently which PTE will the target place us*/
+	local_pte = ptl_cnxt_allocate_pte(ptl_cnxt_get());
+	if (-1 == local_pte) {
+		SPDK_PTL_FATAL("Sorry out of PTEs cannot create another qp");
+	}
 	ptl_qp = ptl_qp_create(ptl_pd, send_queue, recv_queue, rdma_ptl_find_dst_nid(id), PTL_TARGET_PID,
-			       -1);
+			       local_pte, ptl_cnxt_get_rma_pte(ptl_cnxt_get()));
 	ptl_qp->fake_qp.qp_num = ptl_id->ptl_qp_num;
 	/*Update cm_id*/
 	ptl_cm_id_set_ptl_qp(ptl_id, ptl_qp);
@@ -1338,12 +1394,11 @@ int rdma_connect(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 	request_buf->conn_msg.conn_open.initiator_qp_num = ptl_id->ptl_qp_num;
 	/*Inform the target about the match bits I (the initiator) use for my recv operations*/
 	request_buf->conn_msg.conn_open.cq_id = ptl_id->ptl_qp->recv_cq->cq_id;
+	request_buf->conn_msg.conn_open.msg_pte = ptl_cnxt_allocate_pte(ptl_cnxt_get());
+	request_buf->conn_msg.conn_open.rma_pte = ptl_cnxt_get_rma_pte(ptl_cnxt_get());
 #if PTL_USE_MATCHING
 	request_buf->conn_msg.conn_open.recv_match_bits = ptl_id->my_match_bits;
 	request_buf->conn_msg.conn_open.rma_match_bits = PTL_UUID_RMA_MASK;
-#else
-	request_buf->conn_msg.conn_open.nvme_cpl_pte = ptl_cnxt_allocate_pte(ptl_cnxt_get());
-	request_buf->conn_msg.conn_open.nvme_rma_ops_pte = ptl_cnxt_get_rma_pte(ptl_cnxt_get());
 #endif
 
 	memcpy(&request_buf->conn_msg.conn_open.src_addr, &id->route.addr.src_addr,
@@ -1452,8 +1507,9 @@ int rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 	/*Tell the initiator (you are the target) in which cq_id you expect notifications*/
 	conn_reply_buf->conn_msg.conn_open_reply.cq_id = ptl_id->ptl_qp->recv_cq->cq_id;
 	/*Tell the initiator in which PTE you assigned it*/
-	conn_reply_buf->conn_msg.conn_open_reply.target_dp_pte = ptl_id->ptl_srq->pte_number;
-
+	conn_reply_buf->conn_msg.conn_open_reply.msg_pte = ptl_id->ptl_srq->pte_number;
+	/*Tell the initiator I do not allow rma operations to me*/
+	conn_reply_buf->conn_msg.conn_open_reply.rma_pte = -1;
 
 	conn_reply_buf->conn_msg.conn_open_reply.conn_param = *conn_param;
 	conn_reply_buf->conn_msg.conn_open_reply.conn_param.private_data = NULL;/*Intentionally*/

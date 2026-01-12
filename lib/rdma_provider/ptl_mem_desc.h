@@ -1,10 +1,10 @@
 #ifndef PTL_MEM_DESC_H
 #define PTL_MEM_DESC_H
+#include "ptl_config.h"
 #include "ptl_object_types.h"
 #include <infiniband/verbs.h>
 #include <portals4.h>
 #include <stdbool.h>
-
 /**
  * @file ptl_mem_desc.h
  * @brief Defines structures and functions for managing Portals 4 memory descriptors.
@@ -22,7 +22,11 @@ struct ptl_mem_desc_local {
 };
 
 struct ptl_mem_desc_remote {
-	ptl_me_t remote_wr_me;
+#if PTL_USE_MATCHING
+	ptl_me_t rma_me;
+#else
+	ptl_le_t rma_le;
+#endif
 	ptl_handle_md_t remote_rw_mem_handle;
 	ptl_handle_ct_t remote_rw_ct_handle;
 	struct ibv_mr fake_mr;

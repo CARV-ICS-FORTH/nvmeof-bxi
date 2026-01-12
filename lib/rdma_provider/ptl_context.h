@@ -14,8 +14,13 @@ struct ibv_pd;
 
 struct ptl_context_recv_op {
 	ptl_iovec_t io_vector[PTL_IOVEC_SIZE];
-	ptl_me_t me;/*Used for creating the ME*/
-	ptl_handle_me_t me_handle;/*The returned handle*/
+#if PTL_USE_MATCHING
+	ptl_me_t me;
+	ptl_handle_me_t me_handle;
+#else
+	ptl_le_t le;
+	ptl_handle_le_t le_handle;
+#endif
 	uint64_t bytes_received;
 	int initiator_qp_num;
 	int target_qp_num;
@@ -110,12 +115,10 @@ static inline int ptl_cnxt_get_pid(struct ptl_context *cnxt)
 **/
 int ptl_cnxt_allocate_pte(struct ptl_context *cnxt);
 
-#if !PTL_USE_MATCHING
 /**
   * Returns the PTE responsdile (that has an LE) for RMA operations
 */
 int ptl_cnxt_get_rma_pte(struct ptl_context *cnxt);
-#endif
 
 #endif
 

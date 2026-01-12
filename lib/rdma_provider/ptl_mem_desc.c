@@ -15,33 +15,33 @@ struct ptl_mem_desc *ptl_mem_desc_create_remote(void *start, size_t size, bool r
 	struct ptl_mem_desc *mem_desc = calloc(1UL, sizeof(*mem_desc));
 	mem_desc->obj_type = PTL_MEM_DESC_REMOTE;
 	SPDK_PTL_DEBUG("Memory registration for RMA operations requested....exposing the whole address space");
-	memset(&mem_desc->remote.remote_wr_me, 0x00, sizeof(mem_desc->remote.remote_wr_me));
-	mem_desc->remote.remote_wr_me.ignore_bits = PTL_UUID_IGNORE_MASK;
+	memset(&mem_desc->remote.rma_me, 0x00, sizeof(mem_desc->remote.rma_me));
+	mem_desc->remote.rma_me.ignore_bits = PTL_UUID_IGNORE_MASK;
 	// ptl_pd_mem_desc->remote_wr_me.match_bits = ptl_uuid_set_op_type(PTL_UUID_IGNORE_MASK, PTL_RMA);
-	mem_desc->remote.remote_wr_me.match_bits = PTL_UUID_RMA_MASK;
-	mem_desc->remote.remote_wr_me.match_id.phys.nid = PTL_NID_ANY;
-	mem_desc->remote.remote_wr_me.match_id.phys.pid = PTL_PID_ANY;
-	mem_desc->remote.remote_wr_me.min_free = 0;
-	mem_desc->remote.remote_wr_me.start = start;
-	mem_desc->remote.remote_wr_me.length = size;
-	mem_desc->remote.remote_wr_me.uid = PTL_UID_ANY;
+	mem_desc->remote.rma_me.match_bits = PTL_UUID_RMA_MASK;
+	mem_desc->remote.rma_me.match_id.phys.nid = PTL_NID_ANY;
+	mem_desc->remote.rma_me.match_id.phys.pid = PTL_PID_ANY;
+	mem_desc->remote.rma_me.min_free = 0;
+	mem_desc->remote.rma_me.start = start;
+	mem_desc->remote.rma_me.length = size;
+	mem_desc->remote.rma_me.uid = PTL_UID_ANY;
 	/*Create and associate counting events*/
 	// ret = PtlCTAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt), &ptl_pd_mem_desc->remote_rw_ct_handle);
 	// if (ret != PTL_OK) {
 	// 	SPDK_PTL_FATAL("Failed to allocate counting event");
 	// }
 	// ptl_pd_mem_desc->remote_wr_me.ct_handle = ptl_pd_mem_desc->remote_rw_ct_handle;
-	mem_desc->remote.remote_wr_me.ct_handle = PTL_CT_NONE;
-	mem_desc->remote.remote_wr_me.options = PTL_RMA_ME_OPTS;
+	mem_desc->remote.rma_me.ct_handle = PTL_CT_NONE;
+	mem_desc->remote.rma_me.options = PTL_RMA_ME_OPTS;
 	if (remote_read) {
 		SPDK_PTL_DEBUG("Enabling READ access for the remote region as requested");
-		mem_desc->remote.remote_wr_me.options     |= PTL_ME_OP_GET;
+		mem_desc->remote.rma_me.options     |= PTL_ME_OP_GET;
 	}
 	if (remote_write) {
 		SPDK_PTL_DEBUG("Enabling WRITE access for the remote region as requested");
-		mem_desc->remote.remote_wr_me.options     |= PTL_ME_OP_PUT;
+		mem_desc->remote.rma_me.options     |= PTL_ME_OP_PUT;
 	}
-	rc = PtlMEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_PT_INDEX, &mem_desc->remote.remote_wr_me,
+	rc = PtlMEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_PT_INDEX, &mem_desc->remote.rma_me,
 			 PTL_PRIORITY_LIST, NULL, &mem_desc->remote.remote_rw_mem_handle);
 	if (rc != PTL_OK) {
 		SPDK_PTL_FATAL("PtlMEAppend for RMA operations failed with error code: %d", rc);

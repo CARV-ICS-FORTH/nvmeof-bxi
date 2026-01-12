@@ -25,16 +25,15 @@ struct ptl_conn_msg_header {
 
 struct ptl_conn_open {
 	struct sockaddr src_addr;
+	/*PTE where there are buffers for recv operations (either NVMe-cpls)*/
+	int msg_pte;
+	/*PTE where there are buffers for RMA operations or -1 if not supported*/
+	int rma_pte;
 #if PTL_USE_MATCHING
 	/*Where initiator has MEs for recv operations*/
 	uint64_t recv_match_bits;
 	/*Where initiator has an ME for remote read/write operations*/
 	uint64_t rma_match_bits;
-#else
-	/*PTL entry where to send the nvme-cpls*/
-	int nvme_cpl_pte;
-	/*PTL entry where to send the target can send the rma operations*/
-	int nvme_rma_ops_pte;
 #endif
 	/*In which completion queue id initiator has subscribed for notifications*/
 	int cq_id;
@@ -44,13 +43,20 @@ struct ptl_conn_open {
 
 struct ptl_conn_open_reply {
 	uint64_t uuid;
+	/*PTE where there are buffers for receive operations (NVMe-cmd)*/
+	int msg_pte;
+	/*
+	 * PTE where there are buffers for RMA  ops (it will be -1 RMA from initiator to target not allowed).
+	 * We leave it as a possible future extension.
+	 * */
+	int rma_pte;
+#if PTL_USE_MATCHING
 	/*Where the target has buffer for receive operations*/
 	uint64_t srq_match_bits;
+#endif
 	/*Where I wait for recv events and staff*/
 	int cq_id;
 	int status;
-	/*PTE where target has assigned the queue (qpair->IO queue)*/
-	int target_dp_pte;
 	struct rdma_conn_param conn_param;
 };
 
