@@ -1,4 +1,5 @@
 #include "ptl_srq.h"
+#include "ptl_config.h"
 #include "ptl_context.h"
 #include "ptl_log.h"
 #include "ptl_object_types.h"
@@ -21,11 +22,6 @@ struct ptl_srq *ptl_srq_create(struct ptl_pd *ptl_pd,
 	struct ptl_context * ptl_cnxt = ptl_pd_get_cnxt(ptl_pd);
 	ptl_srq->fake_srq.context = ptl_cnxt_get_ibv_context(ptl_cnxt);
 	ptl_srq->fake_srq.context->ops.post_srq_recv = ptl_post_srq_recv;
-	ptl_srq->pte_number = ptl_cnxt_allocate_pte(ptl_cnxt);
-	if (-1 == ptl_srq->pte_number) {
-		SPDK_PTL_FATAL("Out of PTEs sorry");
-	}
-	SPDK_PTL_DEBUG("Created a PTL_SRQ at PTE: [ %u ]", ptl_srq->pte_number);
 	return ptl_srq;
 }
 

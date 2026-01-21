@@ -203,7 +203,11 @@ rdma_utils_mem_notify(void *cb_ctx, struct spdk_mem_map *map,
 #if PTL_ENABLE_BIND_PER_OP
 			ptl_mem_desc_local = ptl_mem_desc_create_local(vaddr, size, false, ptl_cq_get_static_event_queue());
 #else
+#if PTL_USE_MATCHING
 			ptl_mem_desc_local = ptl_mem_desc_create_local(vaddr, size, true, ptl_cq_get_static_event_queue());
+#else
+			ptl_mem_desc_local = ptl_mem_desc_create_local(vaddr, size, false, PTL_EQ_NONE);
+#endif
 #endif
 			if (false == ptl_pd->ops.add(ptl_pd->mem_desc_map, ptl_mem_desc_local)) {
 				SPDK_PTL_FATAL("Failed to keep memory handle in portals context");

@@ -56,7 +56,11 @@ bool ptl_rte_map_add(struct ptl_pd_mem_desc_map *map, struct ptl_mem_desc *mem_d
 		SPDK_PTL_FATAL("Mem desc map is NULL");
 	}
 	if (mem_desc->obj_type == PTL_MEM_DESC_REMOTE) {
+#if PTL_USE_MATCHING
 		rte_hash_add_key_data(map->hash_map, &mem_desc->remote.rma_me.start, mem_desc);
+#else
+		rte_hash_add_key_data(map->hash_map, &mem_desc->remote.rma_le.start, mem_desc);
+#endif
 		return true;
 	}
 

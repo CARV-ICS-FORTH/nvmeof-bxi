@@ -1,9 +1,11 @@
 #ifndef PTL_CONNECTION_H
 #define PTL_CONNECTION_H
 #include "ptl_config.h"
+#include <netinet/in.h>
 #include <rdma/rdma_cma.h>
 #include <stdint.h>
-typedef enum {NVMeOF_cmd = 0, NVMeOF_cpl, PTL_OPEN_CONNECTION, PTL_OPEN_CONNECTION_REPLY, PTL_CLOSE_CONNECTION, PTL_CLOSE_CONNECTION_REPLY, PTL_NUM_MSGS} ptl_conn_msg_type_e;
+#include <sys/socket.h>
+typedef enum {NVMeOF_cmd = 0, NVMeOF_cpl, NVMeOF_rma, PTL_OPEN_CONNECTION, PTL_OPEN_CONNECTION_REPLY, PTL_CLOSE_CONNECTION, PTL_CLOSE_CONNECTION_REPLY, PTL_NUM_MSGS} ptl_conn_msg_type_e;
 
 struct ptl_conn_comm_pair_info {
 	/*Initiator of the communication info*/

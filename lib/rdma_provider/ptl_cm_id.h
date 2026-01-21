@@ -47,7 +47,28 @@ struct ptl_cm_id {
 	struct ptl_cq *cq;
 	bool is_listen_id;
 	struct rdma_conn_param conn_param;
-	struct ptl_srq *ptl_srq;
+	int remote_nid; /*node id for Portals*/
+	int remote_pid; /* pid for Portals*/
+	/**
+	* Portals table entry for sending nvme-cmd (initiator) nvme-cpl (target)
+	* */
+	int remote_msg_pte;
+	/**
+	 * Portals table entry for performing rma operations (target->initiator).
+	 * In the target case it will be -1 (no rma allowed).
+	 * */
+	int remote_rma_pte;
+#if PTL_USE_MATCHING
+	/**
+	 * In the case of matching we also specify which match bits are valid.
+	 * All proper values are set during the connection process.
+	 */
+	/*Where the remote peer has MEs for recv*/
+	uint64_t recv_match_bits;
+	/*Where the remote peer has MEs for RMA operations*/
+	uint64_t rma_match_bits;
+#endif
+	int local_rma_pte;
 	//needed for connection setup
 	const void *fake_data;
 };
@@ -101,6 +122,5 @@ static inline void ptl_cm_id_set_ptl_pd(struct ptl_cm_id *ptl_id, struct ptl_pd 
 	ptl_id->fake_cm_id.pd = ptl_pd_get_ibv_pd(ptl_pd);
 	/*set also context as in the verbs case*/
 	ptl_id->ptl_context = ptl_pd_get_cnxt(ptl_pd);
-	ptl_id->fake_cm_id.context = ptl_cnxt_get_ibv_context(ptl_pd_get_cnxt(ptl_pd));
 }
 #endif

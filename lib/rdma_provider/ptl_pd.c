@@ -54,9 +54,15 @@ static struct ptl_mem_desc *ptl_pd_map_get(struct ptl_pd_mem_desc_map *map, uint
 	return NULL;
 remote:
 	for (i = 0; i < map->num_entries; i++) {
-		if ((uint64_t)map->entries[i]->remote.remote_wr_me.start <= address &&
-		    (uint64_t)end_address <= (uint64_t)map->entries[i]->remote.remote_wr_me.start +
+#if PTL_USE_MATCHING
+		if ((uint64_t)map->entries[i]->remote.rma_me.start <= address &&
+		    (uint64_t)end_address <= (uint64_t)map->entries[i]->remote.rma_me.start +
 		    map->entries[i]->local.local_w_mem_desc.length) {
+#else
+		if ((uint64_t)map->entries[i]->remote.rma_le.start <= address &&
+		    (uint64_t)end_address <= (uint64_t)map->entries[i]->remote.rma_le.start +
+		    map->entries[i]->local.local_w_mem_desc.length) {
+#endif
 			SPDK_PTL_DEBUG("Found *REMOTE* mem desc for portals!");
 			return map->entries[i];
 		}

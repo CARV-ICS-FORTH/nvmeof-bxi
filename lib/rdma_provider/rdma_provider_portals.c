@@ -3,6 +3,7 @@
  *   Copyright (c) Mellanox Technologies LTD. All rights reserved.
  *   Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
+#include "ptl_connection.h"
 #include "ptl_cm_id.h"
 #include "ptl_config.h"
 #include "ptl_context.h"
@@ -17,13 +18,13 @@
 #include "ptl_uuid.h"
 #include "spdk/likely.h"
 #include "spdk/log.h"
-#include "spdk/stdinc.h"
 #include "spdk/string.h"
 #include "spdk/util.h"
 #include "spdk_internal/rdma_provider.h"
 #include "spdk_internal/rdma_utils.h"
 #include <infiniband/verbs.h>
 #include <portals4.h>
+#include <portals4_bxiext.h>
 #include <rdma/rdma_cma.h>
 #include <stdint.h>
 
@@ -291,6 +292,7 @@ spdk_rdma_provider_srq_flush_recv_wrs(struct spdk_rdma_provider_srq *rdma_srq,
 {
 	ptl_handle_ni_t nic;
 	struct spdk_portals_provider_srq *portals_srq;
+	struct ptl_srq *ptl_srq;
 	struct ptl_context_op_meta *recv_meta;
 	int ret;
 	uint32_t num_of_bufs = 0;
@@ -326,9 +328,10 @@ spdk_rdma_provider_srq_flush_recv_wrs(struct spdk_rdma_provider_srq *rdma_srq,
 			      wr->wr_id,
 			      ptl_cnxt_get_portal_index(portals_srq->ptl_context), nic);
 #else
+		ptl_srq = SPDK_CONTAINEROF(portals_srq->fake_srq.srq, struct ptl_srq, fake_srq);
 		ret = spdk_rdma_provider_ptl_register_list_entry(
 			      recv_meta, wr->num_sge, wr->wr_id,
-			      ptl_cnxt_get_portal_index(portals_srq->ptl_context), nic);
+			      ptl_srq->pte_number, nic);
 #endif
 		if (PTL_OK != ret) {
 			SPDK_PTL_FATAL("Failed to register receive buffer");
@@ -406,7 +409,7 @@ spdk_rdma_provider_qp_flush_recv_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 		pte = ptl_cnxt_get_portal_index(portals_qp->ptl_context);
 #else
 		/*This function is called from the initiator to register buffer for receiving nvme_cpl*/
-		pte = portals_qp->ptl_id->nvme_cpl_pte;
+		pte = portals_qp->ptl_id->ptl_qp->local_msg_pte;
 #endif
 
 		if (wr->num_sge > PTL_IOVEC_SIZE) {
@@ -666,7 +669,7 @@ static void spdk_rdma_print_wr_flags(struct ibv_send_wr *wr)
 static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_qp *ptl_qp,
 		struct ibv_send_wr *wr, uint64_t match_bits)
 {
-	ptl_process_t destination = {.phys.nid = ptl_qp->remote_nid, .phys.pid = ptl_qp->remote_pid};
+	ptl_process_t destination = {.phys.nid = ptl_qp->ptl_cm_id->remote_nid, .phys.pid = ptl_qp->ptl_cm_id->remote_pid};
 	size_t local_offset;
 	int rc;
 	struct ptl_context_op_meta *rdma_read_meta = NULL;
@@ -674,6 +677,10 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 	ptl_addr_t md_start;
 	ptl_handle_md_t md_handle;
 	uint64_t remote_addr;
+#if !PTL_USE_MATCHING
+	ptl_md_t md;
+	ptl_msg_t msg;
+#endif
 
 	SPDK_PTL_CHECK_SGE_LENGTH(wr);
 
@@ -711,13 +718,34 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 
 		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 		SPDK_PTL_DEBUG("NVMe: Performing an RDMA read from node nid: %d pid: %d RMA_PTE:%d local offset: %lu match_bits: %lu is it signaled?: %s qp_num: %d",
-			       destination.phys.nid, destination.phys.pid, ptl_qp->remote_rma_pte, local_offset, match_bits,
+			       destination.phys.nid, destination.phys.pid, ptl_qp->ptl_cm_id->remote_rma_pte, local_offset,
+			       match_bits,
 			       rdma_read_meta ? "YES" : "NO", ptl_qp->ptl_cm_id->ptl_qp_num);
 		/*XXX TODO XXX, set match bits correct here!XXX TODO XXX*/
-		rc = PtlGet(md_handle, local_offset, wr->sg_list[i].length, destination, ptl_qp->remote_rma_pte,
+#if PTL_USE_MATCHING
+		rc = PtlGet(md_handle, local_offset, wr->sg_list[i].length, destination,
+			    ptl_qp->ptl_cm_id->remote_rma_pte,
 			    match_bits, remote_addr, rdma_read_meta);
+#else
+		md.start = (ptl_addr_t)wr->sg_list[i].addr;
+		md.length = wr->sg_list[i].length;
+		md.options = PTL_SRV_ME_OPTS;
+		md.ct_handle = PTL_CT_NONE;
+		md.eq_handle = ptl_qp->send_cq->eq_handle;
+
+		msg.match_bits = 0;
+		msg.ack_req = PTL_ACK_REQ;
+		msg.target_id.phys.nid = ptl_qp->remote_nid;
+		msg.target_id.phys.pid = ptl_qp->remote_pid;
+		msg.pt_index = ptl_qp->remote_rma_pte;
+		msg.hdr_data = NVMeOF_rma;
+		msg.remote_offset = remote_addr;
+		rc = PtlMsgGetOnce(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), (const ptl_md_t *)&md,
+				   (const ptl_msg_t *)&msg);
+#endif
+
 		if (PTL_OK != rc) {
-			SPDK_PTL_FATAL("Remote RDMA read failed Sorry!");
+			SPDK_PTL_FATAL("Remote RDMA read failed with error code: %d", rc);
 		}
 		remote_addr += wr->sg_list[i].length;
 	}
@@ -743,11 +771,15 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 {
 	struct ptl_mem_desc *ptl_mem_desc;
 	size_t local_offset;
-	ptl_process_t destination = {.phys.nid = ptl_qp->remote_nid, .phys.pid = ptl_qp->remote_pid};
+	ptl_process_t destination = {.phys.nid = ptl_qp->ptl_cm_id->remote_nid, .phys.pid = ptl_qp->ptl_cm_id->remote_pid};
 	struct ptl_context_op_meta *rdma_write_meta;
 	ptl_addr_t md_start;
 	ptl_handle_md_t md_handle;
 	uint64_t remote_addr =  wr->wr.rdma.remote_addr;
+#if !PTL_USE_MATCHING
+	ptl_md_t md;
+	ptl_msg_t msg;
+#endif
 	int rc;
 
 	SPDK_PTL_CHECK_SGE_LENGTH(wr);
@@ -773,6 +805,7 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 		}
 		md_start = rdma_write_meta->md_desc[i].start;
 		md_handle = rdma_write_meta->md_handle[i];
+		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 #else
 		ptl_mem_desc =
 			ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr,
@@ -782,31 +815,48 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 		}
 		md_start = ptl_mem_desc->local.local_w_mem_desc.start;
 		md_handle = ptl_mem_desc->local.local_w_mem_handle;
-#endif
 
+#endif
 		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 
 		SPDK_PTL_DEBUG("Performing an RDMA WRITE (sg[%d]) to node "
 			       "nid: %d pid: %d RMA_PTE: %d local offset: "
 			       "%lu length in B: %u remote_addr: %lu is it signaled?: %s",
 			       i, destination.phys.nid, destination.phys.pid,
-			       ptl_qp->remote_rma_pte, local_offset,
+			       ptl_qp->ptl_cm_id->remote_rma_pte, local_offset,
 			       wr->sg_list[i].length, remote_addr, rdma_write_meta ? "YES" : "NO");
 
-
+#if PTL_USE_MATCHING
 		rc = PtlPut(md_handle,
 			    local_offset,// local offset
 			    wr->sg_list[i].length,
 			    PTL_ACK_REQ,
 			    destination,// target process
-			    ptl_qp->remote_rma_pte,//portal table index
+			    ptl_qp->ptl_cm_id->remote_rma_pte,//portal table index
 			    match_bits,// match bits
 			    remote_addr,
 			    rdma_write_meta,
 			    0);// priority
+#else
+		md.start = (ptl_addr_t)wr->sg_list[i].addr;
+		md.length = wr->sg_list[i].length;
+		md.options = PTL_RMA_ME_OPTS;
+		md.ct_handle = PTL_CT_NONE;
+		md.eq_handle = ptl_qp->send_cq->eq_handle;
 
+		msg.match_bits = 0;
+		msg.ack_req = PTL_ACK_REQ;
+		msg.target_id.phys.nid = ptl_qp->remote_nid;
+		msg.target_id.phys.pid = ptl_qp->remote_pid;
+		msg.pt_index = ptl_qp->remote_rma_pte;
+		msg.hdr_data = NVMeOF_rma;
+		msg.remote_offset = remote_addr;
+
+		rc = PtlMsgPutOnce(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), (const ptl_md_t *)&md,
+				   (const ptl_msg_t *)&msg);
+#endif
 		if (PTL_OK != rc) {
-			SPDK_PTL_FATAL("Remote RDMA write failed Sorry!");
+			SPDK_PTL_FATAL("Remote RDMA write failed Sorry fault code is: %d!", rc);
 		}
 		remote_addr += wr->sg_list[i].length;
 	}
@@ -824,13 +874,17 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 	uint64_t match_bits;
 	struct ptl_qp *ptl_qp = ptl_qp_get_from_ibv_qp(spdk_rdma_qp->qp);
 	struct ptl_pd *ptl_pd = ptl_qp_get_pd(ptl_qp);
-	ptl_process_t target = {.phys.nid = ptl_qp->remote_nid, .phys.pid = ptl_qp->remote_pid};
+	ptl_process_t target = {.phys.nid = ptl_qp->ptl_cm_id->remote_nid, .phys.pid = ptl_qp->ptl_cm_id->remote_pid};
 	ptl_addr_t md_start;
 	ptl_handle_md_t md_handle;
 	struct ptl_context_op_meta *send_meta;
 	uint64_t local_offset;
 #if !PTL_ENABLE_BIND_PER_OP
 	struct ptl_mem_desc * ptl_mem_desc;
+#endif
+#if !PTL_USE_MATCHING
+	ptl_md_t md;
+	ptl_msg_t msg;
 #endif
 
 
@@ -845,14 +899,22 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 
 		// spdk_rdma_print_wr_flags(wr);
 		if (wr->opcode == IBV_WR_RDMA_WRITE) {
+#if PTL_USE_MATCHING
 			spdk_rdma_provider_ptl_rdma_write(ptl_pd, ptl_qp, wr, ptl_uuid_set_match_list(match_bits,
-							  ptl_qp->ptl_cm_id->ptl_qp->rma_match_bits));
+							  ptl_qp->ptl_cm_id->rma_match_bits));
+#else
+			spdk_rdma_provider_ptl_rdma_write(ptl_pd, ptl_qp, wr, 0);
+#endif
 			continue;
 		}
 
 		if (wr->opcode == IBV_WR_RDMA_READ) {
+#if PTL_USE_MATCHING
 			spdk_rdma_provider_ptl_rdma_read(ptl_pd, ptl_qp, wr, ptl_uuid_set_match_list(match_bits,
-							 ptl_qp->ptl_cm_id->ptl_qp->rma_match_bits));
+							 ptl_qp->ptl_cm_id->rma_match_bits));
+#else
+			spdk_rdma_provider_ptl_rdma_read(ptl_pd, ptl_qp, wr, 0);
+#endif
 			continue;
 		}
 
@@ -907,21 +969,37 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				wr->sg_list[i].length == 16 ? "NVMe-cpl-send"
 				: "NVMe-cmd-send",
 				target.phys.nid, target.phys.pid,
-				ptl_qp->remote_msg_pte,
+				ptl_qp->ptl_cm_id->remote_msg_pte,
 				ptl_uuid_get_initiator_qp_num(match_bits),
 				ptl_uuid_get_target_qp_num(match_bits),
 				local_offset, send_meta ? "YES" : "NO");
-
+#if PTL_USE_MATCHING
 			rc = PtlPut(md_handle,
 				    local_offset,//local offset
 				    wr->sg_list[i].length,//length
 				    PTL_ACK_REQ,
 				    target,// target process
-				    ptl_qp->remote_msg_pte,//portal table index
-				    ptl_uuid_set_match_list(match_bits, ptl_qp->recv_match_bits),//match bits
+				    ptl_qp->ptl_cm_id->remote_msg_pte,//portal table index
+				    ptl_uuid_set_match_list(match_bits, ptl_qp->ptl_cm_id->recv_match_bits),//match bits
 				    0,// remote offset, don't care let target decide
 				    send_meta,
 				    0);
+#else
+			md.start = (ptl_addr_t)wr->sg_list[i].addr;
+			md.length = wr->sg_list[i].length;
+			md.ct_handle = PTL_CT_NONE;
+			md.eq_handle = ptl_qp->send_cq->eq_handle;
+			md.options = PTL_SRV_ME_OPTS;
+			msg.match_bits = 0;
+			msg.ack_req = PTL_ACK_REQ;
+			msg.target_id.phys.nid = ptl_qp->remote_nid;
+			msg.target_id.phys.pid = ptl_qp->remote_pid;
+			msg.pt_index = ptl_qp->remote_msg_pte;
+			msg.hdr_data = md.length == sizeof(struct spdk_nvme_cpl) ? NVMeOF_cpl : NVMeOF_cmd;
+			msg.remote_offset = 0;
+			rc = PtlMsgPutOnce(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), (const ptl_md_t *)&md,
+					   (const ptl_msg_t *)&msg);
+#endif
 
 			if (rc != PTL_OK) {
 				SPDK_PTL_FATAL("PtlPut failed with rc: %d", rc);

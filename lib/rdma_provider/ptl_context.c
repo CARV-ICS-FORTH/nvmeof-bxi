@@ -35,7 +35,9 @@ static struct ptl_context ptl_context;
 typedef struct ptl_context_op_meta *(*process_event)(ptl_event_t event, struct ibv_wc *wc,
 		struct ptl_cq *ptl_cq);
 
+#if PTL_USE_MATCHING
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
 static uint64_t ptl_cnxt_calculate_crc64(const void *data, size_t length)
 {
@@ -72,6 +74,7 @@ destroy:
 	free(op_meta);
 }
 
+#if PTL_USE_MATCHING
 static void ptl_cnxt_keep_event(struct ptl_cq *ptl_cq, struct ibv_wc *wc,
 				struct ptl_context_op_meta *op_meta)
 {
@@ -85,6 +88,7 @@ static void ptl_cnxt_keep_event(struct ptl_cq *ptl_cq, struct ibv_wc *wc,
 	ptl_wc->op_meta = op_meta;
 	deque_push_back(ptl_cq->pending_completions, ptl_wc);
 }
+#endif
 
 static struct ptl_context_op_meta *ptl_cnxt_process_get(ptl_event_t event, struct ibv_wc *wc,
 		struct ptl_cq *ptl_cq)
@@ -533,6 +537,7 @@ static int ptl_print_event(struct ptl_context_op_meta *op_meta, bool is_late)
 	return 1;
 }
 
+#if PTL_USE_MATCHING
 static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 			    struct ibv_wc *wc)
 {
@@ -606,6 +611,48 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 	pthread_mutex_unlock(&g_lock);
 	return events_processed;
 }
+#else
+static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
+			    struct ibv_wc *wc)
+{
+
+	ptl_event_t event;
+	int ret;
+	int events_processed = 0;
+	struct ptl_context_op_meta *op_meta;
+
+	struct ptl_cq *ptl_cq = ptl_cq_get_from_ibv_cq(ibv_cq);
+
+	while (events_processed < num_entries) {
+		ret = PtlEQGet(ptl_cq_get_queue(ptl_cq), &event);
+		if (ret == PTL_OK) {
+			op_meta = handler[event.type](event, &wc[events_processed], ptl_cq);
+			if (NULL == op_meta) {
+				continue;
+			}
+
+			if (ptl_cq->cq_id != op_meta->cq_id) {
+				SPDK_PTL_FATAL("PtlCQ: Wrong cq_id for the event current ptl_cq id = %d "
+					       "event is for: %d. This case is FATAL for the non-matching case",
+					       ptl_cq->cq_id, op_meta->cq_id);
+			}
+			ptl_cnxt_destroy_op_meta(op_meta);
+			op_meta = NULL;
+			++events_processed;
+
+		} else if (ret == PTL_EQ_EMPTY) {
+			// SPDK_PTL_DEBUG("No events ok COOL");
+			break;
+		} else if (ret == PTL_EQ_DROPPED) {
+			SPDK_PTL_DEBUG("Ok queue overflow break");
+			break;
+		} else {
+			SPDK_PTL_FATAL("PtlEQGet failed with error code %d", ret);
+		}
+	}
+	return events_processed;
+}
+#endif
 
 struct ptl_context *ptl_cnxt_get(void)
 {
@@ -616,6 +663,7 @@ struct ptl_context *ptl_cnxt_get(void)
 	const char *role;/*target or initiator*/
 	const char *ptl_pid;
 	const char *ptl_nid;
+	ptl_process_t actual_phys_id;
 	pthread_mutex_lock(&cnxt_lock);
 	if (ptl_context.initialized) {
 		goto exit;
@@ -659,11 +707,12 @@ struct ptl_context *ptl_cnxt_get(void)
 	}
 
 	/*XXX TODO XXX Check for errors and staff*/
-	ptl_context.pid = ptl_pid ? atoi(ptl_pid) : PTL_PID_ANY;
 	ptl_context.nid = ptl_nid ? atoi(ptl_nid) : PTL_NID_ANY;
-	ptl_context.is_target = !strcmp(role, "target");
+	ptl_context.pid = ptl_pid ? atoi(ptl_pid) : PTL_PID_ANY;
+	ptl_context.is_target = (0 == strcmp(role, "target"));
+	SPDK_PTL_DEBUG("Is target?: %d", ptl_context.is_target);
 
-	memset(&desired, 0, sizeof(ptl_ni_limits_t));
+	memset(&desired, 0, sizeof(desired));
 
 	desired.max_entries = 479075;
 	//This affects EQAlloc
@@ -701,7 +750,7 @@ struct ptl_context *ptl_cnxt_get(void)
 		SPDK_PTL_FATAL("PtlNIInit failed with code: %d for nid: %d and pid: %d", ret,
 			       ptl_context.nid, ptl_context.pid);
 	}
-	ptl_process_t actual_phys_id;
+
 	ret = PtlGetPhysId(ptl_context.ni_handle, &actual_phys_id);
 	if (ret != PTL_OK) {
 		SPDK_PTL_FATAL("PtlGetPhysId failed: %d", ret);
@@ -718,20 +767,24 @@ struct ptl_context *ptl_cnxt_get(void)
 	// 	SPDK_PTL_FATAL("Total data ordering is not supported by this implementation. Cannot support NVMe-OF properties");
 	// }
 
-	SPDK_PTL_DEBUG("Actual max_waw_ordered_size: %zu bytes",
-		       actual.max_waw_ordered_size);
-
 	ptl_context.fake_ibv_cnxt.ops.poll_cq = ptl_cnxt_poll_cq;
 	ptl_context.fake_cq.context = &ptl_context.fake_ibv_cnxt;
-	ptl_context.ptl_allocation_table_size = actual.max_pt_index;
-	ptl_context.pte_allocation_table = calloc(ptl_context.ptl_allocation_table_size,
-					   sizeof(*ptl_context.pte_allocation_table));
-	ptl_context.pte_allocation_table[PTL_CP_SERVER_PTE] = 1;
+	ptl_context.pte_table_size = actual.max_pt_index;
+	ptl_context.pte_table = calloc(ptl_context.pte_table_size,
+				       sizeof(*ptl_context.pte_table));
+	pthread_mutex_init(&ptl_context.pte_table_lock, NULL);
+	ptl_context.pte_table[PTL_CP_SERVER_PTE] = 1;
 
 #if PTL_USE_MATCHING
 	ptl_context.portals_idx_rma = PTL_PT_INDEX;
 #else
-	if (false == is_target) {
+	/**
+	 * XXX TODO XXX ptl_context.is_target is directly inferred from the env variable. On the other hand,
+	 * is_target volatile variable is inferred when either rdma_listen or rdma_connect is called.
+	 * One of them should go.
+	 */
+	if (!ptl_context.is_target) {
+		SPDK_PTL_DEBUG("Role is: %s is_target: %d strcmp res: %d", role, is_target, strcmp(role, "target"));
 		ptl_context.portals_idx_rma = ptl_cnxt_allocate_pte(&ptl_context);
 	}
 	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context for "
@@ -740,29 +793,55 @@ struct ptl_context *ptl_cnxt_get(void)
 #endif
 	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context with matcing enabled with role: %s",
 		       role);
-
-
-
 	ptl_context.initialized = true;
 exit:
 	pthread_mutex_unlock(&cnxt_lock);
 	return &ptl_context;
 }
 
+int ptl_cnxt_get_pte(struct ptl_context *cnxt, int pte)
+{
+	int rc;
+	pthread_mutex_lock(&cnxt->pte_table_lock);
+	if (cnxt->pte_table[pte]) {
+		SPDK_PTL_WARN("Suspicious pte: %d requested already taken.", pte);
+		rc = -1;
+		goto exit;
+	}
+	rc = pte;
+	cnxt->pte_table[pte] = 1;
+exit:
+	pthread_mutex_unlock(&cnxt->pte_table_lock);
+	return rc;
+}
+
 int ptl_cnxt_allocate_pte(struct ptl_context *cnxt)
 {
+	int pte;
+	pthread_mutex_lock(&cnxt->pte_table_lock);
 #if PTL_USE_MATCHING
 	/*In the case of matching we use a single PTE PTL_PT_INDEX for the NVMe-cmd, NVMe-cpl, and RMA operations*/
-	cnxt->pte_allocation_table[PTL_PT_INDEX] = 1;
-	return PTL_PT_INDEX;
+	SPDK_PTL_DEBUG("Allocated PTE: %d", PTL_PT_INDEX);
+	cnxt->pte_table[PTL_PT_INDEX] = 1;
+	pte = PTL_PT_INDEX;
+	goto exit;
 #else
-	if (cnxt->pte_allocation_table[PTL_PT_INDEX]) {
-		SPDK_PTL_FATAL("PTE: %d already taken current version does not support allocating more than one PTEs",
-			       PTL_PT_INDEX);
+	if (cnxt->is_target && cnxt->pte_table[PTL_PT_INDEX]) {
+		SPDK_PTL_FATAL("Role is \"Target\" and PTL_PT_INDEX already taken smells like error");
 	}
-	cnxt->pte_allocation_table[PTL_PT_INDEX] = 1;
-	return PTL_PT_INDEX;
+	for (uint32_t i = 0; i < cnxt->pte_table_size; i++) {
+		if (cnxt->pte_table[i]) {
+			continue;
+		}
+		cnxt->pte_table[i] = 1;
+		pte = i;
+		goto exit;
+	}
+	SPDK_PTL_FATAL("No more ptes sorry!");
 #endif
+exit:
+	pthread_mutex_unlock(&cnxt->pte_table_lock);
+	return pte;
 }
 
 struct ibv_context *ptl_cnxt_get_ibv_context(struct ptl_context *cnxt)
@@ -788,7 +867,12 @@ struct ptl_context *ptl_cnxt_get_from_ibvpd(struct ibv_pd *ib_pd)
 
 ptl_pt_index_t ptl_cnxt_get_portal_index(struct ptl_context *cnxt)
 {
+#if PTL_USE_MATCHING
 	return cnxt->portals_idx_send_recv;
+#else
+	SPDK_PTL_FATAL("Unsupported function in the non-matching case");
+	return -1;
+#endif
 }
 
 ptl_handle_ni_t ptl_cnxt_get_ni_handle(struct ptl_context *cnxt)

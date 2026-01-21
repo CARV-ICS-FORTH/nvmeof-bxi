@@ -10,7 +10,7 @@
 
 
 struct ptl_qp *ptl_qp_create(struct ptl_pd *ptl_pd, struct ptl_cq *send_queue,
-			     struct ptl_cq *receive_queue, int nid, int pid, int local_msg_pte, int local_rma_pte)
+			     struct ptl_cq *receive_queue, struct ptl_srq *ptl_srq)
 {
 	assert(ptl_pd);
 	assert(send_queue);
@@ -29,11 +29,7 @@ struct ptl_qp *ptl_qp_create(struct ptl_pd *ptl_pd, struct ptl_cq *send_queue,
 	ptl_qp->fake_qp.send_cq = ptl_cq_get_ibv_cq(send_queue);
 	ptl_qp->recv_cq = receive_queue;
 	ptl_qp->fake_qp.recv_cq = ptl_cq_get_ibv_cq(receive_queue);
-
-	ptl_qp->remote_nid = nid;
-	ptl_qp->remote_pid = pid;
-	ptl_qp->local_msg_pte = local_msg_pte;
-	ptl_qp->local_rma_pte = local_rma_pte;
+	ptl_qp->ptl_srq = ptl_srq;
 	return ptl_qp;
 }
 

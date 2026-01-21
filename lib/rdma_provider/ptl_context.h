@@ -81,8 +81,9 @@ struct ptl_context {
 	 * Keeps which PTEs have not been assigned to a shared receive queue
 	 * and their correspoding size. 0 free, 1 in use
 	**/
-	uint8_t *pte_allocation_table;
-	uint32_t ptl_allocation_table_size;
+	uint8_t *pte_table;
+	uint32_t pte_table_size;
+	pthread_mutex_t pte_table_lock;
 	// struct spdk_rdma_provider_srq *srq;
 	int pid;
 	int nid;
@@ -114,6 +115,8 @@ static inline int ptl_cnxt_get_pid(struct ptl_context *cnxt)
   * Allocates a free pte typically for use for a new srq
 **/
 int ptl_cnxt_allocate_pte(struct ptl_context *cnxt);
+
+int ptl_cnxt_get_pte(struct ptl_context *cnxt, int pte);
 
 /**
   * Returns the PTE responsdile (that has an LE) for RMA operations

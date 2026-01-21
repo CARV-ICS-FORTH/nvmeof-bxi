@@ -13,11 +13,13 @@ struct ptl_context;
 struct deque;
 
 
-
+#if PTL_USE_MATCHING
 struct ptl_cq_singleon_part {
 	ptl_obj_type_e object_type;
 	struct ptl_context *ptl_context;
 	ptl_handle_eq_t eq_handle;
+	/*in which pte do I have posted buffers for receive*/
+	int pte;
 	void *cq_context;
 	pthread_mutex_t lock;
 	int cq_next_id;
@@ -31,19 +33,27 @@ struct ptl_cq {
 	int cq_id;
 	struct deque *pending_completions;
 	bool is_in_use;
-	// struct ptl_context *ptl_context;
-	// ptl_handle_eq_t eq_handle;
-	// void *cq_context;
-	// pthread_mutex_t lock;
-	// bool initialized;
 };
 extern struct ptl_cq ptl_cq_array[PTL_CQ_MAX_QUEUES];
+#else
+struct ptl_cq {
+	ptl_obj_type_e object_type;
+	struct ptl_context *ptl_context;
+	ptl_handle_eq_t eq_handle;
+	struct ibv_cq fake_ibv_cq;
+	ptl_pt_index_t pte_handle;
+	int pte;
+	int cq_id;
+};
+#endif
 
+#if PTL_USE_MATCHING
 struct ptl_cq *ptl_cq_get(int ptl_cq_id);
+#endif
 
 struct ptl_cq *ptl_cq_create(void *cq_context);
-// struct ptl_cq *ptl_cq_get_instance(void *cq_context);
 
+#if PTL_USE_MATCHING
 static inline ptl_handle_eq_t ptl_cq_get_queue(struct ptl_cq *ptl_cq)
 {
 	if (false == ptl_cq->cq_static->initialized) {
@@ -51,6 +61,12 @@ static inline ptl_handle_eq_t ptl_cq_get_queue(struct ptl_cq *ptl_cq)
 	}
 	return ptl_cq->cq_static->eq_handle;
 }
+#else
+static inline ptl_handle_eq_t ptl_cq_get_queue(struct ptl_cq *ptl_cq)
+{
+	return ptl_cq->eq_handle;
+}
+#endif
 
 static inline struct ptl_cq *ptl_cq_get_from_ibv_cq(struct ibv_cq *ibv_cq)
 {
@@ -66,5 +82,7 @@ static inline struct ibv_cq *ptl_cq_get_ibv_cq(struct ptl_cq *ptl_cq)
 	return &ptl_cq->fake_ibv_cq;
 }
 
+#if PTL_USE_MATCHING
 ptl_handle_eq_t ptl_cq_get_static_event_queue(void);
+#endif
 #endif

@@ -335,9 +335,13 @@ int ibv_resize_cq(struct ibv_cq *cq, int cqe)
 
 int ibv_destroy_cq(struct ibv_cq *cq)
 {
+#if PTL_USE_MATCHING
 	struct ptl_cq *ptl_cq = ptl_cq_get_from_ibv_cq(cq);
 	SPDK_PTL_DEBUG("PtlCQ: destroy CAUTION, ignore this XXX TODO XXX");
 	ptl_cq->is_in_use = false;
+#else
+	SPDK_PTL_FATAL("XXX TODO XXX unimplemented");
+#endif
 	return 0;
 }
 

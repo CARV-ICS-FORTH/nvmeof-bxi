@@ -29,18 +29,30 @@ struct ptl_cm_id *ptl_cm_id_create(struct rdma_cm_ptl_event_channel *ptl_channel
 	ptl_context = ptl_cnxt_get();
 	ptl_id->fake_cm_id.verbs = ptl_cnxt_get_ibv_context(ptl_context);
 	ptl_id->fake_cm_id.ps = RDMA_PS_TCP;
-	ptl_id->ptl_qp_num = ptl_local_qp_num++;
+	ptl_id->ptl_qp_num = __sync_fetch_and_add(&ptl_local_qp_num, 1);
 	ptl_id->cm_id_state = PTL_CM_UNCONNECTED;
+
+	ptl_id->local_rma_pte = ptl_cnxt_get_rma_pte(ptl_cnxt_get());
+	ptl_id->remote_nid = -1;
+	ptl_id->remote_pid = -1;
+	ptl_id->remote_msg_pte = -1;
+	ptl_id->remote_rma_pte = -1;
+
+#if PTL_USE_MATCHING
+	ptl_id->rma_match_bits = 0xFFFFFFFFFFFFFFFF;
+	ptl_id->recv_match_bits = 0xFFFFFFFFFFFFFFFF;
 	ptl_id->my_match_bits = ptl_uuid_get_next_match_bit();
 	SPDK_PTL_DEBUG("MATCH_BITS: SUCCESSFULLY created PTL_ID: %p MY match bits are %lu", ptl_id,
 		       ptl_id->my_match_bits);
+#endif
+	SPDK_PTL_DEBUG("PTL_ID: Created ptl_id: %p (or fake_cm_id: %p) with context: %p", ptl_id,
+		       &ptl_id->fake_cm_id, ptl_id->fake_cm_id.context);
 	return ptl_id;
 }
 
 struct rdma_cm_event *ptl_cm_id_create_event(struct ptl_cm_id *ptl_id, struct ptl_cm_id *listen_id,
 		enum rdma_cm_event_type event_type)
 {
-
 	struct rdma_cm_event *fake_event;
 	/*Create a fake event*/
 	fake_event = calloc(1UL, sizeof(struct rdma_cm_event));
