@@ -322,7 +322,7 @@ struct ibv_cq *ibv_create_cq(struct ibv_context *context, int cqe,
 
 	SPDK_PTL_DEBUG("IBVPTL: Ok trapped ibv_create_cq time to create the event queue in portals");
 	struct ptl_cq *ptl_cq = ptl_cq_create(cq_context);
-	SPDK_PTL_DEBUG("PtlCQ: Ok set up event queue for PORTALS :-) CQ id = %d", ptl_cq->cq_id);
+	SPDK_PTL_DEBUG("PtlCQ: Ok set up event queue for PORTALS :-) NO CQ id yet");
 	return ptl_cq_get_ibv_cq(ptl_cq);
 }
 

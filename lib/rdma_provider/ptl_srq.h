@@ -26,7 +26,7 @@ struct ptl_srq {
 
 
 struct ptl_srq *ptl_srq_create(struct ptl_pd *pd,
-			       struct ibv_srq_init_attr *srq_init_attr);
+			       struct ibv_srq_init_attr *srq_init_attr, int pte);
 struct ptl_srq *ptl_srq_get_from_ibv_srq(struct ibv_srq *ibv_srq);
 
 #endif

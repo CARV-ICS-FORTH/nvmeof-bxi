@@ -147,6 +147,8 @@ static struct ptl_context_op_meta *ptl_cnxt_process_put(ptl_event_t event, struc
 			       event.rlength);
 	}
 	if (recv_meta->recv_op.initiator_qp_num == 0 || recv_meta->recv_op.target_qp_num == 0) {
+		SPDK_PTL_DEBUG("Staff from header data: initiator qp num %d target qp num: %d",
+			       ptl_uuid_get_initiator_qp_num(event.hdr_data), ptl_uuid_get_target_qp_num(event.hdr_data));
 		SPDK_PTL_FATAL("Nida does not assign 0 qp num initiator = %d target = %d",
 			       recv_meta->recv_op.initiator_qp_num, recv_meta->recv_op.target_qp_num);
 	}
@@ -338,8 +340,8 @@ static struct ptl_context_op_meta *ptl_cnxt_process_ack(ptl_event_t event, struc
 
 	SPDK_PTL_DEBUG("Got ack for send for wr_id: %lu mismatch of queues? %s send ack "
 		       "is for queue: %d current ptl_cq is: %d",
-		       send_meta->wr_id, ptl_cq->cq_id != send_meta->cq_id ? "YES" : "NO",
-		       send_meta->cq_id, ptl_cq->cq_id);
+		       send_meta->wr_id, ptl_cq_get_id(ptl_cq) != send_meta->cq_id ? "YES" : "NO",
+		       send_meta->cq_id, ptl_cq_get_id(ptl_cq));
 
 	wc->src_qp = 0; // TOOO
 	return send_meta;
@@ -374,7 +376,7 @@ static struct ptl_context_op_meta *ptl_cnxt_process_auto_unlink(ptl_event_t even
 		SPDK_PTL_FATAL("AUTO_UNLINK without a prior receive for "
 			       "{buffer:%lu, len: %lu cq id: %d} event fail type: %d",
 			       (size_t)recv_meta->recv_op.io_vector[0].iov_base,
-			       recv_meta->recv_op.io_vector[0].iov_len, ptl_cq->cq_id, event.ni_fail_type);
+			       recv_meta->recv_op.io_vector[0].iov_len, ptl_cq_get_id(ptl_cq), event.ni_fail_type);
 	}
 
 	if (event.ni_fail_type != PTL_NI_OK) {
@@ -408,8 +410,8 @@ static struct ptl_context_op_meta *ptl_cnxt_process_auto_unlink(ptl_event_t even
 
 	SPDK_PTL_DEBUG("Got ack for recv for wr_id: %lu mismatch of queues? %s send ack "
 		       "is for queue: %d current ptl_cq is: %d",
-		       recv_meta->wr_id, ptl_cq->cq_id != recv_meta->cq_id ? "YES" : "NO",
-		       recv_meta->cq_id, ptl_cq->cq_id);
+		       recv_meta->wr_id, ptl_cq_get_id(ptl_cq) != recv_meta->cq_id ? "YES" : "NO",
+		       recv_meta->cq_id, ptl_cq_get_id(ptl_cq));
 	return recv_meta;
 }
 
@@ -622,6 +624,9 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 	struct ptl_context_op_meta *op_meta;
 
 	struct ptl_cq *ptl_cq = ptl_cq_get_from_ibv_cq(ibv_cq);
+	if (false == ptl_cq->eq_enabled) { //Not ready yet
+		return 0;
+	}
 
 	while (events_processed < num_entries) {
 		ret = PtlEQGet(ptl_cq_get_queue(ptl_cq), &event);
@@ -631,10 +636,10 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 				continue;
 			}
 
-			if (ptl_cq->cq_id != op_meta->cq_id) {
+			if (ptl_cq_get_id(ptl_cq) != op_meta->cq_id) {
 				SPDK_PTL_FATAL("PtlCQ: Wrong cq_id for the event current ptl_cq id = %d "
 					       "event is for: %d. This case is FATAL for the non-matching case",
-					       ptl_cq->cq_id, op_meta->cq_id);
+					       ptl_cq_get_id(ptl_cq), op_meta->cq_id);
 			}
 			ptl_cnxt_destroy_op_meta(op_meta);
 			op_meta = NULL;
@@ -888,6 +893,8 @@ ptl_handle_ni_t ptl_cnxt_get_ni_handle(struct ptl_context *cnxt)
 */
 int ptl_cnxt_get_rma_pte(struct ptl_context *cnxt)
 {
+
+	SPDK_PTL_DEBUG("RMA pte = %d", cnxt->is_target ? -1 : cnxt->portals_idx_rma);
 	return cnxt->is_target ? -1 : cnxt->portals_idx_rma;
 }
 

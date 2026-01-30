@@ -5,6 +5,7 @@
 #include "ptl_object_types.h"
 #include <infiniband/verbs.h>
 #include <portals4.h>
+#include <portals4_bxiext.h>
 #include <stdbool.h>
 #define PTL_CONTEXT_SERVER_PID 0
 #define PTL_IOVEC_SIZE 2
@@ -52,6 +53,10 @@ struct ptl_context_rdma_read_op {
 
 struct ptl_context_op_meta {
 	ptl_obj_type_e obj_type;
+#if !PTL_USE_MATCHING
+	ptl_md_t md;
+	ptl_msg_t msg;
+#endif
 	uint64_t wr_id;
 #if PTL_ENABLE_BIND_PER_OP
 	ptl_md_t md_desc[PTL_MAX_SG_LIST];

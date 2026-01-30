@@ -48,7 +48,7 @@ struct ptl_mem_desc *ptl_mem_desc_create_remote(void *start, size_t size, bool r
 	mem_desc->remote.rma_le.match_id.phys.pid = PTL_PID_ANY;
 	mem_desc->remote.rma_le.min_free = 0;
 	mem_desc->remote.rma_le.start = start;
-	mem_desc->remote.rma_le.length = size;
+	mem_desc->remote.rma_le.length = 8192;//size;
 	mem_desc->remote.rma_le.uid = PTL_UID_ANY;
 	mem_desc->remote.rma_le.ct_handle = PTL_CT_NONE;
 	/**
@@ -62,7 +62,7 @@ struct ptl_mem_desc *ptl_mem_desc_create_remote(void *start, size_t size, bool r
 	if (remote_write) {
 		mem_desc->remote.rma_le.options     |= PTL_ME_OP_PUT;
 	}
-	rc = PtlLEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), ptl_cnxt_get_rma_pte(ptl_cnxt_get()),
+	rc = PtlMEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), ptl_cnxt_get_rma_pte(ptl_cnxt_get()),
 			 &mem_desc->remote.rma_le,
 			 PTL_PRIORITY_LIST, NULL, &mem_desc->remote.remote_rw_mem_handle);
 #endif

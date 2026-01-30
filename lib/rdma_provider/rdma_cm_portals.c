@@ -479,11 +479,10 @@ static void rdma_ptl_handle_open_conn_reply(struct ptl_cm_id *listen_id,
 	SPDK_PTL_DEBUG(
 		"Initiator done handling the open connection reply request. Some info about "
 		"the queue pair created. Remote guy is: "
-		"{nid:%d, pid:%d, msg_pte: %d, rma_pte: %d} local: {msg_pte:%d, "
-		"rma_pte:%d} ",
+		"{nid:%d, pid:%d, msg_pte: %d, rma_pte: %d} local: {rma_pte:%d} ",
 		connection_id->remote_nid, connection_id->remote_pid,
 		connection_id->remote_msg_pte, connection_id->remote_rma_pte,
-		connection_id->ptl_qp->send_cq->cq_static->pte, connection_id->local_rma_pte);
+		connection_id->local_rma_pte);
 	/*We are at the initiator side here, which has just received OPEN_CONNECTION_REPLY*/
 	connection_id->cm_id_state = PTL_CM_CONNECTED;
 	fake_event = ptl_cm_id_create_event(connection_id, NULL, RDMA_CM_EVENT_ESTABLISHED);
@@ -1003,61 +1002,8 @@ int rdma_bind_addr(struct rdma_cm_id *id, struct sockaddr *addr)
 int rdma_listen(struct rdma_cm_id *id, int backlog)
 {
 	struct ptl_cm_id * ptl_id = ptl_cm_id_get(id);
-	int rc;
 	ptl_id->is_listen_id = true;
-
-	/**
-	* Issue: The upper layer of the NVMe-oF target creates a single ibv_cq, but the
-	* listen_id doesn't contain the necessary information to determine to which ptl_cq
-	* each generated queue pair should report to.
-	*
-	* Current workaround: Search the ptl context for the reference to cq_id 0,
-	* which should have its in-use flag already set to true.
-	*/
-
-	if (ptl_id->cq == NULL) {
-#if PTL_USE_MATCHING
-		ptl_id->cq = ptl_cq_get(PTL_UUID_TARGET_COMPLETION_QUEUE_ID);
-#else
-		SPDK_PTL_DEBUG("Creating the Event queue for the Target SRQ is NULL? %s",
-			       ptl_id->ptl_srq ? "NO" : "YES");
-		ptl_id->cq = ptl_cq_create(NULL);
-		ptl_id->cq->pte = ptl_cnxt_get_pte(ptl_cnxt_get(), PTL_PT_INDEX);
-		if (-1 == ptl_id->cq->pte) {
-			SPDK_PTL_FATAL("PTE PTL_PT_INDEX or %d already taken, it shouldn't", PTL_PT_INDEX);
-		}
-
-		rc = PtlPTAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), 0, ptl_id->cq->eq_handle, ptl_id->cq->pte,
-				&ptl_id->cq->pte_handle);
-		if (PTL_OK != rc) {
-			SPDK_PTL_FATAL("Failed to initialize PTE: %d with error code: %d", ptl_id->cq->pte, rc);
-		}
-		rc = PtlPTEnable(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), ptl_id->cq->pte_handle);
-		if (PTL_OK != rc) {
-			SPDK_PTL_FATAL("Failed to enable PTE: %d with error code: %d", ptl_id->cq->pte, rc);
-		}
-		SPDK_PTL_DEBUG("PTL_CQ: Initialized Successfully PTE: %d and plugged to its event queue",
-			       ptl_id->cq->pte);
-#endif
-	}
-
-	// struct rdma_cm_event *fake_event;
 	rdma_ptl_boot_cp_server(ptl_id, "TARGET");
-
-	// SPDK_PTL_DEBUG("RDMA_LISTEN(): Create a fake connection event to establish queue pair no 1");
-	// fake_event = ptl_cm_id_create_event(ptl_id, id, RDMA_CM_EVENT_CONNECT_REQUEST, &private_data,
-	// 				    sizeof(private_data));
-
-	// /*Fill up fake data about the origin of the guy that wants a new connection*/
-	// fake_event->listen_id = id;
-
-	// ptl_cm_id_add_event(ptl_id, fake_event);
-	// SPDK_PTL_DEBUG("RDMA_LISTEN(): Ok created the fake RDMA_CM_EVENT_CONNECT_REQUEST triggering it through channel's async fd");
-	// uint64_t value = 1;
-	// if (write(ptl_id->ptl_channel->fake_channel.fd, &value, sizeof(value)) != sizeof(value)) {
-	// 	perror("write to eventfd, reason:");
-	// 	SPDK_PTL_FATAL("Failed to write eventfd");
-	// }
 	return 0;
 }
 
@@ -1343,32 +1289,50 @@ int rdma_create_qp(struct rdma_cm_id *id, struct ibv_pd *pd,
 	struct ptl_cq *recv_queue = ptl_cq_get_from_ibv_cq(qp_init_attr->recv_cq);
 	struct ptl_srq *ptl_srq = NULL;
 	struct ptl_qp *ptl_qp;
+	int rc;
+	int pte;
+	(void)rc;
 	if (ptl_id->ptl_qp) {
 		SPDK_PTL_FATAL("Queue pair already there, it shouldn't!");
 	}
-	if (qp_init_attr->srq) {
-		ptl_srq = ptl_srq_get_from_ibv_srq(qp_init_attr->srq);
-		SPDK_PTL_DEBUG("PTL SRQ set setting the ptl_srq->ptl_cq = recv_queue to emulate the behavior");
-		ptl_srq->ptl_cq = recv_queue;
-	}
-
-
 	SPDK_PTL_DEBUG("Creating queue pair... connected to remote nid: %d pid: %d portals index: %d",
 		       comm_pair_info.dest.nid, comm_pair_info.dest.pid, comm_pair_info.dest.pte);
-#if !PTL_USE_MATCHING
-	SPDK_PTL_DEBUG("Initializing PTE: %d and associating it with the recv event queue", local_pte);
-	rc = PtlPTAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), 0, recv_queue->eq_handle, local_pte,
-			&recv_queue->pte_handle);
-	if (PTL_OK != rc) {
-		SPDK_PTL_FATAL("Failed to initialize PTE: %d with error code: %d", local_pte, rc);
+	// SPDK_PTL_DEBUG("recv queue id is: %d send queue id is: %d",recv_queue->cq_id, send_queue->cq_id);
+#if PTL_USE_MATCHING
+	(void) pte;
+	if (qp_init_attr->srq) {
+		ptl_srq = ptl_srq_get_from_ibv_srq(qp_init_attr->srq);
+		ptl_srq->ptl_cq = recv_queue;/*XXX TODO XXX look again please*/
 	}
-	rc = PtlPTEnable(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), recv_queue->pte_handle);
-	if (PTL_OK != rc) {
-		SPDK_PTL_FATAL("Failed to enable PTE: %d with error code: %d", local_pte, rc);
+#else
+	if (NULL == recv_queue) {
+		SPDK_PTL_FATAL("NULL recv queue? Cannot handle this case, sorry");
 	}
-	SPDK_PTL_DEBUG("PTL_CQ: Initialized Successfully PTE: %d and plugged to its event queue",
-		       local_pte);
-	recv_queue->pte = local_pte;
+
+	if (recv_queue->core_cq) {
+		SPDK_PTL_FATAL("Core cq already set? it shouldn't");
+	}
+
+	if (recv_queue != send_queue) {
+		SPDK_PTL_FATAL("Sorry cannot handle the case where recv queue is different from send queue");
+	}
+
+	if (NULL == qp_init_attr->srq) {
+		goto no_srq;
+	}
+
+	ptl_srq = ptl_srq_get_from_ibv_srq(qp_init_attr->srq);
+	SPDK_PTL_DEBUG("Setting the CQ to point to the PTL_SRQ");
+	recv_queue->core_cq = ptl_srq->ptl_cq->core_cq;
+	goto create_qp;
+no_srq:
+	pte = ptl_cnxt_allocate_pte(ptl_cnxt_get());
+	if (-1 == pte) {
+		SPDK_PTL_FATAL("Out of PTEs");
+	}
+	recv_queue->core_cq = ptl_cq_core_create(pte);
+	SPDK_PTL_DEBUG("PTL_CQ: Initialized successfully with PTE: %d", recv_queue->core_cq->pte);
+create_qp:
 #endif
 	ptl_qp = ptl_qp_create(ptl_pd, send_queue, recv_queue, ptl_srq);
 	ptl_qp->ptl_cm_id = ptl_id;
@@ -1380,6 +1344,7 @@ int rdma_create_qp(struct rdma_cm_id *id, struct ibv_pd *pd,
 	/*Update cm_id*/
 	ptl_cm_id_set_ptl_qp(ptl_id, ptl_qp);
 	ptl_cm_id_set_ptl_pd(ptl_id, ptl_pd);
+	recv_queue->eq_enabled = true;
 	return 0;
 }
 
@@ -1424,11 +1389,17 @@ int rdma_connect(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 
 	/*Fill specific PTL_OPEN_CONNECTION fields*/
 	request_buf->conn_msg.conn_open.initiator_qp_num = ptl_id->ptl_qp_num;
-	/*Inform the target about the match bits I (the initiator) use for my recv operations*/
+
+#if PTL_USE_MATCHING
 	request_buf->conn_msg.conn_open.cq_id = ptl_id->ptl_qp->recv_cq->cq_id;
 	request_buf->conn_msg.conn_open.msg_pte = ptl_id->ptl_qp->recv_cq->cq_static->pte;
+#else
+	request_buf->conn_msg.conn_open.cq_id = ptl_id->ptl_qp->recv_cq->core_cq->cq_id;
+	request_buf->conn_msg.conn_open.msg_pte = ptl_id->ptl_qp->recv_cq->core_cq->pte;
+#endif
 	request_buf->conn_msg.conn_open.rma_pte = ptl_cnxt_get_rma_pte(ptl_cnxt_get());
 #if PTL_USE_MATCHING
+	/*Inform the target about the match bits I (the initiator) use for my recv operations*/
 	request_buf->conn_msg.conn_open.recv_match_bits = ptl_id->my_match_bits;
 	request_buf->conn_msg.conn_open.rma_match_bits = PTL_UUID_RMA_MASK;
 #endif
@@ -1498,10 +1469,9 @@ int rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 
 	struct ptl_srq *ptl_srq = ptl_id->ptl_qp->ptl_srq;
 
-	SPDK_PTL_DEBUG("PTL_SRQ: Assigning remote initiator:{nid:%u,pid:%u,pte:%u} to "
-		       "ptl_srq: %d (-1 is error)",
+	SPDK_PTL_DEBUG("Accepting initiator:{nid:%u,pid:%u,msg_pte:%u,rma_pte: %u}",
 		       ptl_id->remote_nid, ptl_id->remote_pid,
-		       PTL_PT_INDEX, ptl_srq ? ptl_srq->ptl_cq->cq_static->pte : -1);
+		       ptl_id->remote_msg_pte, ptl_id->remote_rma_pte);
 
 	char *conn_param_private_data;
 
@@ -1537,11 +1507,12 @@ int rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 	/*Tell the initiator (you are the target) what are the match bits of my srq*/
 #if PTL_USE_MATCHING
 	conn_reply_buf->conn_msg.conn_open_reply.srq_match_bits = PTL_UUID_TARGET_SRQ_MATCH_BITS;
-#endif
-	/*Tell the initiator (you are the target) in which cq_id you expect notifications*/
 	conn_reply_buf->conn_msg.conn_open_reply.cq_id = ptl_id->ptl_qp->recv_cq->cq_id;
-	/*Tell the initiator in which PTE you assigned it*/
 	conn_reply_buf->conn_msg.conn_open_reply.msg_pte = ptl_id->ptl_qp->ptl_srq->ptl_cq->cq_static->pte;
+#else
+	conn_reply_buf->conn_msg.conn_open_reply.cq_id = ptl_id->ptl_qp->recv_cq->core_cq->cq_id;
+	conn_reply_buf->conn_msg.conn_open_reply.msg_pte = ptl_id->ptl_qp->recv_cq->core_cq->pte;
+#endif
 	/*Tell the initiator I do not allow rma operations to me*/
 	conn_reply_buf->conn_msg.conn_open_reply.rma_pte = -1;
 
