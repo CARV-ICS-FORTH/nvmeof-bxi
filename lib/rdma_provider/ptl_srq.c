@@ -25,7 +25,7 @@ struct ptl_srq *ptl_srq_create(struct ptl_pd *ptl_pd,
 	ptl_srq->fake_srq.context->ops.post_srq_recv = ptl_post_srq_recv;
 #if !PTL_USE_MATCHING
 	ptl_srq->ptl_cq = ptl_cq_create(NULL);
-	ptl_srq->ptl_cq->core_cq = ptl_cq_core_create(pte);
+	ptl_srq->ptl_cq->core_cq = ptl_cq_core_create(pte, true);
 	ptl_srq->ptl_cq->eq_enabled = true;
 #endif
 	return ptl_srq;

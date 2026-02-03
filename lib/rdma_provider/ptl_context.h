@@ -92,6 +92,10 @@ struct ptl_context {
 	// struct spdk_rdma_provider_srq *srq;
 	int pid;
 	int nid;
+#if !PTL_USE_MATCHING
+	ptl_handle_eq_t rma_event_queue;
+	ptl_pt_index_t rma_pte_handle;
+#endif
 	bool is_target;
 	bool initialized;
 };
@@ -120,6 +124,8 @@ static inline int ptl_cnxt_get_pid(struct ptl_context *cnxt)
   * Allocates a free pte typically for use for a new srq
 **/
 int ptl_cnxt_allocate_pte(struct ptl_context *cnxt);
+
+int ptl_cnxt_free_pte(struct ptl_context *ptl_cnxt, int pte);
 
 int ptl_cnxt_get_pte(struct ptl_context *cnxt, int pte);
 

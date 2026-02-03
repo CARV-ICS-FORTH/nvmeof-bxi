@@ -33,7 +33,15 @@ struct ptl_cm_id {
 	struct ptl_pd *ptl_pd;
 	struct ptl_qp *ptl_qp;
 	struct ptl_context *ptl_context;
-	uint64_t uuid;
+	/*Encoded the initiator qp num and target*/
+	uint64_t session_id;
+	/*In case of no matching this field is ignored*/
+	uint64_t recv_match_bits;
+	/**
+	* Where the remote peer has MEs for RMA operations.
+	* In case of no matching this field is ignored
+	* */
+	uint64_t rma_match_bits;
 	/**
 	* CQ id of the remote peer where it has subscribed for events.
 	* Its purpose is to encoded in the match bits in the PtlPut operations
@@ -58,16 +66,6 @@ struct ptl_cm_id {
 	 * In the target case it will be -1 (no rma allowed).
 	 * */
 	int remote_rma_pte;
-#if PTL_USE_MATCHING
-	/**
-	 * In the case of matching we also specify which match bits are valid.
-	 * All proper values are set during the connection process.
-	 */
-	/*Where the remote peer has MEs for recv*/
-	uint64_t recv_match_bits;
-	/*Where the remote peer has MEs for RMA operations*/
-	uint64_t rma_match_bits;
-#endif
 	int local_rma_pte;
 	//needed for connection setup
 	const void *fake_data;

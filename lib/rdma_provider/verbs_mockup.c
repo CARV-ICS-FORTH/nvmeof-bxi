@@ -1,8 +1,14 @@
+#include "ptl_config.h"
+#include "ptl_object_types.h"
+#include "portals4.h"
 #include "ptl_context.h"
 #include "ptl_cq.h"
 #include "ptl_log.h"
 #include "ptl_pd.h"
+#include "ptl_qp.h"
+#include "spdk/util.h"
 #include <infiniband/verbs.h>
+#include <portals4_bxiext.h>
 
 #define DEVICE_NAME "bxi"
 
@@ -335,12 +341,86 @@ int ibv_resize_cq(struct ibv_cq *cq, int cqe)
 
 int ibv_destroy_cq(struct ibv_cq *cq)
 {
-#if PTL_USE_MATCHING
 	struct ptl_cq *ptl_cq = ptl_cq_get_from_ibv_cq(cq);
+#if PTL_USE_MATCHING
 	SPDK_PTL_DEBUG("PtlCQ: destroy CAUTION, ignore this XXX TODO XXX");
 	ptl_cq->is_in_use = false;
 #else
-	SPDK_PTL_FATAL("XXX TODO XXX unimplemented");
+	char buffer[16];
+	ptl_msg_t msg;
+	ptl_md_t md;
+	int rc;
+	int drain_rc;
+	ptl_event_t event;
+
+	if (ptl_cq->core_cq->is_shared) {
+		goto free;
+	}
+
+	// rc = PtlPTDisable(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), ptl_cq->core_cq->pte_handle);
+	// if (PTL_OK != rc) {
+	// 	SPDK_PTL_FATAL("Failed to disable pte: %d reason: %s", ptl_cq->core_cq->pte, PtlToStr(rc,
+	// 			PTL_STR_ERROR));
+	// }
+
+	/*Let's drain the motherfucker*/
+	do {
+		rc = PtlPTFree(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), ptl_cq->core_cq->pte_handle);
+		if (PTL_OK == rc) {
+			break;
+		}
+		if (PTL_PT_IN_USE != rc) {
+			SPDK_PTL_WARN("Failed to free pte: %d reason: %s, ", ptl_cq->core_cq->pte, PtlToStr(rc,
+					PTL_STR_ERROR));
+		}
+		SPDK_PTL_DEBUG("Draining PTE: %d in progress...", ptl_cq->core_cq->pte);
+		memset(&md, 0x00, sizeof(md));
+		md.start = buffer;
+		md.length = sizeof(buffer);
+		md.options = PTL_SRV_ME_OPTS;
+		md.eq_handle = ptl_cq->core_cq->eq_handle;
+
+		memset(&msg, 0x00, sizeof(msg));
+		msg.length = sizeof(buffer);
+		msg.ack_req = PTL_ACK_REQ;
+		msg.target_id.phys.nid = ptl_cnxt_get_nid(ptl_cnxt_get());
+		msg.target_id.phys.pid = ptl_cnxt_get_pid(ptl_cnxt_get());
+		msg.pt_index = ptl_cq->core_cq->pte;
+		SPDK_PTL_DEBUG("Draining PTE: %d sending message to self {nid:%d, pid:%d, pte:%d}",
+			       ptl_cq->core_cq->pte, msg.target_id.phys.nid, msg.target_id.phys.pid, msg.pt_index);
+		drain_rc = PtlMsgPutOnce(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), &md, &msg);
+		if (PTL_OK != drain_rc) {
+			SPDK_PTL_FATAL("Draining message to self failed. Reason: %s", PtlToStr(drain_rc, PTL_STR_ERROR));
+		}
+		while (1) {
+			drain_rc = PtlEQWait(ptl_cq->core_cq->eq_handle, &event);
+			if (PTL_OK != drain_rc) {
+				SPDK_PTL_FATAL("Failed to poll event queue. Reason: %s", PtlToStr(drain_rc, PTL_STR_ERROR));
+			}
+			if (event.type != PTL_EVENT_AUTO_UNLINK) {
+				SPDK_PTL_DEBUG("Draining CQ procedure in progress. Got event: %s ignoring.", PtlToStr(event.type,
+						PTL_STR_EVENT));
+				continue;
+			}
+			if (NULL == event.user_ptr) {
+				SPDK_PTL_FATAL("LE without metadata? Cannot happen");
+			}
+			free(event.user_ptr);
+			break;
+		}
+	} while (PTL_OK != rc);
+
+	rc = PtlEQFree(ptl_cq->core_cq->eq_handle);
+	if (PTL_OK != rc) {
+		SPDK_PTL_FATAL("Failed to free EQ reason: %s", PtlToStr(rc, PTL_STR_ERROR));
+	}
+
+	ptl_cnxt_free_pte(ptl_cnxt_get(), ptl_cq->core_cq->pte);
+
+	SPDK_PTL_DEBUG("Draining CQ: %d complete!", ptl_cq->core_cq->pte);
+	free(ptl_cq->core_cq);
+free:
+	free(ptl_cq);
 #endif
 	return 0;
 }
@@ -406,8 +486,14 @@ int ibv_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr, int attr_mask)
 
 int ibv_destroy_qp(struct ibv_qp *qp)
 {
-	SPDK_PTL_FATAL("Sorry unimplemented");
-	return -1;
+	struct ptl_qp *ptl_qp;
+
+	ptl_qp = SPDK_CONTAINEROF(qp, struct ptl_qp, fake_qp);
+	if (PTL_QP != ptl_qp->object_type) {
+		SPDK_PTL_FATAL("Corrupted ptl_qp");
+	}
+	free(ptl_qp);
+	return 0;
 }
 
 

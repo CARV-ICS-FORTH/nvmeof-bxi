@@ -138,8 +138,8 @@ static struct ptl_context_op_meta *ptl_cnxt_process_put(ptl_event_t event, struc
 			recv_meta->recv_op.io_vector[0].iov_len, event.pt_index);
 	}
 
-	recv_meta->recv_op.initiator_qp_num =  ptl_uuid_get_initiator_qp_num(event.match_bits);
-	recv_meta->recv_op.target_qp_num = ptl_uuid_get_target_qp_num(event.match_bits);
+	recv_meta->recv_op.initiator_qp_num =  ptl_uuid_get_initiator_qp_num(event.hdr_data);
+	recv_meta->recv_op.target_qp_num = ptl_uuid_get_target_qp_num(event.hdr_data);
 
 	if (event.rlength != 64 && event.rlength != 16) {
 		SPDK_PTL_FATAL("Wrong size, should have been either 64 B (NVMe command "
@@ -231,7 +231,7 @@ static struct ptl_context_op_meta *ptl_cnxt_process_reply(ptl_event_t event, str
 
 
 	if (event.ni_fail_type != PTL_NI_OK) {
-		SPDK_PTL_FATAL("Operation failed with code: %d", event.ni_fail_type);
+		SPDK_PTL_FATAL("Operation failed with code: %s", PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE));
 	}
 
 	if (++rdma_read_meta->rdma_read_op.parts_acked < rdma_read_meta->rdma_read_op.total_parts) {
@@ -655,9 +655,52 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 			SPDK_PTL_FATAL("PtlEQGet failed with error code %d", ret);
 		}
 	}
+	/*hack*/
+	if (!ptl_context.is_target) {
+		ptl_event_t event;
+		PtlEQGet(ptl_context.rma_event_queue, &event);
+	}
 	return events_processed;
 }
 #endif
+
+static void ptl_cnxt_init_rma_pte(struct ptl_context *ptl_cnxt)
+{
+	int rc;
+#if PTL_USE_MATCHING
+	ptl_cnxt->portals_idx_rma = PTL_PT_INDEX;
+#else
+	/**
+	 * XXX TODO XXX ptl_context.is_target is directly inferred from the env variable. On the other hand,
+	 * is_target volatile variable is inferred when either rdma_listen or rdma_connect is called.
+	 * One of them should go.
+	 */
+	if (ptl_cnxt->is_target) {
+		ptl_cnxt->portals_idx_rma = -1;
+		ptl_cnxt->initialized = true;
+		return;
+	}
+	ptl_cnxt->portals_idx_rma = ptl_cnxt_allocate_pte(ptl_cnxt);
+	if (-1 == (int)ptl_context.portals_idx_rma) {
+		SPDK_PTL_FATAL("Out of PTEs");
+	}
+	rc = PtlEQAlloc(ptl_cnxt->ni_handle, PTL_CQ_SIZE, &ptl_cnxt->rma_event_queue);
+	if (rc) {
+		SPDK_PTL_FATAL("Event queue creation failed with error: %s", PtlToStr(rc, PTL_STR_ERROR));
+	}
+	rc = PtlPTAlloc(ptl_cnxt->ni_handle, 0, ptl_cnxt->rma_event_queue,
+			ptl_cnxt->portals_idx_rma, &ptl_cnxt->rma_pte_handle);
+	if (PTL_OK != rc) {
+		SPDK_PTL_FATAL("PT alloc for PTE: %d failed with error: %s", ptl_cnxt->portals_idx_rma, PtlToStr(rc,
+				PTL_STR_ERROR));
+	}
+	rc = PtlPTEnable(ptl_cnxt->ni_handle, ptl_cnxt->rma_pte_handle);
+	if (PTL_OK != rc) {
+		SPDK_PTL_FATAL("Failed to enable PTE: %d with error: %s", ptl_cnxt->portals_idx_rma, PtlToStr(rc,
+				PTL_STR_ERROR));
+	}
+#endif
+}
 
 struct ptl_context *ptl_cnxt_get(void)
 {
@@ -780,22 +823,7 @@ struct ptl_context *ptl_cnxt_get(void)
 	pthread_mutex_init(&ptl_context.pte_table_lock, NULL);
 	ptl_context.pte_table[PTL_CP_SERVER_PTE] = 1;
 
-#if PTL_USE_MATCHING
-	ptl_context.portals_idx_rma = PTL_PT_INDEX;
-#else
-	/**
-	 * XXX TODO XXX ptl_context.is_target is directly inferred from the env variable. On the other hand,
-	 * is_target volatile variable is inferred when either rdma_listen or rdma_connect is called.
-	 * One of them should go.
-	 */
-	if (!ptl_context.is_target) {
-		SPDK_PTL_DEBUG("Role is: %s is_target: %d strcmp res: %d", role, is_target, strcmp(role, "target"));
-		ptl_context.portals_idx_rma = ptl_cnxt_allocate_pte(&ptl_context);
-	}
-	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context for "
-		       "initiator accepting RMA operations at PTE: %d",
-		       ptl_context.portals_idx_rma);
-#endif
+	ptl_cnxt_init_rma_pte(&ptl_context);
 	SPDK_PTL_DEBUG("SUCCESSFULLY create and initialized PORTALS context with matcing enabled with role: %s",
 		       role);
 	ptl_context.initialized = true;
@@ -820,6 +848,18 @@ exit:
 	return rc;
 }
 
+
+int ptl_cnxt_free_pte(struct ptl_context *ptl_cnxt, int pte)
+{
+#if PTL_USE_MATCHING
+	SPDK_PTL_FATAL("You should not call this function in the PTL_USE_MATCHING case");
+#else
+	pthread_mutex_lock(&ptl_cnxt->pte_table_lock);
+	ptl_cnxt->pte_table[pte] = 0;
+	pthread_mutex_unlock(&ptl_cnxt->pte_table_lock);
+#endif
+	return 0;
+}
 int ptl_cnxt_allocate_pte(struct ptl_context *cnxt)
 {
 	int pte;

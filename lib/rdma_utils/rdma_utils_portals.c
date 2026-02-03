@@ -27,7 +27,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define PTL_SIZE_MAX ((1UL<<48)-1)
+// #define PTL_SIZE_MAX ((1UL<<48)-1)
 struct rdma_utils_device {
 	struct ibv_pd			*pd;
 	struct ibv_context		*context;

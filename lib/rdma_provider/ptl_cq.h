@@ -42,6 +42,7 @@ struct ptl_cq_core {
 	ptl_pt_index_t pte_handle;
 	int pte;
 	int cq_id;
+	bool is_shared;
 };
 
 struct ptl_cq {
@@ -57,7 +58,7 @@ struct ptl_cq {
 struct ptl_cq *ptl_cq_get(int ptl_cq_id);
 #endif
 
-struct ptl_cq_core *ptl_cq_core_create(int pte);
+struct ptl_cq_core *ptl_cq_core_create(int pte, bool is_shared);
 struct ptl_cq *ptl_cq_create(void *cq_context);
 
 #if PTL_USE_MATCHING

@@ -103,7 +103,7 @@ ptl_handle_eq_t ptl_cq_get_static_event_queue(void)
 }
 #else
 static int next_cq_id;
-struct ptl_cq_core *ptl_cq_core_create(int pte)
+struct ptl_cq_core *ptl_cq_core_create(int pte, bool is_shared)
 {
 
 	struct ptl_cq_core *ptl_cq_core = calloc(1UL, sizeof(*ptl_cq_core));
@@ -126,6 +126,7 @@ struct ptl_cq_core *ptl_cq_core_create(int pte)
 		       ptl_cq_core->pte);
 
 	ptl_cq_core->cq_id = __sync_fetch_and_add(&next_cq_id, 1);
+	ptl_cq_core->is_shared = is_shared;
 	return ptl_cq_core;
 }
 

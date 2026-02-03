@@ -44,7 +44,8 @@ struct ptl_conn_open {
 };
 
 struct ptl_conn_open_reply {
-	uint64_t uuid;
+	/*Contains initiator target qp nums*/
+	uint64_t session_id;
 	/*PTE where there are buffers for receive operations (NVMe-cmd)*/
 	int msg_pte;
 	/*
@@ -63,11 +64,11 @@ struct ptl_conn_open_reply {
 };
 
 struct ptl_conn_close {
-	uint64_t uuid;
+	uint64_t session_id;
 };
 
 struct ptl_conn_close_reply {
-	uint64_t uuid;
+	uint64_t session_id;
 	int status;
 };
 

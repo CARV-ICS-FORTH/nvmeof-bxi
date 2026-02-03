@@ -15,7 +15,10 @@ struct ptl_mem_desc *ptl_mem_desc_create_remote(void *start, size_t size, bool r
 	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
 	struct ptl_mem_desc *mem_desc = calloc(1UL, sizeof(*mem_desc));
 	mem_desc->obj_type = PTL_MEM_DESC_REMOTE;
-	SPDK_PTL_DEBUG("Memory registration for RMA operations requested....exposing the whole address space");
+	SPDK_PTL_DEBUG(
+		"Memory registration for RMA operations requested....exposing the "
+		"whole address space from: %lu to: %lu",
+		(uint64_t)start, size);
 #if PTL_USE_MATCHING
 	memset(&mem_desc->remote.rma_me, 0x00, sizeof(mem_desc->remote.rma_me));
 	mem_desc->remote.rma_me.ignore_bits = PTL_UUID_IGNORE_MASK;
@@ -48,7 +51,7 @@ struct ptl_mem_desc *ptl_mem_desc_create_remote(void *start, size_t size, bool r
 	mem_desc->remote.rma_le.match_id.phys.pid = PTL_PID_ANY;
 	mem_desc->remote.rma_le.min_free = 0;
 	mem_desc->remote.rma_le.start = start;
-	mem_desc->remote.rma_le.length = 8192;//size;
+	mem_desc->remote.rma_le.length = size;
 	mem_desc->remote.rma_le.uid = PTL_UID_ANY;
 	mem_desc->remote.rma_le.ct_handle = PTL_CT_NONE;
 	/**
@@ -57,12 +60,14 @@ struct ptl_mem_desc *ptl_mem_desc_create_remote(void *start, size_t size, bool r
 	 */
 	mem_desc->remote.rma_le.options = PTL_RMA_ME_OPTS;
 	if (remote_read) {
+		SPDK_PTL_DEBUG("Exposing memory giving read rights");
 		mem_desc->remote.rma_le.options     |= PTL_ME_OP_GET;
 	}
 	if (remote_write) {
+		SPDK_PTL_DEBUG("Exposing memory giving write rights");
 		mem_desc->remote.rma_le.options     |= PTL_ME_OP_PUT;
 	}
-	rc = PtlMEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), ptl_cnxt_get_rma_pte(ptl_cnxt_get()),
+	rc = PtlLEAppend(ptl_cnxt_get_ni_handle(ptl_cnxt), ptl_cnxt_get_rma_pte(ptl_cnxt_get()),
 			 &mem_desc->remote.rma_le,
 			 PTL_PRIORITY_LIST, NULL, &mem_desc->remote.remote_rw_mem_handle);
 #endif

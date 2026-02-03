@@ -60,8 +60,6 @@ struct rdma_cm_event *ptl_cm_id_create_event(struct ptl_cm_id *ptl_id, struct pt
 		SPDK_PTL_FATAL("No memory!");
 	}
 	fake_event->id = &ptl_id->fake_cm_id;
-	SPDK_PTL_DEBUG("CP server: creating event %d for qp num: %d", event_type,
-		       fake_event->id->qp ? fake_event->id->qp->qp_num : -128);
 	fake_event->listen_id = (void*)0xFFFFFFFFFFFFFFFF;
 	if (listen_id) {
 		fake_event->listen_id = &listen_id->fake_cm_id;
