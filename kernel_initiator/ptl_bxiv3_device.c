@@ -1,5 +1,7 @@
 #include "ptl_bxiv3_device.h"
 #include "ib_portals.h"
+#include "linux/bxi3/ptl.h"
+#include "portals4_bxiext.h"
 #include "ptl_connection.h"
 #include "ptl_cq.h"
 #include "ptl_cq_pool.h"
@@ -15,6 +17,9 @@
 #include <linux/spinlock.h>
 #include <portals4.h>
 
+//og
+// #define PTL_RMA_ME_OPTS (PTL_ME_OP_PUT | PTL_ME_OP_GET | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_EVENT_UNLINK_DISABLE | PTL_ME_EVENT_COMM_DISABLE)
+#define PTL_RMA_ME_OPTS (PTL_ME_OP_PUT | PTL_ME_OP_GET | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_EVENT_UNLINK_DISABLE)
 /**
  * Maximum size of the buffers to receive messages regarding the connection
  * protocol
@@ -64,12 +69,40 @@ static void ptl_bxiv3_fill_fake_dev(struct ptl_bxiv3_device *bxiv3_dev)
 	attrs->max_srq_sge = 32;         // Max SGE for SRQ
 }
 
+static void ptl_bxiv3_device_enable_rma(struct ptl_bxiv3_device *bxiv3_dev,
+                                        int pte, struct ptl_cq *cq)
+{
+	int rc;
+	/** To enable RMA operations we create a persistent list entry that exposes all the address space.
+	* However this is 100% safe because:
+	* 1. The IOMMU sets a separate page table for the NIC so it does not have all the kernel addresses.
+	* 2. The driver registers and unregisters pages per operation so the target cannot access stuff that it shouldn't.
+	**/
+	bxiv3_dev->rma_pte = pte;
+	memset(&bxiv3_dev->rma_le, 0x00, sizeof(bxiv3_dev->rma_le));
+	bxiv3_dev->rma_le.ignore_bits = 0;
+	bxiv3_dev->rma_le.match_bits = 0;
+	bxiv3_dev->rma_le.match_id.phys.nid = PTL_NID_ANY;
+	bxiv3_dev->rma_le.match_id.phys.pid = PTL_PID_ANY;
+	bxiv3_dev->rma_le.min_free = 0;
+	bxiv3_dev->rma_le.start = 0;
+	bxiv3_dev->rma_le.length = PTL_SIZE_MAX;
+	bxiv3_dev->rma_le.uid = PTL_UID_ANY;
+	bxiv3_dev->rma_le.ct_handle = PTL_CT_NONE;
+	bxiv3_dev->rma_le.options = PTL_RMA_ME_OPTS;
+	rc = PtlLEAppend(bxiv3_dev->nicia_handle, bxiv3_dev->rma_pte, &bxiv3_dev->rma_le, PTL_PRIORITY_LIST, bxiv3_dev, &bxiv3_dev->rma_leh);
+	if (PTL_OK != rc) {
+		PTL_FATAL("Failed to expose address space for rma operations. Reason: %s", PtlToStr(rc, PTL_STR_ERROR));
+	}
+}
+
 struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id)
 {
 	struct ptl_bxiv3_device *bxiv3_dev;
-	struct ptl_bxiv3_device_recv_buffer *recv_buffer;
-	struct ptl_bxiv3_device_recv_buffer *tmp;
-	struct ptl_bxiv3_device_recv_buffer *buf;
+	struct ptl_conn_recv_buffer *recv_buffer;
+	struct ptl_conn_recv_buffer *tmp;
+	struct ptl_conn_recv_buffer *buf;
+	ptl_ni_limits_t desired;
 	cpumask_t cpu_mask;
 	int rc;
 	int ret;
@@ -87,15 +120,28 @@ struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id)
 	spin_lock_init(&bxiv3_dev->pte_table_lock);
 	/*Reserve PTL_CP_SERVER_PTE for the connection management*/
 	set_bit(PTL_CP_SERVER_PTE, bxiv3_dev->pte_table);
+	/*Reserve for RMA operations*/
+	set_bit(PTL_RMA_PTE, bxiv3_dev->pte_table);
 	bxiv3_dev->iface_id = iface_id;
 	kref_init(&bxiv3_dev->count);
 
 	PTL_DEBUG("Initializing BXIv3 device for iface id: %d...", iface_id);
-	rc = PtlNIInit(iface_id, PTL_NI_MATCHING | PTL_NI_PHYSICAL, PTL_PID_ANY,
-	               NULL, &bxiv3_dev->actual, &bxiv3_dev->nicia_handle);
+
+	memset(&desired, 0, sizeof(desired));
+
+	desired.max_entries = 479075;
+	//This affects EQAlloc
+	desired.max_eqs = 1024;
+	//This affect MDBind
+	desired.max_mds = 479075;
+	//This affects max ptes?
+	desired.max_pt_index = 511;
+	desired.features = PTL_BXI3_SERVICE;
+	rc = PtlNIInit(iface_id, PTL_NI_NO_MATCHING | PTL_NI_PHYSICAL, PTL_PID_ANY,
+	               &desired, &bxiv3_dev->actual, &bxiv3_dev->nicia_handle);
 	if (PTL_OK != rc) {
-		PTL_DEBUG("PtlNIInit() failed with code: %d no ifcace: %d", rc,
-		          iface_id);
+		PTL_WARN("PtlNIInit() failed with code: %d no ifcace: %d", rc,
+		         iface_id);
 		ret = -EIO;
 		goto clean_up;
 	}
@@ -146,7 +192,7 @@ struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id)
 			ret = -ENOMEM;
 			goto rollback;
 		}
-		recv_buffer->obj_type = PTL_CONN_RECV_BUFFER;
+		recv_buffer->object_type = PTL_CONN_RECV_BUFFER;
 		if (RDMA_PTL_MSG_BUFFER_SIZE <= sizeof(*recv_buffer->conn_msg)) {
 			PTL_FATAL("RDMA_PTL_MSG_BUFFER_SIZE too small. Value is: %lu needs at least %lu", RDMA_PTL_MSG_BUFFER_SIZE, sizeof(*recv_buffer->conn_msg));
 		}
@@ -157,43 +203,49 @@ struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id)
 			goto rollback;
 		}
 
-		recv_buffer->me.cpu_start = recv_buffer->conn_msg;
-		recv_buffer->me.length = RDMA_PTL_MSG_BUFFER_SIZE;
-		recv_buffer->me.start = ib_portals_dma_map_single(&bxiv3_dev->fake_ib_dev, recv_buffer->me.cpu_start, recv_buffer->me.length, DMA_FROM_DEVICE);
-		if (ib_portals_dma_mapping_error(&bxiv3_dev->fake_ib_dev, recv_buffer->me.start)) {
+		recv_buffer->le.cpu_start = recv_buffer->conn_msg;
+		recv_buffer->le.length = RDMA_PTL_MSG_BUFFER_SIZE;
+		recv_buffer->le.start = ib_portals_dma_map_single(&bxiv3_dev->fake_ib_dev, recv_buffer->le.cpu_start, recv_buffer->le.length, DMA_FROM_DEVICE);
+		if (ib_portals_dma_mapping_error(&bxiv3_dev->fake_ib_dev, recv_buffer->le.start)) {
 			PTL_FATAL("Failed dma mapping");
 			ret = -EIO;
 			goto rollback;
 		}
 
-		recv_buffer->me.ct_handle = PTL_CT_NONE;
-		recv_buffer->me.uid = PTL_UID_ANY;
-		recv_buffer->me.match_id.phys.nid = PTL_NID_ANY;
-		recv_buffer->me.match_id.phys.pid = PTL_PID_ANY;
-		recv_buffer->me.match_id.rank     = PTL_RANK_ANY;
-		recv_buffer->me.options = PTL_SRV_ME_OPTS;
-		recv_buffer->me.match_bits = 0x01ULL;
-		recv_buffer->me.ignore_bits = 0;        /* which bits in match_bits to ignore */
-		recv_buffer->me.min_free = 0;   /* minimum free buffer required */
+		recv_buffer->le.ct_handle = PTL_CT_NONE;
+		recv_buffer->le.uid = PTL_UID_ANY;
+		recv_buffer->le.match_id.phys.nid = PTL_NID_ANY;
+		recv_buffer->le.match_id.phys.pid = PTL_PID_ANY;
+		recv_buffer->le.match_id.rank     = PTL_RANK_ANY;
+		recv_buffer->le.options = PTL_SRV_ME_OPTS;
+		recv_buffer->le.min_free = 0;   /* minimum free buffer required */
 		/* BXI extension  */
-		recv_buffer->me.bxi_cq = 0;     /* or a CQ index if you use multi-CQ XXX TODO XXX What is this? */
-		PTL_DEBUG("Appending ME: CPU_START: 0x%lx PHYSICAL START: 0x%lx", (unsigned long)recv_buffer->me.cpu_start, (unsigned long)recv_buffer->me.start);
+		recv_buffer->le.bxi_cq = 0;     /* or a CQ index if you use multi-CQ XXX TODO XXX What is this? */
+		PTL_DEBUG("Appending LE: CPU_START: 0x%lx PHYSICAL START: 0x%lx", (unsigned long)recv_buffer->le.cpu_start, (unsigned long)recv_buffer->le.start);
 
-		rc = PtlMEAppend(bxiv3_dev->nicia_handle,
+		rc = PtlLEAppend(bxiv3_dev->nicia_handle,
 		                 PTL_CP_SERVER_PTE,
-		                 &recv_buffer->me,
+		                 &recv_buffer->le,
 		                 PTL_PRIORITY_LIST,
 		                 recv_buffer,
-		                 &recv_buffer->meh);
+		                 &recv_buffer->leh);
 		if (rc != PTL_OK) {
-			PTL_FATAL("PtlMEAppend failed with code: %d", rc);
+			PTL_FATAL("Failed with reason: %s", PtlToStr(rc, PTL_STR_ERROR));
 			ret = -EIO;
 			goto rollback;
 		}
 		list_add(&recv_buffer->head, &bxiv3_dev->conn_buffer_list);
-		PTL_DEBUG("Registered buffer in iface_id: %d and #PTE:%d with buffer no: %u of size: %llu", bxiv3_dev->iface_id, PTL_CP_SERVER_PTE, i, recv_buffer->me.length);
+		PTL_DEBUG("Registered buffer in iface_id: %d and #PTE:%d with "
+		          "buffer no: %u of size: %llu",
+		          bxiv3_dev->iface_id, PTL_CP_SERVER_PTE, i,
+		          recv_buffer->le.length);
 	}
 	bxiv3_dev->ptl_cq_pool = ptl_cq_pool_create(bxiv3_dev);
+
+	PTL_DEBUG("Creating the completion queue for the RMA operations...");
+	bxiv3_dev->rma_operations_eq = ptl_cq_create(NULL, bxiv3_dev, PTL_CP_SERVER_CQ_ENTRIES, PTL_RMA_PTE, IB_POLL_SOFTIRQ);
+	PTL_DEBUG("Creating the completion queue for the RMA operations...SUCCESS");
+	ptl_bxiv3_device_enable_rma(bxiv3_dev, PTL_RMA_PTE, bxiv3_dev->rma_operations_eq);
 
 	/* QP Map hashtable init */
 	hash_init(bxiv3_dev->qp_map);
@@ -207,9 +259,9 @@ rollback:
 	list_for_each_entry_safe(buf, tmp, &bxiv3_dev->conn_buffer_list, head) {
 		list_del(&buf->head);
 		/* Unlink the ME from the portal table */
-		PtlMEUnlink(buf->meh);
+		PtlMEUnlink(buf->leh);
 		/* Unmap DMA buffer */
-		ib_portals_dma_unmap_single(&bxiv3_dev->fake_ib_dev, buf->me.start, buf->me.length, DMA_TO_DEVICE);
+		ib_portals_dma_unmap_single(&bxiv3_dev->fake_ib_dev, buf->le.start, buf->le.length, DMA_TO_DEVICE);
 		/* Free the buffer */
 		kfree(buf);
 	}
@@ -264,8 +316,8 @@ out:
 
 int ptl_bxiv3_dev_destroy(struct ptl_bxiv3_device *bxiv3_dev)
 {
-	struct ptl_bxiv3_device_recv_buffer *tmp;
-	struct ptl_bxiv3_device_recv_buffer *buf;
+	struct ptl_conn_recv_buffer *tmp;
+	struct ptl_conn_recv_buffer *buf;
 	struct ptl_bxiv3_qp_map_entry *e;
 	struct hlist_node *tmp_qp_map_entry;
 	int bkt;
@@ -306,7 +358,7 @@ int ptl_bxiv3_dev_destroy(struct ptl_bxiv3_device *bxiv3_dev)
 	list_for_each_entry_safe(buf, tmp, &bxiv3_dev->conn_buffer_list, head) {
 		list_del(&buf->head);
 		/* Unmap DMA buffer */
-		ib_portals_dma_unmap_single(&bxiv3_dev->fake_ib_dev, buf->me.start, buf->me.length, DMA_TO_DEVICE);
+		ib_portals_dma_unmap_single(&bxiv3_dev->fake_ib_dev, buf->le.start, buf->le.length, DMA_TO_DEVICE);
 		/* Free the buffer */
 		kfree(buf);
 	}

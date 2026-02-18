@@ -11,7 +11,7 @@
 /**
  * Flag that controls if we enable matching or we don't
  */
-#define PTL_USE_MATCHING 1
+#define PTL_USE_MATCHING 0
 
 /**
  * This is to ensure that both parties agree about the matching feature

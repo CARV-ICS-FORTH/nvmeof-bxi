@@ -7,6 +7,7 @@
 #include "ptl_connection.h"
 #include "ptl_cq_pool.h"
 #include "ptl_object_types.h"
+#include "ptl_recv_op.h"
 #include "ptl_uuid.h"
 #include "rdma/rdma_cm.h"
 #include <asm-generic/errno-base.h>
@@ -17,7 +18,7 @@
 
 static void ptl_cnxt_process_get(ptl_event_t event, struct ptl_cq *ptl_cq)
 {
-	PTL_FATAL("UNIMPLEMENTED");
+	PTL_DEBUG("Target performed an RDMA read from me (the initiator) ignore");
 }
 
 static void ptl_cnxt_process_get_overflow(ptl_event_t event, struct ptl_cq *ptl_cq)
@@ -29,17 +30,17 @@ static void ptl_cnxt_process_get_overflow(ptl_event_t event, struct ptl_cq *ptl_
 static void ptl_handle_open_connection_reply(ptl_event_t *event, struct ptl_cq *ptl_cq)
 {
 	struct rdma_cm_event *cm_event = NULL;
-	struct ptl_bxiv3_device_recv_buffer *recv_buffer = event->user_ptr;
+	struct ptl_conn_recv_buffer *recv_buffer = event->user_ptr;
 	struct ptl_conn_msg *msg = recv_buffer->conn_msg;
 	struct ptl_bxiv3_qp_map_entry *entry;
 	struct ptl_qp *ptl_qp = NULL;
 	int qpn;
 	cm_event = kzalloc(sizeof(*cm_event), GFP_KERNEL);
 
-	qpn = ptl_uuid_get_initiator_qp_num(msg->conn_open_reply.uuid);
+	qpn = ptl_uuid_get_initiator_qp_num(msg->conn_open_reply.session_id);
 	PTL_DEBUG("<PTL_OPEN_CONNECTION_REPLY> rlength: %llu mlength: %llu", event->rlength, event->mlength);
 	PTL_DEBUG("Initiator qp num for which this event is: %d", qpn);
-	PTL_DEBUG("Target qp num for which this event is: %d", ptl_uuid_get_target_qp_num(msg->conn_open_reply.uuid));
+	PTL_DEBUG("Target qp num for which this event is: %d", ptl_uuid_get_target_qp_num(msg->conn_open_reply.session_id));
 	spin_lock(&ptl_cq->bxiv3_dev->qp_map_lock);
 	hash_for_each_possible(ptl_cq->bxiv3_dev->qp_map, entry, node, qpn) {
 		if (entry->key == qpn) {
@@ -47,6 +48,13 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event, struct ptl_cq *
 			break; // Exit immediately once found
 		}
 	}
+	ptl_qp->ptl_id->remote_msg_pte = msg->conn_open_reply.msg_pte;
+	ptl_qp->ptl_id->remote_rma_pte = msg->conn_open_reply.rma_pte;
+	ptl_qp->ptl_id->remote_cq_id = msg->conn_open_reply.cq_id;
+	ptl_qp->ptl_id->session_id = msg->conn_open_reply.session_id;
+	ptl_qp->ptl_id->session_id = ptl_uuid_set_cq_num(ptl_qp->ptl_id->session_id, msg->conn_open_reply.cq_id);
+	ptl_qp->ptl_id->session_id = ptl_uuid_set_op_type(ptl_qp->ptl_id->session_id, NVMeOF_cmd);
+
 	spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);
 	if (NULL == ptl_qp) {
 		PTL_WARN("QPN: %d not found!, is Target ok in its health?", qpn);
@@ -62,32 +70,58 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event, struct ptl_cq *
 
 static void ptl_handle_close_connection_reply(ptl_event_t *event, struct ptl_cq *ptl_cq)
 {
-	struct ptl_bxiv3_device_recv_buffer *recv_buffer = event->user_ptr;
+	struct ptl_conn_recv_buffer *recv_buffer = event->user_ptr;
 	struct ptl_conn_msg *msg = recv_buffer->conn_msg;
 	PTL_DEBUG("<PTL_CLOSE_CONNECTION_REPLY>");
-	PTL_DEBUG("Initiator qp num for which this event is: %d", ptl_uuid_get_initiator_qp_num(msg->conn_close_reply.uuid));
-	PTL_DEBUG("Target qp num for which this event is: %d", ptl_uuid_get_target_qp_num(msg->conn_close_reply.uuid));
+	PTL_DEBUG("Initiator qp num for which this event is: %d", ptl_uuid_get_initiator_qp_num(msg->conn_close_reply.session_id));
+	PTL_DEBUG("Target qp num for which this event is: %d", ptl_uuid_get_target_qp_num(msg->conn_close_reply.session_id));
 	PTL_DEBUG("</PTL_CLOSE_CONNECTION_REPLY>");
 }
 
 static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq)
 {
-	PTL_DEBUG("<NVMeoF_cpl>");
-	PTL_DEBUG("</NVMeoF_cpl>");
+	struct ib_wc wc;
+	PTL_DEBUG("<NVMeoF_cpl>, start processing");
+
+	struct ptl_recv_op* recv_op = event->user_ptr;
+	if (recv_op == NULL) {
+		PTL_FATAL("Cannot happen, where is the metadata for the recv_op?");
+	}
+	wc.status =
+	        event->ni_fail_type == PTL_NI_OK ? IB_WC_SUCCESS : IB_WC_LOC_PROT_ERR;
+	wc.opcode = IB_WC_RECV;
+	wc.wr_id = recv_op->wr_id;
+	wc.wr_cqe = recv_op->wr_cqe;
+	wc.byte_len = event->rlength;
+	wc.qp = &recv_op->ptl_qp->fake_qp;
+	wc.src_qp = recv_op->ptl_qp->qpn;
+	wc.wc_flags = IB_WC_WITH_INVALIDATE;
+	wc.ex.invalidate_rkey = PTL_MAGIC_FAKE_MR_KEY;
+
+	recv_op->wr_cqe->done(&ptl_cq->fake_cq, &wc);
 }
 
+static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq)
+{
+	PTL_DEBUG("Target performed an RDMA write to me");
+}
 
 static void ptl_cnxt_process_put(ptl_event_t event, struct ptl_cq *ptl_cq)
 {
+	int op_type = ptl_uuid_get_op_type(event.hdr_data);
 	/*XXX TODO XXX fix the target to report it specifically.*/
-	if (NVMeOF_cpl == event.hdr_data) {
+	if (NVMeOF_cpl == op_type) {
 		ptl_handle_nvme_cpl(&event, ptl_cq);
-	} else if (PTL_OPEN_CONNECTION_REPLY == event.hdr_data) {
+	} else if (NVMeOF_rma == op_type) {
+		ptl_handle_rdma_write(&event, ptl_cq);
+	} else if (PTL_OPEN_CONNECTION_REPLY == op_type) {
 		ptl_handle_open_connection_reply(&event, ptl_cq);
-	} else if (PTL_CLOSE_CONNECTION_REPLY == event.hdr_data) {
+	} else if (PTL_CLOSE_CONNECTION_REPLY == op_type) {
 		ptl_handle_close_connection_reply(&event, ptl_cq);
+	} else if (NVMeOF_cmd == op_type) {
+		PTL_FATAL("Got an NVMeOF_cmd. I am the initiator hello?");
 	} else {
-		PTL_FATAL("No action register for PtlPut object of type: %llu", event.hdr_data);
+		PTL_FATAL("No action registered for PtlPut object of type: %d", op_type);
 	}
 }
 
@@ -132,7 +166,34 @@ static void ptl_cnxt_process_send(ptl_event_t event, struct ptl_cq *ptl_cq)
 
 static void ptl_cnxt_process_ack(ptl_event_t event, struct ptl_cq *ptl_cq)
 {
-	PTL_DEBUG("Just an ack (send has moved its data to the remote memory), ignore");
+	struct ptl_send_op *send_op;
+	ptl_obj_type_e * obj_type = event.user_ptr;
+	struct ib_wc wc;
+	if (obj_type == NULL) {
+		PTL_DEBUG("Unsignaled PTL_EVENT_ACK ignore and processd");
+		return;
+	}
+
+	if (PTL_CONN_SEND_BUFFER == *obj_type) {
+		PTL_DEBUG("PTL_EVENT_ACK for PTL_OPEN_CONNECTION do something XXX TODO XXX");
+		return;
+	}
+	if (PTL_SEND_OP != *obj_type) {
+		PTL_FATAL("PTL_EVENT_ACK Corrupted object type");
+	}
+
+	send_op = event.user_ptr;
+	wc.status =
+	        event.ni_fail_type == PTL_NI_OK ? IB_WC_SUCCESS : IB_WC_LOC_PROT_ERR;
+	wc.opcode = IB_WC_SEND;
+	wc.wr_id = send_op->wr_id;
+	wc.wr_cqe = send_op->wr_cqe;
+	wc.byte_len = event.rlength;
+	wc.qp = &send_op->ptl_qp->fake_qp;
+	wc.src_qp = send_op->ptl_qp->qpn;
+	PTL_DEBUG("PTL_EVENT_ACK (send has moved its data to the remote memory). Calling its callback");
+	send_op->wr_cqe->done(&ptl_cq->fake_cq, &wc);
+	kfree(send_op);
 }
 
 static void ptl_cnxt_process_bt_disabled(ptl_event_t event, struct ptl_cq *ptl_cq)
@@ -142,26 +203,37 @@ static void ptl_cnxt_process_bt_disabled(ptl_event_t event, struct ptl_cq *ptl_c
 
 static void ptl_cnxt_process_auto_unlink(ptl_event_t event, struct ptl_cq *ptl_cq)
 {
-	struct ptl_bxiv3_device_recv_buffer *recv_buffer = event.user_ptr;
-	int rc;
+	ptl_obj_type_e *obj_type = event.user_ptr;
+	struct ptl_conn_recv_buffer *recv_buffer;
+	struct ptl_recv_op * recv_op;
 
-	if (NVMeOF_cmd != event.hdr_data && NVMeOF_cpl != event.hdr_data) {
-		if (PTL_CONN_RECV_BUFFER != recv_buffer->obj_type) {
-			PTL_FATAL("Corrupted recv buffer");
-		}
-		PTL_DEBUG("Got an unlink event for a receive buffer of the connections protocol. Reappend the receive buffer for PTL_CONNECTIONS");
-		rc = PtlMEAppend(ptl_cq->bxiv3_dev->nicia_handle,
-		                 PTL_CP_SERVER_PTE,
-		                 &recv_buffer->me,
-		                 PTL_PRIORITY_LIST,
-		                 recv_buffer,
-		                 &recv_buffer->meh);
-		if (rc != PTL_OK) {
-			PTL_FATAL("PtlMEAppend failed with code: %d", rc);
-		}
+	int rc;
+	if (NULL == obj_type) {
+		PTL_FATAL("Recv buffer without metadata? Cannot happen in Nida!");
+	}
+
+	if (PTL_RECV_OP == *obj_type) {
+		recv_op = event.user_ptr;
+		PTL_DEBUG("Autounlink for an NVMeOF_cpl buffer. Free metadata and continue");
+		kfree(recv_op);
 		return;
 	}
-	PTL_DEBUG("Got an unlink event for NVMe shit, ignore");
+	if (PTL_CONN_RECV_BUFFER != *obj_type) {
+		PTL_FATAL("Corrupted object type: %d", obj_type);
+	}
+	recv_buffer = event.user_ptr;
+
+	PTL_DEBUG("Got an unlink event for a receive buffer of the connections protocol. Reappend the receive buffer for PTL_CONNECTIONS");
+	rc = PtlLEAppend(ptl_cq->bxiv3_dev->nicia_handle,
+	                 PTL_CP_SERVER_PTE,
+	                 &recv_buffer->le,
+	                 PTL_PRIORITY_LIST,
+	                 recv_buffer,
+	                 &recv_buffer->leh);
+	if (rc != PTL_OK) {
+		PTL_FATAL("PtlLEAppend failed with reason: %s", PtlToStr(rc, PTL_STR_ERROR));
+	}
+	kfree(recv_buffer);
 }
 
 

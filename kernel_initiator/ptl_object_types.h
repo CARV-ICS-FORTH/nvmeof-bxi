@@ -1,8 +1,10 @@
+#include "ptl_connection.h"
 #ifndef PTL_OBJECT_TYPES_H
 #define PTL_OBJECT_TYPES_H 1
 #include <linux/delay.h>
 #define PTL_VERSION 1
 
+#define PTL_MAGIC_FAKE_MR_KEY 0x12345678
 #define PTL_FATAL_RATELIMIT_PERIOD HZ
 #define PTL_FATAL_RATELIMIT_BURST 10
 
@@ -57,6 +59,7 @@ typedef enum ptl_obj_type {
 	PTL_CQ_POOL,
 	PTL_BXIV3_DEVICE,
 	PTL_CONN_RECV_BUFFER,
+	PTL_CONN_SEND_BUFFER,
 	PTL_MR
 } ptl_obj_type_e;
 #endif

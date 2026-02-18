@@ -22,12 +22,16 @@ struct ptl_cm_id {
 	ptl_obj_type_e object_type;
 	struct rdma_cm_id fake_cm_id;
 	struct net *net;
+	u64 session_id;
 	rdma_cm_event_handler event_handler;
 	void *event_handler_context;
 	int nid;
 	int pid;
-	int target_nid;
-	int target_pid;
+	int remote_nid;
+	int remote_pid;
+	int remote_msg_pte;
+	int remote_rma_pte;
+	int remote_cq_id;
 	struct ptl_bxiv3_device *bxiv3_dev;
 	struct ptl_qp *ptl_qp;
 	ptl_cm_id_e cm_id_state;

@@ -25,13 +25,6 @@ struct ptl_bxiv3_qp_map_entry {
 	struct hlist_node node;
 };
 
-struct ptl_bxiv3_device_recv_buffer {
-	ptl_obj_type_e obj_type;
-	struct ptl_conn_msg *conn_msg;
-	ptl_me_t me;
-	ptl_handle_me_t meh;
-	struct list_head head;
-};
 
 struct ptl_bxiv3_device {
 	ptl_obj_type_e object_type;
@@ -46,8 +39,15 @@ struct ptl_bxiv3_device {
 
 	/*Event queue only for the connection staff (PTL_OPEN_CONNECTION_REQUEST,...)*/
 	struct ptl_cq *conn_mgmt_eq;
-	/*List of MEs for the cp server*/
+	/*List of receive buffers for the connetion server*/
 	struct list_head conn_buffer_list;
+
+	/*RMA related staff*/
+	/*Event queue for the rma operations from the target to the initiator*/
+	struct ptl_cq *rma_operations_eq;
+	ptl_le_t rma_le;
+	ptl_handle_le_t rma_leh;
+	int rma_pte;
 
 	struct kref count;
 	/* XXX TODO XXX, list with cm_id/qps? created on this device */

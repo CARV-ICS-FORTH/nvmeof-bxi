@@ -9,8 +9,9 @@ struct ptl_qp {
 	struct ptl_pd *ptl_pd;
 	struct ptl_cq *send_cq;
 	struct ptl_cq *recv_cq;
+	struct list_head ptl_mr_list;
+	spinlock_t ptl_mr_list_lock;
 	struct ib_qp fake_qp;
-	u64 match_bits;
 	int qpn;
 };
 

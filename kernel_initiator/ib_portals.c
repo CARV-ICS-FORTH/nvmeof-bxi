@@ -14,15 +14,24 @@
 
 #include "asm-generic/errno-base.h"
 #include "ib_portals.h"
+#include "linux/bxi3/ptl.h"
 #include "linux/container_of.h"
+#include "linux/gfp_types.h"
+#include "linux/scatterlist.h"
 #include "linux/types.h"
+#include "mr_portals_pool.h"
+#include "portals4.h"
 #include "portals4_bxiext.h"
 #include "ptl_bxiv3_dev_map.h"
 #include "ptl_bxiv3_device.h"
+#include "ptl_cm_id.h"
+#include "ptl_connection.h"
 #include "ptl_cq.h"
 #include "ptl_cq_pool.h"
 #include "ptl_object_types.h"
 #include "ptl_pd.h"
+#include "ptl_recv_op.h"
+#include "ptl_uuid.h"
 
 
 #define GES_UNIMPL_RATELIMIT_PERIOD HZ
@@ -64,6 +73,58 @@ struct ib_portals_client_entry {
 
 static LIST_HEAD(ib_portals_client_list);
 static DEFINE_MUTEX(ib_portals_client_lock);
+
+/*
+ * Just Mimicing the behaviour.
+ * Drivers that don't need a DMA mapping at the RDMA layer, set dma_device to
+ * NULL. This causes the ib_dma* helpers to just stash the kernel virtual
+ * address into the dma address.
+ */
+static inline bool ib_portals_uses_virt_dma(struct ib_device *dev)
+{
+	struct ptl_bxiv3_device *bxiv3_dev =
+	        container_of(dev, struct ptl_bxiv3_device, fake_ib_dev);
+	struct device *device;
+	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
+	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+	return IS_ENABLED(CONFIG_INFINIBAND_VIRT_DMA) && !device;
+}
+
+int ib_portals_dma_virt_map_sg(struct ib_device *ibdev, struct scatterlist *sg,
+                               int nents)
+{
+	PTL_WARN("Caution got into this VIRT_DMA staff");
+	struct ptl_bxiv3_device *bxiv3_dev =
+	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+	struct scatterlist *s;
+	int i;
+	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
+
+	for_each_sg(sg, s, nents, i) {
+		sg_dma_address(s) = (uintptr_t)sg_virt(s);
+		sg_dma_len(s) = s->length;
+	}
+	return nents;
+}
+
+/*Again just mimicing the behaviour*/
+static inline int ib_portals_dma_map_sg_attrs(struct ib_device *ibdev,
+                                              struct scatterlist *sg, int nents,
+                                              enum dma_data_direction direction,
+                                              unsigned long dma_attrs)
+{
+	struct device *device;
+	struct ptl_bxiv3_device *bxiv3_dev =
+	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+
+	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
+	if (ib_portals_uses_virt_dma(ibdev))
+		return ib_portals_dma_virt_map_sg(ibdev, sg, nents);
+
+	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+	dma_attrs |= DMA_ATTR_FORCE_CONTIGUOUS;
+	return dma_map_sg_attrs(device, sg, nents, direction, dma_attrs);
+}
 
 /* Mapped to ib_alloc_pd/ib_dealloc_pd */
 struct ib_pd *ib_portals_alloc_pd(struct ib_device *dev, unsigned int flags)
@@ -146,39 +207,67 @@ EXPORT_SYMBOL_GPL(ib_portals_destroy_qp);
 void ib_portals_dma_unmap_single(struct ib_device *ibdev, dma_addr_t addr,
                                  size_t size, enum dma_data_direction dir)
 {
-	(void)ibdev;
-	(void)addr;
-	(void)size;
-	(void)dir;
-	IB_PORTALS4_UNIMPL("Sorry!");
+	struct ptl_bxiv3_device *bxiv3_dev;
+	struct device *device;
+
+
+	if (!ibdev) {
+		PTL_WARN("Invalid parameter: ibdev is NULL");
+		return;
+	}
+
+	bxiv3_dev = container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
+
+	/* If using virtual DMA, nothing to unmap */
+	if (ib_portals_uses_virt_dma(ibdev)) {
+		PTL_DEBUG("Virtual DMA - no-op unmap");
+		return;
+	}
+
+	PTL_DEBUG("DMA_UNMAP_single: iova=%llx, length=%lu", addr, size);
+	/* Otherwise, call the real DMA unmap */
+	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+	dma_unmap_single(device, addr, size, dir);
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_dma_unmap_single);
 
+/*Checked for ib_portals_uses_virt_dma*/
 dma_addr_t ib_portals_dma_map_single(struct ib_device *ibdev, void *cpu_addr,
                                      size_t size, enum dma_data_direction dir)
 {
+	PTL_DEBUG("DMA MAP single");
 	struct ptl_bxiv3_device *bxiv3_dev =
 	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
 	struct device *device;
 	dma_addr_t dma_addr;
 	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
 	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+
+	if (ib_portals_uses_virt_dma(ibdev))
+		return (uintptr_t)cpu_addr;
 	dma_addr = dma_map_single(device, cpu_addr, size, dir);
-	// PTL_DEBUG("CPU Virtual Address (decimal): %llu <---> DMA Address (decimal): "
+	// PTL_DEBUG("CPU Virtual Address (decimal): %llu <---> DMA Address (decimal):
+	// "
 	//           "%llu of size: %lu",
-	//           (unsigned long long)cpu_addr, (unsigned long long)dma_addr, size);
+	//           (unsigned long long)cpu_addr, (unsigned long long)dma_addr,
+	//           size);
 	return dma_addr;
 }
 EXPORT_SYMBOL_GPL(ib_portals_dma_map_single);
 
+/*Checked for ib_portals_uses_virt_dma*/
 int ib_portals_dma_mapping_error(struct ib_device *ibdev, dma_addr_t dma_addr)
 {
+	PTL_DEBUG("DMA CHECK for MAPPING ERROR");
 	struct ptl_bxiv3_device *bxiv3_dev =
 	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
 	struct device *device;
 	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
 	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+	if (ib_uses_virt_dma(ibdev))
+		return 0;
 	return dma_mapping_error(device, dma_addr);
 }
 EXPORT_SYMBOL_GPL(ib_portals_dma_mapping_error);
@@ -186,12 +275,34 @@ EXPORT_SYMBOL_GPL(ib_portals_dma_mapping_error);
 int ib_portals_dma_unmap_sg(struct ib_device *ibdev, struct scatterlist *sgl,
                             int nents, enum dma_data_direction dir)
 {
-	(void)ibdev;
-	(void)sgl;
-	(void)nents;
-	(void)dir;
-	IB_PORTALS4_UNIMPL("Sorry!");
-	return -EOPNOTSUPP;
+	struct ptl_bxiv3_device *bxiv3_dev;
+	struct device *device;
+	struct scatterlist *s;
+	int i;
+
+	for_each_sg(sgl, s, nents, i) {
+		PTL_DEBUG("DMA_UNMAP_sg: SG[%d]: virt_addr=%p, iova=%llx, length=%u", i, sg_virt(s), sg_dma_address(s), s->length);
+	}
+
+	if (!ibdev || !sgl) {
+		PTL_WARN("Invalid parameters: ibdev=%p, sgl=%p", ibdev, sgl);
+		return 0;
+	}
+
+	bxiv3_dev = container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
+
+	/* If using virtual DMA, nothing to unmap */
+	if (ib_portals_uses_virt_dma(ibdev)) {
+		PTL_DEBUG("Virtual DMA - no-op unmap");
+		return 0;
+	}
+
+	/* Otherwise, call the real DMA unmap */
+	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+	dma_unmap_sg(device, sgl, nents, dir);
+
+	return 0;
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_dma_unmap_sg);
@@ -199,50 +310,164 @@ EXPORT_SYMBOL_GPL(ib_portals_dma_unmap_sg);
 int ib_portals_dma_map_sg(struct ib_device *ibdev, struct scatterlist *sgl,
                           int nents, enum dma_data_direction dir)
 {
-	(void)ibdev;
-	(void)sgl;
-	(void)nents;
-	(void)dir;
-	IB_PORTALS4_UNIMPL("Sorry!");
-	return -EOPNOTSUPP;
+	struct scatterlist *s;
+	int ret;
+	int i;
+	/* Print the scatter-gather list before mapping */
+	for_each_sg(sgl, s, nents, i) {
+		PTL_DEBUG("DMA_MAP_sg: SG[%d]: virt_addr=%p, length=%u", i, sg_virt(s), s->length);
+	}
+
+	ret = ib_portals_dma_map_sg_attrs(ibdev, sgl, nents, dir, 0);
+	/* Print the scatter-gather list after mapping */
+	if (ret > 0) {
+		for_each_sg(sgl, s, ret, i) {
+			PTL_DEBUG("  Post-map SG[%d]: dma_addr=0x%llx, dma_length=%u", i, sg_dma_address(s), sg_dma_len(s));
+		}
+	} else {
+		PTL_FATAL("DMA MAP sg failed, returned %d", ret);
+	}
+	return ret;
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_dma_map_sg);
 
+/*Checked for ib_portals_uses_virt_dma*/
 void ib_portals_dma_sync_single_for_cpu(struct ib_device *ibdev,
                                         dma_addr_t dma_handle, size_t size,
                                         enum dma_data_direction dir)
 {
-	(void)ibdev;
-	(void)dma_handle;
-	(void)size;
-	(void)dir;
-	IB_PORTALS4_UNIMPL("Sorry!");
+	PTL_DEBUG("DMA SYNC for CPU");
+	struct ptl_bxiv3_device *bxiv3_dev =
+	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+	struct device *device;
+	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
+	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+	if (!ib_portals_uses_virt_dma(ibdev))
+		return dma_sync_single_for_cpu(device, dma_handle, size, dir);
 }
-
 EXPORT_SYMBOL_GPL(ib_portals_dma_sync_single_for_cpu);
 
 void ib_portals_dma_sync_single_for_device(struct ib_device *ibdev,
                                            dma_addr_t dma_handle, size_t size,
                                            enum dma_data_direction dir)
 {
-	(void)ibdev;
-	(void)dma_handle;
-	(void)size;
-	(void)dir;
-	IB_PORTALS4_UNIMPL("Sorry!");
+	PTL_DEBUG("DMA SYNC for DEVICE");
+	struct ptl_bxiv3_device *bxiv3_dev =
+	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+	struct device *device;
+	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
+	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+	if (!ib_portals_uses_virt_dma(ibdev))
+		return dma_sync_single_for_device(device, dma_handle, size, dir);
 }
-
 EXPORT_SYMBOL_GPL(ib_portals_dma_sync_single_for_device);
 
-/* Posting send/recv: always succeed, no CQEs are generated here */
-int ib_portals_post_send(struct ib_qp *qp, struct ib_send_wr *wr, struct ib_send_wr **bad_wr)
+
+static void ib_portals_send_nvmeof_cmd(struct ptl_qp *ptl_qp, struct ib_send_wr *send_wr)
 {
-	(void)qp;
-	(void)wr;
-	(void)bad_wr;
-	IB_PORTALS4_UNIMPL("Sorry!");
-	return -EOPNOTSUPP;
+	struct ptl_send_op *send_op = NULL;
+	ptl_msg_t msg;
+	ptl_md_t md;
+	u64 dma_addr;
+	u32 length;
+	int rc;
+	if (send_wr->num_sge > 1) {
+		PTL_FATAL("Cannot handle num_sge > 1 for an nvme command");
+	}
+	struct ib_sge *sge = &send_wr->sg_list[0];
+
+	if (IB_SEND_SIGNALED == send_wr->send_flags) {
+		PTL_DEBUG("Creating notification event when delivery of this nvme_cmd completes");
+		send_op = kzalloc(sizeof(*send_op), GFP_KERNEL);
+		if (NULL == send_op) {
+			PTL_FATAL("Out of memory");
+		}
+		send_op->object_type = PTL_SEND_OP;
+		send_op->wr_cqe = send_wr->wr_cqe;
+		send_op->ptl_qp = ptl_qp;
+		send_op->wr_id = send_wr->wr_id;
+	}
+	dma_addr = sge->addr;/*DMA/Physical address*/
+	length = sge->length;/*Length in bytes (usually 64 for capsule)*/
+
+	memset(&md, 0x00, sizeof(md));
+	md.start = dma_addr;
+	md.length = length;
+	md.options = 0;
+	md.eq_handle = ptl_qp->recv_cq->eq;
+	md.ct_handle = PTL_CT_NONE;
+	md.bxi_cq = PTL_BXI3_DEFAULT_CQ;
+	memset(&msg, 0x00, sizeof(msg));
+	msg.length = sge->length;
+	msg.ack_req = send_op ? PTL_ACK_REQ : PTL_NO_ACK_REQ;
+	msg.target_id.phys.nid = ptl_qp->ptl_id->remote_nid;
+	msg.target_id.phys.pid = ptl_qp->ptl_id->remote_pid;
+	msg.pt_index = ptl_qp->ptl_id->remote_msg_pte;
+	msg.user_ptr = send_op;
+	msg.hdr_data = ptl_qp->ptl_id->session_id;
+	PTL_DEBUG("Send NVMeOF cmd: Target qp num: %d initiator qp num: %d cq_id: %d",
+	          ptl_uuid_get_target_qp_num(msg.hdr_data),
+	          ptl_uuid_get_initiator_qp_num(msg.hdr_data),
+	          ptl_uuid_get_cq_num(msg.hdr_data));
+
+	rc = PtlMsgPutOnce(ptl_qp->ptl_id->bxiv3_dev->nicia_handle, &md, &msg);
+	if (PTL_OK != rc) {
+		PTL_FATAL("Failed to send NVMeOF command with error: %s", PtlToStr(rc, PTL_STR_ERROR));
+	}
+	PTL_DEBUG("Send NVMeOF command to {nid:%d, pid: %d, pte: %d} for nvme "
+	          "command address: SGE[0]: addr=0x%llx, len=%u successfully",
+	          msg.target_id.phys.nid, msg.target_id.phys.pid, msg.pt_index,
+	          dma_addr, length);
+}
+
+int ib_portals_post_send(struct ib_qp *qp, struct ib_send_wr *wr,
+                         struct ib_send_wr **bad_wr)
+{
+	struct ptl_qp *ptl_qp;
+	struct ib_send_wr *curr;
+	ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
+	PTL_CHECK(ptl_qp, PTL_QP);
+
+	int ret = 0;
+
+	PTL_DEBUG("=== ib_portals_post_send called ===");
+
+	/* Iterate through the linked list of work requests */
+	for (curr = wr; curr != NULL; curr = curr->next) {
+
+		switch (curr->opcode) {
+		case IB_WR_REG_MR:
+			PTL_DEBUG("OPCODE: IB_WR_REG_MR treat is a no-op, XXX TODO XXX use it when matching is enabled in the future");
+			break;
+
+		case IB_WR_SEND:
+			ib_portals_send_nvmeof_cmd(ptl_qp, curr);
+			break;
+
+		case IB_WR_RDMA_WRITE:
+			PTL_FATAL("OPCODE: IB_WR_RDMA_WRITE, unhandled, Sorry!");
+			break;
+
+		case IB_WR_RDMA_READ:
+			PTL_FATAL("OPCODE: IB_WR_RDMA_READ, unhandled,  Sorry!");
+			break;
+
+		case IB_WR_LOCAL_INV:
+			PTL_FATAL("OPCODE: IB_WR_LOCAL_INV, unhandled,  Sorry!");
+			break;
+
+		default:
+			PTL_FATAL("Unsupported opcode: %d, unhandled", curr->opcode);
+			*bad_wr = curr;
+			return -EINVAL;
+		}
+
+	}
+	PTL_DEBUG("Bye bye from ib_postals_post_send");
+
+	return 0;
+
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_post_send);
@@ -252,6 +477,7 @@ int ib_portals_post_recv(struct ib_qp *qp, struct ib_recv_wr *recv_wr,
 {
 	struct ptl_qp *ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
 	struct ib_recv_wr *wr;
+	int rc;
 	int i = 0;
 	PTL_CHECK(ptl_qp, PTL_QP);
 	PTL_DEBUG("Hey receive queue of this queue pair: %d is at PTE: %d",
@@ -267,14 +493,34 @@ int ib_portals_post_recv(struct ib_qp *qp, struct ib_recv_wr *recv_wr,
 		}
 		// Print scatter-gather list entries
 		for (int j = 0; j < recv_wr->num_sge; j++) {
-			PTL_DEBUG("SGE[%d]: addr=0x%llx, length=%u, lkey=0x%x\n", j,
-			          recv_wr->sg_list[j].addr, recv_wr->sg_list[j].length, recv_wr->sg_list[j].lkey);
+			PTL_DEBUG("Registering memory for recv: SGE[%d]: addr=0x%llx, length=%u, "
+			          "lkey=0x%x\n",
+			          j, recv_wr->sg_list[j].addr, recv_wr->sg_list[j].length,
+			          recv_wr->sg_list[j].lkey);
+			struct ptl_recv_op *recv_op = kzalloc(sizeof(*recv_op), GFP_KERNEL);
+			if (NULL == recv_op) {
+				PTL_FATAL("Out of memory");
+			}
+			recv_op->object_type = PTL_RECV_OP;
+			recv_op->le.start = recv_wr->sg_list[j].addr;
+			recv_op->le.length = recv_wr->sg_list[j].length;
+			recv_op->le.cpu_start =
+			        NULL; /*don't know don't care I suppose.XXX TODO XXX*/
+			recv_op->le.options = PTL_SRV_ME_OPTS;
+			recv_op->le.min_free = 0;
+			recv_op->wr_id = recv_wr->wr_id;
+			recv_op->wr_cqe = recv_wr->wr_cqe;
+			recv_op->ptl_qp = ptl_qp;
+			rc = PtlLEAppend(ptl_qp->ptl_id->bxiv3_dev->nicia_handle,
+			                 ptl_qp->recv_cq->pte, (const ptl_le_t *)&recv_op->le,
+			                 PTL_PRIORITY_LIST, recv_op, &recv_op->leh);
+			if (PTL_OK != rc) {
+				PTL_FATAL("LEAppend failed. Reason: %s", PtlToStr(rc, PTL_STR_ERROR));
+			}
 		}
 		i++;
 	}
-	PTL_DEBUG("Total WRs: %d\n", i);
-	IB_PORTALS4_UNIMPL("Sorry!");
-	return -EOPNOTSUPP;
+	return 0;
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_post_recv);
@@ -290,17 +536,67 @@ int ib_portals_process_cq_direct(struct ib_cq *cq, int budget)
 
 EXPORT_SYMBOL_GPL(ib_portals_process_cq_direct);
 
-/* MR map helpers used in FRWR path */
 
+/* MR map helpers used in FRWR path */
 int ib_portals_map_mr_sg(struct ib_mr *mr, struct scatterlist *sg, int sg_nents,
                          unsigned int *sg_offset, unsigned int page_size)
 {
-	(void)mr;
-	(void)sg;
-	(void)sg_offset;
-	IB_PORTALS4_UNIMPL("Sorry!");
-	return -EOPNOTSUPP;
+	struct ptl_mr *ptl_mr;
+	struct scatterlist *s;
+	u64 total_length = 0;
+	u64 first_addr = 0;
+	int mapped_nents;
+	bool skipped;
+	int i;
+
+	PTL_DEBUG("=== ib_portals_map_mr_sg called ===");
+	ptl_mr = container_of(mr, struct ptl_mr, fake_mr);
+	PTL_CHECK(ptl_mr, PTL_MR);
+
+	if (!mr || !sg || sg_nents <= 0) {
+		PTL_FATAL("Invalid parameters: mr=%p, sg=%p, sg_nents=%d", mr, sg, sg_nents);
+		return -EINVAL;
+	}
+
+	if (sg_dma_address(&sg[0])) {
+		PTL_DEBUG("DMA_MAP_sg: already mapped skipping...");
+		mapped_nents = sg_nents;
+		skipped = true;
+	} else {
+		/* DMA-map the scatter-gather list FIRST */
+		mapped_nents = ib_portals_dma_map_sg(mr->device, sg, sg_nents, DMA_BIDIRECTIONAL);
+		if (mapped_nents <= 0) {
+			PTL_FATAL("DMA mapping failed");
+			return -ENOMEM;
+		}
+		skipped = false;
+	}
+	/* Calculate total length and get first DMA address */
+	for_each_sg(sg, s, sg_nents, i) {
+		u64 dma_addr = sg_dma_address(s);
+		u32 dma_len = sg_dma_len(s);
+
+		if (i == 0) {
+			first_addr = dma_addr;
+		}
+
+		total_length += dma_len;
+
+		PTL_DEBUG("%s  [%d] dma_addr: 0x%llx, dma_len: %u for device: %s", skipped ? "Already mapped" : "Mapped",
+		          i, dma_addr, dma_len,
+		          dev_name(PtlGetDriverDev(
+		                           ptl_mr->bxi3_device->nicia_handle)));
+	}
+
+	/* Populate the MR fields */
+	mr->iova = first_addr;
+	mr->length = total_length;
+
+	PTL_DEBUG("=== MR populated: iova=0x%llx, length=%llu === sg_nents are: %d mapped_nents: %d", mr->iova, mr->length, sg_nents, mapped_nents);
+
+	return mapped_nents;
 }
+
 
 EXPORT_SYMBOL_GPL(ib_portals_map_mr_sg);
 
@@ -319,18 +615,20 @@ EXPORT_SYMBOL_GPL(ib_portals_map_mr_sg_pi);
 
 u32 ib_portals_inc_rkey(u32 rkey)
 {
-
-	IB_PORTALS4_UNIMPL("Sorry!");
-	return rkey;
+	/*Just mimicing the vanilla. Portals do not need it*/
+	return PTL_MAGIC_FAKE_MR_KEY;
+	// const u32 mask = 0x000000ff;
+	// return ((rkey + 1) & mask) | (rkey & ~mask);
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_inc_rkey);
 
 void ib_portals_update_fast_reg_key(struct ib_mr *mr, u32 rkey)
 {
-	(void)mr;
-	(void)rkey;
-	IB_PORTALS4_UNIMPL("Sorry!");
+	struct ptl_mr *ptl_mr = container_of(mr, struct ptl_mr, fake_mr);
+	PTL_CHECK(ptl_mr, PTL_MR);
+	mr->rkey = rkey;
+	mr->lkey = rkey;
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_update_fast_reg_key);

@@ -1,6 +1,7 @@
 #include "ptl_qp.h"
 #include "asm-generic/errno-base.h"
 #include "linux/err.h"
+#include "linux/spinlock.h"
 #include "ptl_bxiv3_device.h"
 #include "ptl_cm_id.h"
 #include "ptl_cq.h"
@@ -56,12 +57,12 @@ struct ptl_qp *ptl_qp_create(struct ptl_cm_id *ptl_id, struct ptl_pd *ptl_pd,
 
 	ptl_qp->ptl_id = ptl_id;
 	ptl_qp->qpn = atomic_inc_return(&ptl_id_counter);
-	/*In the kernel qpn = match_bits*/
-	ptl_qp->match_bits = ptl_qp->qpn;
-
+	spin_lock_init(&ptl_qp->ptl_mr_list_lock);
 	/*appropriate wiring needed*/
 	INIT_LIST_HEAD(&ptl_qp->fake_qp.rdma_mrs);
 	INIT_LIST_HEAD(&ptl_qp->fake_qp.sig_mrs);
+	/*Where we keep the list of ptl_mrs*/
+	INIT_LIST_HEAD(&ptl_qp->ptl_mr_list);
 	ptl_qp->fake_qp.send_cq = &ptl_qp->send_cq->fake_cq;
 	ptl_qp->fake_qp.recv_cq = &ptl_qp->recv_cq->fake_cq;
 	ptl_qp->fake_qp.qp_context = attr->qp_context;
@@ -76,6 +77,7 @@ struct ptl_qp *ptl_qp_create(struct ptl_cm_id *ptl_id, struct ptl_pd *ptl_pd,
 	spin_lock(&ptl_qp->ptl_id->bxiv3_dev->qp_map_lock);
 	hash_add(ptl_qp->ptl_id->bxiv3_dev->qp_map, &qp_map_entry->node, ptl_qp->qpn);
 	spin_unlock(&ptl_id->bxiv3_dev->qp_map_lock);
+
 	PTL_DEBUG("Added Queue Pair Number: %d in the Queue pair map successfully", ptl_qp->qpn);
 	return ptl_qp;
 

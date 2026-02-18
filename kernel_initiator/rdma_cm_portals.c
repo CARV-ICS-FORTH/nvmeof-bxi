@@ -6,6 +6,7 @@
 #include "rdma_cm_portals.h"
 #include "ib_portals.h"
 #include "linux/dma-direction.h"
+#include "portals4_bxiext.h"
 #include "ptl_bxiv3_dev_map.h"
 #include "ptl_bxiv3_device.h"
 #include "ptl_cm_id.h"
@@ -32,6 +33,8 @@
 #include <rdma/rdma_cm.h>
 #include <rdma/rdma_user_cm.h>
 
+
+#define RDMA_PTL_MSG_BUFFER_SIZE 256UL
 #define PTL_INITIATOR_DEPTH 32
 /* --- Rate-limited "unimplemented" logging ---- */
 #define GES_UNIMPL_RATELIMIT_PERIOD HZ
@@ -61,16 +64,18 @@ static inline int ges_ret(int fail_code)
 }
 
 
-struct rdma_cm_ptl_send_buffer {
-	ptl_md_t md;
-	ptl_handle_md_t md_handle;
-	struct ptl_conn_msg conn_msg;
-};
-
-const char *ptl_msg_types[PTL_NUM_MSGS] = {"PTL_OPEN_CONNECTION", "PTL_OPEN_CONNECTION_REPLY", "PTL_OPEN_CONNECTION", "PTL_OPEN_CONNECTION_REPLY"};
 
 
-static int rdma_cm_ptl_send_request(struct rdma_cm_ptl_send_buffer *send_buffer, struct ptl_cm_id *ptl_id)
+const char *ptl_msg_types[PTL_NUM_MSGS] = {"NVMeOF_cmd",
+                                           "NVMeOF_cpl",
+                                           "NVMeOF_rma",
+                                           "PTL_OPEN_CONNECTION",
+                                           "PTL_OPEN_CONNECTION_REPLY",
+                                           "PTL_OPEN_CONNECTION",
+                                           "PTL_OPEN_CONNECTION_REPLY"
+                                          };
+
+static int rdma_cm_ptl_send_request(struct ptl_conn_send_buffer *send_buffer, struct ptl_cm_id *ptl_id)
 {
 	extern struct ptl_bxiv3_dev_map bxiv3_dev_map;
 
@@ -92,15 +97,15 @@ static int rdma_cm_ptl_send_request(struct rdma_cm_ptl_send_buffer *send_buffer,
 		return -EIO;
 	}
 	send_buffer->md.options = 0;
-	// send_buffer->md.eq_handle = ptl_id->bxiv3_dev->conn_mgmt_eq->eq;
-	send_buffer->md.eq_handle = bxiv3_dev_map.bxiv3_dev[0]->conn_mgmt_eq->eq;
-	PTL_DEBUG("Associated the send buffer with device id: %d", bxiv3_dev_map.bxiv3_dev[0]->iface_id);
+	send_buffer->md.eq_handle = ptl_id->bxiv3_dev->conn_mgmt_eq->eq;
+	// send_buffer->md.eq_handle = bxiv3_dev_map.bxiv3_dev[0]->conn_mgmt_eq->eq;
+	PTL_DEBUG("Associated the send buffer with device id: %d", ptl_id->bxiv3_dev->iface_id);
 	send_buffer->md.ct_handle = PTL_CT_NONE;
+	PTL_CHECK(ptl_id->bxiv3_dev, PTL_BXIV3_DEVICE);
 
-
-	rc = PtlMDBind(bxiv3_dev_map.bxiv3_dev[0]->nicia_handle, &send_buffer->md, &send_buffer->md_handle);
+	rc = PtlMDBind(ptl_id->bxiv3_dev->nicia_handle, &send_buffer->md, &send_buffer->md_handle);
 	if (rc != PTL_OK) {
-		PTL_FATAL("PtlMDBind failed with code: %d\n", rc);
+		PTL_FATAL("PtlMDBind failed with reason: %s", PtlToStr(rc, PTL_STR_ERROR));
 	}
 
 	// ptl_hdr_data_t hdr = PTL_NI_ARG_INVALID;
@@ -116,7 +121,7 @@ static int rdma_cm_ptl_send_request(struct rdma_cm_ptl_send_buffer *send_buffer,
 	            PTL_ACK_REQ,/* acknowledgment requested */
 	            target, /* target process */
 	            peer_info->dest.pte,  /* portal table index */
-	            0X01ULL, /* match bits */
+	            0,
 	            0, /* remote offset */
 	            send_buffer,
 	            message_type);
@@ -128,7 +133,7 @@ static int rdma_cm_ptl_send_request(struct rdma_cm_ptl_send_buffer *send_buffer,
 	return 0;
 }
 
-#define RDMA_PTL_MSG_BUFFER_SIZE 256UL
+
 /* --- API stubs ---- */
 
 struct rdma_cm_id *__rdma_cm_portals_create_kernel_id(
@@ -252,61 +257,64 @@ EXPORT_SYMBOL_GPL(rdma_cm_portals_resolve_route);
 int rdma_cm_portals_connect_locked(struct rdma_cm_id *id,
                                    struct rdma_conn_param *param)
 {
-	struct rdma_cm_ptl_send_buffer *request_buf;
+	struct ptl_conn_send_buffer *send_buffer;
 	char *private_data_buf;
 	struct ptl_cm_id *ptl_id = container_of(id, struct ptl_cm_id, fake_cm_id);
-	if (ptl_id->object_type != PTL_CM_ID) {
-		PTL_FATAL("Corrupted ptl_cm_id");
-		return -EINVAL;
-	}
+	PTL_CHECK(ptl_id, PTL_CM_ID);
+
 	if (0 == param->initiator_depth) {
 		PTL_DEBUG("Caution initiator_depth set to 0. Setting it to %d", PTL_INITIATOR_DEPTH);
 		param->initiator_depth = PTL_INITIATOR_DEPTH;
 	}
-	request_buf = kzalloc(RDMA_PTL_MSG_BUFFER_SIZE, GFP_KERNEL);
-	if (!request_buf) {
+
+	send_buffer = kzalloc(RDMA_PTL_MSG_BUFFER_SIZE, GFP_KERNEL);
+	if (!send_buffer) {
 		PTL_FATAL("Out of memory");
 		return -ENOMEM;
 	}
-	request_buf->conn_msg.msg_header.version = PTL_SPDK_PROTOCOL_VERSION;
-	request_buf->conn_msg.msg_header.msg_type = PTL_OPEN_CONNECTION;
-	request_buf->conn_msg.msg_header.total_msg_size = sizeof(request_buf->conn_msg) + param->private_data_len;
-	if (request_buf->conn_msg.msg_header.total_msg_size > RDMA_PTL_MSG_BUFFER_SIZE) {
+	send_buffer->object_type = PTL_CONN_SEND_BUFFER;
+	send_buffer->conn_msg.msg_header.version = PTL_SPDK_PROTOCOL_VERSION;
+	send_buffer->conn_msg.msg_header.msg_type = PTL_OPEN_CONNECTION;
+	send_buffer->conn_msg.msg_header.total_msg_size = sizeof(send_buffer->conn_msg) + param->private_data_len;
+	if (send_buffer->conn_msg.msg_header.total_msg_size > RDMA_PTL_MSG_BUFFER_SIZE) {
 		PTL_FATAL("Buffer too small");
 	}
+	/*Setup self*/
+	send_buffer->conn_msg.msg_header.peer_info.src.nid = ptl_id->nid;
+	send_buffer->conn_msg.msg_header.peer_info.src.pid = ptl_id->pid;
+	send_buffer->conn_msg.msg_header.peer_info.src.pte = PTL_CP_SERVER_PTE;
+	/*Destination*/
+	send_buffer->conn_msg.msg_header.peer_info.dest.nid = ptl_id->remote_nid;
+	send_buffer->conn_msg.msg_header.peer_info.dest.pid = ptl_id->remote_pid;
+	send_buffer->conn_msg.msg_header.peer_info.dest.pte = PTL_CP_SERVER_PTE;
 
-	request_buf->conn_msg.msg_header.peer_info.src.nid = ptl_id->nid;
-	request_buf->conn_msg.msg_header.peer_info.src.pid = ptl_id->pid;
-	request_buf->conn_msg.msg_header.peer_info.src.pte = PTL_CP_SERVER_PTE;
-	request_buf->conn_msg.conn_open.initiator_qp_num = ptl_id->ptl_qp->qpn;
-	PTL_DEBUG("Initator QP NUM: %d", request_buf->conn_msg.conn_open.initiator_qp_num);
+
+	PTL_DEBUG("Initator QP NUM: %d", send_buffer->conn_msg.conn_open.initiator_qp_num);
 	/*Inform the target about the match bits I (the initiator) use for my recv operations*/
-	request_buf->conn_msg.conn_open.recv_match_bits = ptl_id->ptl_qp->match_bits;
-	request_buf->conn_msg.conn_open.cq_id = ptl_id->ptl_qp->recv_cq->ptl_cq_id;
-	request_buf->conn_msg.conn_open.rma_match_bits = PTL_UUID_RMA_MASK;
+	send_buffer->conn_msg.conn_open.msg_pte = ptl_id->ptl_qp->recv_cq->pte;
+	send_buffer->conn_msg.conn_open.rma_pte = PTL_RMA_PTE;
+	send_buffer->conn_msg.conn_open.cq_id = ptl_id->ptl_qp->recv_cq->ptl_cq_id;
+	send_buffer->conn_msg.conn_open.initiator_qp_num = ptl_id->ptl_qp->qpn;
 
-	memcpy(&request_buf->conn_msg.conn_open.src_addr, &id->route.addr.src_addr,
-	       sizeof(request_buf->conn_msg.conn_open.src_addr));
-	/* Setup target process identifier */
-	request_buf->conn_msg.msg_header.peer_info.dest.nid = ptl_id->target_nid;
-	request_buf->conn_msg.msg_header.peer_info.dest.pid = ptl_id->target_pid;
-	request_buf->conn_msg.msg_header.peer_info.dest.pte = PTL_CP_SERVER_PTE;
+	memcpy(&send_buffer->conn_msg.conn_open.src_addr, &id->route.addr.src_addr,
+	       sizeof(send_buffer->conn_msg.conn_open.src_addr));
+
 	/*Now serialize the conn param staff*/
-	request_buf->conn_msg.conn_open.conn_param = *param;
+	send_buffer->conn_msg.conn_open.conn_param = *param;
 	/*Intentionally, let the receiver fix this*/
-	request_buf->conn_msg.conn_open.conn_param.private_data = NULL;
+	send_buffer->conn_msg.conn_open.conn_param.private_data = NULL;
 	PTL_DEBUG("Initiator depth: %u", param->initiator_depth);
 
 	if (param->private_data) {
-		private_data_buf = (char*)request_buf + sizeof(*request_buf);
+		private_data_buf = (char*)send_buffer + sizeof(*send_buffer);
 		memcpy(private_data_buf, param->private_data, param->private_data_len);
-		request_buf->conn_msg.conn_open.conn_param.private_data_len = param->private_data_len;
+		send_buffer->conn_msg.conn_open.conn_param.private_data_len = param->private_data_len;
 		PTL_DEBUG("CONN_PARAM: Serialized connection params of size: %u "
 		          "in OPEN_CONNECTION_REQUEST conn_msg size is: %lu "
 		          "total message size: %llu param private data len = %u",
 		          param->private_data_len,
-		          sizeof(request_buf->conn_msg),
-		          request_buf->conn_msg.msg_header.total_msg_size, param->private_data_len);
+		          sizeof(send_buffer->conn_msg),
+		          send_buffer->conn_msg.msg_header.total_msg_size, param->private_data_len);
 	}
 
 	/*Keep a copy also of conn param in ptl_cm_id, Why? XXX TODO XXX*/
@@ -320,8 +328,7 @@ int rdma_cm_portals_connect_locked(struct rdma_cm_id *id,
 		       param->private_data_len);
 	}
 	ptl_id->cm_id_state = PTL_CM_CONNECTING;
-	rdma_cm_ptl_send_request(request_buf, ptl_id);
-
+	rdma_cm_ptl_send_request(send_buffer, ptl_id);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_connect_locked);
@@ -329,7 +336,7 @@ EXPORT_SYMBOL_GPL(rdma_cm_portals_connect_locked);
 int rdma_cm_portals_disconnect(struct rdma_cm_id *id)
 {
 	(void)id;
-	RDMACM_IB_UNIMPL("Sorry");
+	PTL_FATAL("Unimplemented Sorry");
 	return -EOPNOTSUPP;
 }
 
