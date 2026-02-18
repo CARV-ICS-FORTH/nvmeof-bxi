@@ -65,6 +65,9 @@ int ptl_print_nvme_cmd(const struct spdk_nvme_cmd *cmd, const char *prefix, int 
 	case SPDK_NVME_OPC_IO_MANAGEMENT_SEND:
 		command = "OPC_IO_MANAGEMET";
 		break;
+	case 0x7f: // NVMe-oF Fabric Command (CONNECT)
+		command = "FABRIC_CONNECT";
+		break;
 	default:
 		command = "UNKNOWN";
 		break;
@@ -75,33 +78,51 @@ int ptl_print_nvme_cmd(const struct spdk_nvme_cmd *cmd, const char *prefix, int 
 	SPDK_PTL_INFO("%s: NSID: %u", prefix, cmd->nsid);
 	SPDK_PTL_INFO("%s: CID: %u", prefix, cmd->cid);
 	SPDK_PTL_INFO("%s:  FUSE: %u", prefix, cmd->fuse);
-	SPDK_PTL_INFO("%s:  PSDT: %u\n", prefix, cmd->psdt);
+	SPDK_PTL_INFO("%s:  PSDT: %u", prefix, cmd->psdt);
 	SPDK_PTL_INFO("%s:  CDW10-15: 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x", prefix,
 		      cmd->cdw10, cmd->cdw11, cmd->cdw12, cmd->cdw13, cmd->cdw14, cmd->cdw15);
-	// If READ or WRITE, show data pointer (PRP / SGL)
-	if (cmd->opc != SPDK_NVME_OPC_READ && cmd->opc != SPDK_NVME_OPC_WRITE) {
-		return 1;
-	}
-	if (0 == cmd->psdt) {
-		SPDK_PTL_FATAL("%s *WEIRD* PRPs used instead of SGLs", prefix);
-	}
 
-	// Print SGL descriptor - check type/subtype first to determine which union member to use
-	uint8_t sgl_type = cmd->dptr.sgl1.generic.type;
-	uint8_t sgl_subtype = cmd->dptr.sgl1.generic.subtype;
-	if (sgl_type != SPDK_NVME_SGL_TYPE_KEYED_DATA_BLOCK) {
-		SPDK_PTL_FATAL("%s *WEIRD* sgl is not of keyed type  sgl_type: %u", prefix, sgl_type);
+	// Print DPTR (CDW6-9) - Raw values (accessed via union)
+	SPDK_PTL_INFO("%s:  DPTR (CDW6-7): 0x%016" PRIx64, prefix, cmd->dptr.sgl1.address);
+	SPDK_PTL_INFO("%s:  DPTR (CDW8-9): 0x%08x 0x%08x", prefix,
+		      ((uint32_t *)&cmd->dptr.sgl1.address)[2],
+		      ((uint32_t *)&cmd->dptr.sgl1.address)[3]);
+	// Decode and print SGL/DPTR information for all commands with PSDT != 0
+	if (cmd->psdt != 0) {
+		uint8_t sgl_type = cmd->dptr.sgl1.generic.type;
+		uint8_t sgl_subtype = cmd->dptr.sgl1.generic.subtype;
+
+		SPDK_PTL_INFO("%s:  SGL Type: 0x%02x, Subtype: 0x%02x", prefix, sgl_type, sgl_subtype);
+		SPDK_PTL_INFO("%s:  SGL Address: 0x%016" PRIx64, prefix, cmd->dptr.sgl1.address);
+
+		// Decode based on SGL type
+		if (sgl_type == SPDK_NVME_SGL_TYPE_DATA_BLOCK) {
+			// In-capsule data (unkeyed)
+			SPDK_PTL_INFO("%s:  SGL Descriptor: DATA_BLOCK (In-Capsule)", prefix);
+			SPDK_PTL_INFO("%s:  Length: %u bytes", prefix, cmd->dptr.sgl1.unkeyed.length);
+			if (sgl_subtype == SPDK_NVME_SGL_SUBTYPE_OFFSET) {
+				SPDK_PTL_INFO("%s:  Subtype: OFFSET (offset into capsule)", prefix);
+			}
+		} else if (sgl_type == SPDK_NVME_SGL_TYPE_KEYED_DATA_BLOCK) {
+			// Remote RDMA buffer (keyed)
+			SPDK_PTL_INFO("%s:  SGL Descriptor: KEYED_DATA_BLOCK (Remote RDMA)", prefix);
+			SPDK_PTL_INFO("%s:  Length: %u bytes", prefix, cmd->dptr.sgl1.keyed.length);
+			SPDK_PTL_INFO("%s:  RKey: 0x%08x", prefix, cmd->dptr.sgl1.keyed.key);
+			if (sgl_subtype == SPDK_NVME_SGL_SUBTYPE_ADDRESS) {
+				SPDK_PTL_INFO("%s:  Subtype: ADDRESS (remote memory address)", prefix);
+			}
+		} else if (sgl_type == SPDK_NVME_SGL_TYPE_BIT_BUCKET) {
+			SPDK_PTL_INFO("%s:  SGL Descriptor: BIT_BUCKET (discard data)", prefix);
+			SPDK_PTL_INFO("%s:  Length: %u bytes", prefix, cmd->dptr.sgl1.unkeyed.length);
+		} else {
+			SPDK_PTL_INFO("%s:  SGL Descriptor: UNKNOWN TYPE (0x%02x)", prefix, sgl_type);
+		}
+	} else if (cmd->psdt == 0) {
+		// PRPs used
+		SPDK_PTL_INFO("%s:  Data Transfer: PRPs (not SGL)", prefix);
+		SPDK_PTL_INFO("%s:  PRP1: 0x%016" PRIx64, prefix, cmd->dptr.prp.prp1);
+		SPDK_PTL_INFO("%s:  PRP2: 0x%016" PRIx64, prefix, cmd->dptr.prp.prp2);
 	}
-
-	SPDK_PTL_INFO("%s: dptr.sgl1: addr=0x%016" PRIx64 " type=%u subtype=%u",
-		      prefix,
-		      cmd->dptr.sgl1.address,
-		      sgl_type, sgl_subtype);
-
-	// Print length based on SGL type
-	SPDK_PTL_INFO("%s: dptr.sgl1.keyed: length=%u key: %u",
-		      prefix,
-		      cmd->dptr.sgl1.keyed.length, cmd->dptr.sgl1.keyed.key);
 
 	return 1;
 }

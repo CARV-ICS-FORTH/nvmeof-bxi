@@ -313,7 +313,14 @@ static struct ptl_context_op_meta *ptl_cnxt_process_ack(ptl_event_t event, struc
 		       event.ni_fail_type, event.type, send_meta->send_op.qp_num);
 
 	if (event.ni_fail_type != PTL_NI_OK) {
-		SPDK_PTL_FATAL("Operation failed with code: %d", event.ni_fail_type);
+		if (send_meta->obj_type == PTL_RDMA_WRITE_OP) {
+			SPDK_PTL_FATAL(
+				"Operation of type PTL_RDMA_WRITE_OP failed with reason: %s faulting address: 0x%016lx",
+				PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE), (unsigned long)send_meta->rdma_write_op.addr);
+		}
+		SPDK_PTL_FATAL(
+			"Operation of type PTL_SEND_OP failed with reason: %s faulting address: 0x%016lx",
+			PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE), (unsigned long)send_meta->send_op.addr);
 	}
 
 	if (PTL_RDMA_WRITE_OP == send_meta->obj_type &&
@@ -641,6 +648,7 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 					       "event is for: %d. This case is FATAL for the non-matching case",
 					       ptl_cq_get_id(ptl_cq), op_meta->cq_id);
 			}
+			ptl_print_event(op_meta, false);
 			ptl_cnxt_destroy_op_meta(op_meta);
 			op_meta = NULL;
 			++events_processed;

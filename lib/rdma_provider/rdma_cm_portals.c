@@ -268,7 +268,8 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
 	ptl_process_t target;
 	ptl_md_t md;
-	ptl_hdr_data_t object_type = send_buffer->conn_msg.msg_header.msg_type;
+	ptl_hdr_data_t object_type = ptl_uuid_set_op_type(object_type,
+				     send_buffer->conn_msg.msg_header.msg_type);
 	;
 	int rc;
 	struct ptl_conn_comm_pair_info *peer_info = &send_buffer->conn_msg.msg_header.peer_info;
