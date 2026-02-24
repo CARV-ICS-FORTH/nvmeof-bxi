@@ -640,12 +640,14 @@ spdk_rdma_provider_qp_queue_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 	if (first == NULL || spdk_rdma_qp == NULL) {
 		SPDK_PTL_FATAL("NULL args");
 	}
-	spdk_rdma_qp->stats->send.num_submitted_wrs++;
-	last = first;
-	while (last->next != NULL) {
-		last = last->next;
-		spdk_rdma_qp->stats->send.num_submitted_wrs++;
-	}
+	//vanilla: We calculate the stats in flush_send_wrs where we
+	//do also some additional sanity checks.
+	// spdk_rdma_qp->stats->send.num_submitted_wrs++;
+	// last = first;
+	// while (last->next != NULL) {
+	// 	last = last->next;
+	// 	spdk_rdma_qp->stats->send.num_submitted_wrs++;
+	// }
 
 	// SPDK_PTL_DEBUG("NVMe: Enqueueing SEND WRS request as in the VANILLA CASE for "
 	//                "Portals num of enqueued requests: %lu",
@@ -913,6 +915,26 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 	}
 }
 
+/**
+  * Parses, counts, and updates the submitted wrs. In debug mode it also checks
+  * the case when the target sends a chain of rdma reads which in the current
+  * version is still unsupported
+ */
+bool spdk_rdma_provider_ptl_parse_wr_list(struct spdk_rdma_provider_qp *spdk_rdma_qp)
+{
+	struct ibv_send_wr *wr;
+	uint32_t count_rdma_reads = 0;
+
+	for (wr = spdk_rdma_qp->send_wrs.first; wr != NULL;
+	     wr = wr->next, ++spdk_rdma_qp->stats->send.num_submitted_wrs) {
+		if (wr->opcode == IBV_WR_RDMA_READ) {
+			++count_rdma_reads;
+		}
+	}
+	if (count_rdma_reads > 1) {
+		SPDK_PTL_FATAL("Sorry unsupported feature with multiple rdma reads");
+	}
+}
 
 int
 spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
@@ -934,10 +956,10 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 #endif
 
 	if (spdk_unlikely(NULL == spdk_rdma_qp->send_wrs.first)) {
-		// SPDK_PTL_DEBUG("Nothing to SEND");
 		return 0;
 	}
 
+	spdk_rdma_provider_ptl_parse_wr_list(spdk_rdma_qp);
 	SPDK_PTL_DEBUG("send_wrs list start....");
 	for (struct ibv_send_wr *wr = spdk_rdma_qp->send_wrs.first; wr != NULL; wr = wr->next) {
 
