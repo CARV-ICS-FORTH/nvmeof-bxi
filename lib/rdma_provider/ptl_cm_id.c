@@ -28,6 +28,9 @@ struct ptl_cm_id *ptl_cm_id_create(struct rdma_cm_ptl_event_channel *ptl_channel
 	ptl_id->fake_cm_id.context = context;
 	ptl_context = ptl_cnxt_get();
 	ptl_id->fake_cm_id.verbs = ptl_cnxt_get_ibv_context(ptl_context);
+	if (NULL == ptl_id->fake_cm_id.verbs) {
+		SPDK_PTL_FATAL("fake_cm_id.verbs is NULL");
+	}
 	ptl_id->fake_cm_id.ps = RDMA_PS_TCP;
 	ptl_id->ptl_qp_num = __sync_fetch_and_add(&ptl_local_qp_num, 1);
 	ptl_id->cm_id_state = PTL_CM_UNCONNECTED;

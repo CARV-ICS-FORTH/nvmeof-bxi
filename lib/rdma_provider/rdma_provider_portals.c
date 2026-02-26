@@ -642,12 +642,12 @@ spdk_rdma_provider_qp_queue_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 	}
 	//vanilla: We calculate the stats in flush_send_wrs where we
 	//do also some additional sanity checks.
-	// spdk_rdma_qp->stats->send.num_submitted_wrs++;
-	// last = first;
-	// while (last->next != NULL) {
-	// 	last = last->next;
-	// 	spdk_rdma_qp->stats->send.num_submitted_wrs++;
-	// }
+	spdk_rdma_qp->stats->send.num_submitted_wrs++;
+	last = first;
+	while (last->next != NULL) {
+		last = last->next;
+		spdk_rdma_qp->stats->send.num_submitted_wrs++;
+	}
 
 	// SPDK_PTL_DEBUG("NVMe: Enqueueing SEND WRS request as in the VANILLA CASE for "
 	//                "Portals num of enqueued requests: %lu",
@@ -926,7 +926,7 @@ bool spdk_rdma_provider_ptl_parse_wr_list(struct spdk_rdma_provider_qp *spdk_rdm
 	uint32_t count_rdma_reads = 0;
 
 	for (wr = spdk_rdma_qp->send_wrs.first; wr != NULL;
-	     wr = wr->next, ++spdk_rdma_qp->stats->send.num_submitted_wrs) {
+	     wr = wr->next/*, ++spdk_rdma_qp->stats->send.num_submitted_wrs*/) {
 		if (wr->opcode == IBV_WR_RDMA_READ) {
 			++count_rdma_reads;
 		}
@@ -934,6 +934,22 @@ bool spdk_rdma_provider_ptl_parse_wr_list(struct spdk_rdma_provider_qp *spdk_rdm
 	if (count_rdma_reads > 1) {
 		SPDK_PTL_FATAL("Sorry unsupported feature with multiple rdma reads");
 	}
+}
+
+static inline int spdk_rdma_provider_ptl_decode_cid(uint16_t cid, uint16_t queue_size, int qpn)
+{
+	uint16_t hw_queue_idx = cid / queue_size;
+	uint16_t local_tag    = cid % queue_size;
+
+	SPDK_PTL_DEBUG("QPN: %d CID decode: raw=%u hw_queue_idx=%u local_tag=%u", qpn,
+		       (unsigned)cid, (unsigned)hw_queue_idx, (unsigned)local_tag);
+	return 1;
+}
+
+static inline uint16_t spdk_rdma_provider_ptl_extract_CID(void * args)
+{
+	struct spdk_nvme_cpl *cpl = args;
+	return cpl->cid;
 }
 
 int
@@ -1047,6 +1063,11 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				    send_meta,
 				    ptl_qp->ptl_cm_id->session_id);
 #else
+			SPDK_PTL_DEBUG("%s", spdk_rdma_provider_ptl_decode_cid(
+					       spdk_rdma_provider_ptl_extract_CID((void *)wr->sg_list[i].addr),
+					       ptl_qp->ptl_cm_id->nvme_cpl_queue_size,
+					       ptl_qp->ptl_cm_id->ptl_qp_num) ? "" : "could not decide cid");
+
 			send_meta->md.start = (ptl_addr_t)wr->sg_list[i].addr;
 			send_meta->md.length = wr->sg_list[i].length;
 			send_meta->md.ct_handle = PTL_CT_NONE;
@@ -1058,12 +1079,12 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 			send_meta->msg.pt_index = ptl_qp->ptl_cm_id->remote_msg_pte;
 			send_meta->msg.hdr_data = ptl_uuid_set_op_type(
 							  ptl_qp->ptl_cm_id->session_id,
-							  send_meta->md.length == sizeof(struct spdk_nvme_cmd)
-							  ? NVMeOF_cmd
+							  send_meta->md.length == sizeof(struct spdk_nvme_cmd) ? NVMeOF_cmd
 							  : NVMeOF_cpl);
 			send_meta->msg.remote_offset = 0;
 			send_meta->msg.user_ptr = send_meta;
-			rc = PtlMsgPutOnce(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), (const ptl_md_t *)&send_meta->md,
+			rc = PtlMsgPutOnce(ptl_cnxt_get_ni_handle(ptl_cnxt_get()),
+					   (const ptl_md_t *)&send_meta->md,
 					   (const ptl_msg_t *)&send_meta->msg);
 #endif
 

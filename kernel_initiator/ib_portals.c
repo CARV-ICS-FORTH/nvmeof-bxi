@@ -38,7 +38,7 @@
 #define GES_UNIMPL_RATELIMIT_BURST 10
 
 static DEFINE_RATELIMIT_STATE(ges_unimpl_rs, GES_UNIMPL_RATELIMIT_PERIOD,
-                              GES_UNIMPL_RATELIMIT_BURST);
+			      GES_UNIMPL_RATELIMIT_BURST);
 
 #define IB_PORTALS4_UNIMPL(fmt, ...)                                           \
   do {                                                                         \
@@ -83,7 +83,7 @@ static DEFINE_MUTEX(ib_portals_client_lock);
 static inline bool ib_portals_uses_virt_dma(struct ib_device *dev)
 {
 	struct ptl_bxiv3_device *bxiv3_dev =
-	        container_of(dev, struct ptl_bxiv3_device, fake_ib_dev);
+		container_of(dev, struct ptl_bxiv3_device, fake_ib_dev);
 	struct device *device;
 	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
 	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
@@ -91,11 +91,11 @@ static inline bool ib_portals_uses_virt_dma(struct ib_device *dev)
 }
 
 int ib_portals_dma_virt_map_sg(struct ib_device *ibdev, struct scatterlist *sg,
-                               int nents)
+			       int nents)
 {
 	PTL_WARN("Caution got into this VIRT_DMA staff");
 	struct ptl_bxiv3_device *bxiv3_dev =
-	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+		container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
 	struct scatterlist *s;
 	int i;
 	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
@@ -109,17 +109,18 @@ int ib_portals_dma_virt_map_sg(struct ib_device *ibdev, struct scatterlist *sg,
 
 /*Again just mimicing the behaviour*/
 static inline int ib_portals_dma_map_sg_attrs(struct ib_device *ibdev,
-                                              struct scatterlist *sg, int nents,
-                                              enum dma_data_direction direction,
-                                              unsigned long dma_attrs)
+		struct scatterlist *sg, int nents,
+		enum dma_data_direction direction,
+		unsigned long dma_attrs)
 {
 	struct device *device;
 	struct ptl_bxiv3_device *bxiv3_dev =
-	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+		container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
 
 	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
-	if (ib_portals_uses_virt_dma(ibdev))
+	if (ib_portals_uses_virt_dma(ibdev)) {
 		return ib_portals_dma_virt_map_sg(ibdev, sg, nents);
+	}
 
 	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
 	dma_attrs |= DMA_ATTR_FORCE_CONTIGUOUS;
@@ -145,8 +146,8 @@ EXPORT_SYMBOL_GPL(ib_portals_dealloc_pd);
 /* CQ */
 
 struct ib_cq *ib_portals_alloc_cq(void *ibdev, void *cq_context, int cqe,
-                                  int comp_vector,
-                                  enum ib_poll_context poll_ctx)
+				  int comp_vector,
+				  enum ib_poll_context poll_ctx)
 {
 	(void)ibdev;
 	(void)cq_context;
@@ -168,13 +169,13 @@ EXPORT_SYMBOL_GPL(ib_portals_free_cq);
 
 /* Some code uses a CQ pool helper; make them no-ops compatible */
 struct ib_cq *ib_portals_cq_pool_get(struct ib_device *dev, unsigned int nr_cqe,
-                                     int comp_vector_hint,
-                                     enum ib_poll_context poll_ctx)
+				     int comp_vector_hint,
+				     enum ib_poll_context poll_ctx)
 {
 
 	struct ptl_cq *ptl_cq;
 	struct ptl_bxiv3_device *bxiv3_dev =
-	        container_of(dev, struct ptl_bxiv3_device, fake_ib_dev);
+		container_of(dev, struct ptl_bxiv3_device, fake_ib_dev);
 	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
 
 	ptl_cq = ptl_cq_pool_get(bxiv3_dev->ptl_cq_pool, nr_cqe, poll_ctx);
@@ -205,7 +206,7 @@ EXPORT_SYMBOL_GPL(ib_portals_destroy_qp);
 
 /* DMA helpers (pretend success) */
 void ib_portals_dma_unmap_single(struct ib_device *ibdev, dma_addr_t addr,
-                                 size_t size, enum dma_data_direction dir)
+				 size_t size, enum dma_data_direction dir)
 {
 	struct ptl_bxiv3_device *bxiv3_dev;
 	struct device *device;
@@ -235,18 +236,19 @@ EXPORT_SYMBOL_GPL(ib_portals_dma_unmap_single);
 
 /*Checked for ib_portals_uses_virt_dma*/
 dma_addr_t ib_portals_dma_map_single(struct ib_device *ibdev, void *cpu_addr,
-                                     size_t size, enum dma_data_direction dir)
+				     size_t size, enum dma_data_direction dir)
 {
 	PTL_DEBUG("DMA MAP single");
 	struct ptl_bxiv3_device *bxiv3_dev =
-	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+		container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
 	struct device *device;
 	dma_addr_t dma_addr;
 	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
 	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
 
-	if (ib_portals_uses_virt_dma(ibdev))
+	if (ib_portals_uses_virt_dma(ibdev)) {
 		return (uintptr_t)cpu_addr;
+	}
 	dma_addr = dma_map_single(device, cpu_addr, size, dir);
 	// PTL_DEBUG("CPU Virtual Address (decimal): %llu <---> DMA Address (decimal):
 	// "
@@ -262,18 +264,19 @@ int ib_portals_dma_mapping_error(struct ib_device *ibdev, dma_addr_t dma_addr)
 {
 	PTL_DEBUG("DMA CHECK for MAPPING ERROR");
 	struct ptl_bxiv3_device *bxiv3_dev =
-	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+		container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
 	struct device *device;
 	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
 	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
-	if (ib_uses_virt_dma(ibdev))
+	if (ib_uses_virt_dma(ibdev)) {
 		return 0;
+	}
 	return dma_mapping_error(device, dma_addr);
 }
 EXPORT_SYMBOL_GPL(ib_portals_dma_mapping_error);
 
 int ib_portals_dma_unmap_sg(struct ib_device *ibdev, struct scatterlist *sgl,
-                            int nents, enum dma_data_direction dir)
+			    int nents, enum dma_data_direction dir)
 {
 	struct ptl_bxiv3_device *bxiv3_dev;
 	struct device *device;
@@ -281,7 +284,8 @@ int ib_portals_dma_unmap_sg(struct ib_device *ibdev, struct scatterlist *sgl,
 	int i;
 
 	for_each_sg(sgl, s, nents, i) {
-		PTL_DEBUG("DMA_UNMAP_sg: SG[%d]: virt_addr=%p, iova=%llx, length=%u", i, sg_virt(s), sg_dma_address(s), s->length);
+		PTL_DEBUG("DMA_UNMAP_sg: SG[%d]: virt_addr=%p, iova=%llx, length=%u", i, sg_virt(s),
+			  sg_dma_address(s), s->length);
 	}
 
 	if (!ibdev || !sgl) {
@@ -308,7 +312,7 @@ int ib_portals_dma_unmap_sg(struct ib_device *ibdev, struct scatterlist *sgl,
 EXPORT_SYMBOL_GPL(ib_portals_dma_unmap_sg);
 
 int ib_portals_dma_map_sg(struct ib_device *ibdev, struct scatterlist *sgl,
-                          int nents, enum dma_data_direction dir)
+			  int nents, enum dma_data_direction dir)
 {
 	struct scatterlist *s;
 	int ret;
@@ -334,32 +338,34 @@ EXPORT_SYMBOL_GPL(ib_portals_dma_map_sg);
 
 /*Checked for ib_portals_uses_virt_dma*/
 void ib_portals_dma_sync_single_for_cpu(struct ib_device *ibdev,
-                                        dma_addr_t dma_handle, size_t size,
-                                        enum dma_data_direction dir)
+					dma_addr_t dma_handle, size_t size,
+					enum dma_data_direction dir)
 {
 	PTL_DEBUG("DMA SYNC for CPU");
 	struct ptl_bxiv3_device *bxiv3_dev =
-	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+		container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
 	struct device *device;
 	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
 	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
-	if (!ib_portals_uses_virt_dma(ibdev))
+	if (!ib_portals_uses_virt_dma(ibdev)) {
 		return dma_sync_single_for_cpu(device, dma_handle, size, dir);
+	}
 }
 EXPORT_SYMBOL_GPL(ib_portals_dma_sync_single_for_cpu);
 
 void ib_portals_dma_sync_single_for_device(struct ib_device *ibdev,
-                                           dma_addr_t dma_handle, size_t size,
-                                           enum dma_data_direction dir)
+		dma_addr_t dma_handle, size_t size,
+		enum dma_data_direction dir)
 {
 	PTL_DEBUG("DMA SYNC for DEVICE");
 	struct ptl_bxiv3_device *bxiv3_dev =
-	        container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+		container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
 	struct device *device;
 	PTL_CHECK(bxiv3_dev, PTL_BXIV3_DEVICE);
 	device = PtlGetDriverDev(bxiv3_dev->nicia_handle);
-	if (!ib_portals_uses_virt_dma(ibdev))
+	if (!ib_portals_uses_virt_dma(ibdev)) {
 		return dma_sync_single_for_device(device, dma_handle, size, dir);
+	}
 }
 EXPORT_SYMBOL_GPL(ib_portals_dma_sync_single_for_device);
 
@@ -407,22 +413,22 @@ static void ib_portals_send_nvmeof_cmd(struct ptl_qp *ptl_qp, struct ib_send_wr 
 	msg.user_ptr = send_op;
 	msg.hdr_data = ptl_qp->ptl_id->session_id;
 	PTL_DEBUG("Send NVMeOF cmd: Target qp num: %d initiator qp num: %d cq_id: %d",
-	          ptl_uuid_get_target_qp_num(msg.hdr_data),
-	          ptl_uuid_get_initiator_qp_num(msg.hdr_data),
-	          ptl_uuid_get_cq_num(msg.hdr_data));
+		  ptl_uuid_get_target_qp_num(msg.hdr_data),
+		  ptl_uuid_get_initiator_qp_num(msg.hdr_data),
+		  ptl_uuid_get_cq_num(msg.hdr_data));
 
 	rc = PtlMsgPutOnce(ptl_qp->ptl_id->bxiv3_dev->nicia_handle, &md, &msg);
 	if (PTL_OK != rc) {
 		PTL_FATAL("Failed to send NVMeOF command with error: %s", PtlToStr(rc, PTL_STR_ERROR));
 	}
 	PTL_DEBUG("Send NVMeOF command to {nid:%d, pid: %d, pte: %d} for nvme "
-	          "command address: SGE[0]: addr=0x%llx, len=%u successfully",
-	          msg.target_id.phys.nid, msg.target_id.phys.pid, msg.pt_index,
-	          dma_addr, length);
+		  "command address: SGE[0]: addr=0x%llx, len=%u successfully",
+		  msg.target_id.phys.nid, msg.target_id.phys.pid, msg.pt_index,
+		  dma_addr, length);
 }
 
 int ib_portals_post_send(struct ib_qp *qp, struct ib_send_wr *wr,
-                         struct ib_send_wr **bad_wr)
+			 struct ib_send_wr **bad_wr)
 {
 	struct ptl_qp *ptl_qp;
 	struct ib_send_wr *curr;
@@ -473,7 +479,7 @@ int ib_portals_post_send(struct ib_qp *qp, struct ib_send_wr *wr,
 EXPORT_SYMBOL_GPL(ib_portals_post_send);
 
 int ib_portals_post_recv(struct ib_qp *qp, struct ib_recv_wr *recv_wr,
-                         struct ib_recv_wr **bad_wr)
+			 struct ib_recv_wr **bad_wr)
 {
 	struct ptl_qp *ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
 	struct ib_recv_wr *wr;
@@ -481,12 +487,12 @@ int ib_portals_post_recv(struct ib_qp *qp, struct ib_recv_wr *recv_wr,
 	int i = 0;
 	PTL_CHECK(ptl_qp, PTL_QP);
 	PTL_DEBUG("Hey receive queue of this queue pair: %d is at PTE: %d",
-	          ptl_qp->qpn, ptl_qp->recv_cq->pte);
+		  ptl_qp->qpn, ptl_qp->recv_cq->pte);
 
 	for (wr = recv_wr; wr != NULL; wr = wr->next) {
 
-		PTL_DEBUG("WR[%d]: addr=%p, wr_id=%llu, num_sge=%d\n", i, recv_wr,
-		          recv_wr->wr_id, recv_wr->num_sge);
+		PTL_DEBUG("WR[%d]: addr=%llx, wr_id=%llu, num_sge=%d for QPN: %d", i, recv_wr->sg_list[0].addr,
+			  recv_wr->wr_id, recv_wr->num_sge, ptl_qp->qpn);
 
 		if (wr->num_sge > 1) {
 			PTL_FATAL("Oops sorry! I cannot yet support sgl lists");
@@ -494,9 +500,9 @@ int ib_portals_post_recv(struct ib_qp *qp, struct ib_recv_wr *recv_wr,
 		// Print scatter-gather list entries
 		for (int j = 0; j < recv_wr->num_sge; j++) {
 			PTL_DEBUG("Registering memory for recv: SGE[%d]: addr=0x%llx, length=%u, "
-			          "lkey=0x%x\n",
-			          j, recv_wr->sg_list[j].addr, recv_wr->sg_list[j].length,
-			          recv_wr->sg_list[j].lkey);
+				  "lkey=0x%x\n",
+				  j, recv_wr->sg_list[j].addr, recv_wr->sg_list[j].length,
+				  recv_wr->sg_list[j].lkey);
 			struct ptl_recv_op *recv_op = kzalloc(sizeof(*recv_op), GFP_KERNEL);
 			if (NULL == recv_op) {
 				PTL_FATAL("Out of memory");
@@ -505,15 +511,15 @@ int ib_portals_post_recv(struct ib_qp *qp, struct ib_recv_wr *recv_wr,
 			recv_op->le.start = recv_wr->sg_list[j].addr;
 			recv_op->le.length = recv_wr->sg_list[j].length;
 			recv_op->le.cpu_start =
-			        NULL; /*don't know don't care I suppose.XXX TODO XXX*/
+				NULL; /*don't know don't care I suppose.XXX TODO XXX*/
 			recv_op->le.options = PTL_SRV_ME_OPTS;
 			recv_op->le.min_free = 0;
 			recv_op->wr_id = recv_wr->wr_id;
 			recv_op->wr_cqe = recv_wr->wr_cqe;
 			recv_op->ptl_qp = ptl_qp;
 			rc = PtlLEAppend(ptl_qp->ptl_id->bxiv3_dev->nicia_handle,
-			                 ptl_qp->recv_cq->pte, (const ptl_le_t *)&recv_op->le,
-			                 PTL_PRIORITY_LIST, recv_op, &recv_op->leh);
+					 ptl_qp->recv_cq->pte, (const ptl_le_t *)&recv_op->le,
+					 PTL_PRIORITY_LIST, recv_op, &recv_op->leh);
 			if (PTL_OK != rc) {
 				PTL_FATAL("LEAppend failed. Reason: %s", PtlToStr(rc, PTL_STR_ERROR));
 			}
@@ -539,7 +545,7 @@ EXPORT_SYMBOL_GPL(ib_portals_process_cq_direct);
 
 /* MR map helpers used in FRWR path */
 int ib_portals_map_mr_sg(struct ib_mr *mr, struct scatterlist *sg, int sg_nents,
-                         unsigned int *sg_offset, unsigned int page_size)
+			 unsigned int *sg_offset, unsigned int page_size)
 {
 	struct ptl_mr *ptl_mr;
 	struct scatterlist *s;
@@ -582,17 +588,19 @@ int ib_portals_map_mr_sg(struct ib_mr *mr, struct scatterlist *sg, int sg_nents,
 
 		total_length += dma_len;
 
-		PTL_DEBUG("%s  [%d] dma_addr: 0x%llx, dma_len: %u for device: %s", skipped ? "Already mapped" : "Mapped",
-		          i, dma_addr, dma_len,
-		          dev_name(PtlGetDriverDev(
-		                           ptl_mr->bxi3_device->nicia_handle)));
+		PTL_DEBUG("%s  [%d] dma_addr: 0x%llx, dma_len: %u for device: %s",
+			  skipped ? "Already mapped" : "Mapped",
+			  i, dma_addr, dma_len,
+			  dev_name(PtlGetDriverDev(
+					   ptl_mr->bxi3_device->nicia_handle)));
 	}
 
 	/* Populate the MR fields */
 	mr->iova = first_addr;
 	mr->length = total_length;
 
-	PTL_DEBUG("=== MR populated: iova=0x%llx, length=%llu === sg_nents are: %d mapped_nents: %d", mr->iova, mr->length, sg_nents, mapped_nents);
+	PTL_DEBUG("=== MR populated: iova=0x%llx, length=%llu === sg_nents are: %d mapped_nents: %d",
+		  mr->iova, mr->length, sg_nents, mapped_nents);
 
 	return mapped_nents;
 }
@@ -601,10 +609,10 @@ int ib_portals_map_mr_sg(struct ib_mr *mr, struct scatterlist *sg, int sg_nents,
 EXPORT_SYMBOL_GPL(ib_portals_map_mr_sg);
 
 int ib_portals_map_mr_sg_pi(struct ib_mr *mr, struct scatterlist *data_sg,
-                            int data_sg_nents, unsigned int *data_sg_offset,
-                            struct scatterlist *meta_sg, int meta_sg_nents,
-                            unsigned int *meta_sg_offset,
-                            unsigned int page_size)
+			    int data_sg_nents, unsigned int *data_sg_offset,
+			    struct scatterlist *meta_sg, int meta_sg_nents,
+			    unsigned int *meta_sg_offset,
+			    unsigned int page_size)
 {
 	(void)mr;
 	IB_PORTALS4_UNIMPL("Sorry!");
@@ -675,23 +683,24 @@ int ib_portals_register_client(struct ib_client *client)
 		return -EINVAL;
 	}
 	pr_info("Portals4/ib: register_client name=%s add=%ps remove=%ps "
-	        "get_net_dev_by_params=%ps\n",
-	        client->name, client->add, client->remove,
-	        client->get_net_dev_by_params);
+		"get_net_dev_by_params=%ps\n",
+		client->name, client->add, client->remove,
+		client->get_net_dev_by_params);
 
 	if (!client->add) {
 		IB_PORTALS4_WARN("Portals4/ib: client '%s' has no add() callback",
-		                 client->name);
+				 client->name);
 	}
 
 	if (!client->remove) {
 		IB_PORTALS4_WARN("Portals4/ib: client '%s' has no remove() callback",
-		                 client->name);
+				 client->name);
 	}
 
 	client_entry = kzalloc(sizeof(*client_entry), GFP_KERNEL);
-	if (!client_entry)
+	if (!client_entry) {
 		return -ENOMEM;
+	}
 
 	client_entry->client = client;
 
@@ -725,7 +734,7 @@ void ib_portals_unregister_client(struct ib_client *client)
 		if (client_entry->client == client) {
 			if (client_entry->client->remove) {
 				IB_PORTALS4_UNIMPL(
-				        "Sorry! I don't know how to call the remove callback");
+					"Sorry! I don't know how to call the remove callback");
 			}
 			list_del(&client_entry->node);
 			kfree(client_entry);

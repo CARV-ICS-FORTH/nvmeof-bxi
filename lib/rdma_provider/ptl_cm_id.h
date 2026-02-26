@@ -67,6 +67,10 @@ struct ptl_cm_id {
 	 * */
 	int remote_rma_pte;
 	int local_rma_pte;
+	/*extensions for nvme_cpl*/
+	uint64_t remote_nvme_cpl_start_addr;
+	size_t nvme_cpl_queue_size;
+	bool remote_is_a_kernel_initiator;
 	//needed for connection setup
 	const void *fake_data;
 };

@@ -49,6 +49,11 @@ struct ptl_conn_open {
 	/*In which completion queue id initiator has subscribed for notifications*/
 	int cq_id;
 	int initiator_qp_num;
+	/*extensions for nvme cpls, start*/
+	int is_kernel_initiator;
+	uint64_t nvme_cpl_start_addr;
+	size_t nvme_cpl_queue_size;
+	/*extensions for nvme cpls, end*/
 	struct rdma_conn_param conn_param;
 };
 

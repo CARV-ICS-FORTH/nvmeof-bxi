@@ -388,6 +388,19 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 
 	/*At the target side, someone wants to connect with us*/
 	ptl_id->cm_id_state = PTL_CM_CONNECTING;
+	/*extension staff*/
+	if (conn_open->is_kernel_initiator) {
+		ptl_id->remote_nvme_cpl_start_addr = conn_open->nvme_cpl_start_addr;
+		ptl_id->nvme_cpl_queue_size = conn_open->nvme_cpl_queue_size;
+		ptl_id->is_remote_a_kernel_initiator = true;
+		SPDK_PTL_DEBUG("A kernel initiator {nid:%d, pid:%d, msg_pte: %d, rma_pte: "
+			       "%d} just connected. NVMe cpl start addr "
+			       "(IOVA) = 0x%" PRIx64 " and nvme cpl queue size is: %lu",
+			       ptl_id->remote_nid, ptl_id->remote_pid,
+			       ptl_id->remote_msg_pte, ptl_id->remote_rma_pte,
+			       ptl_id->remote_nvme_cpl_start_addr,
+			       ptl_id->nvme_cpl_queue_size);
+	}
 
 	rdma_ptl_conn_map_add(ptl_id);
 	fake_event =

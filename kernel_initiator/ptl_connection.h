@@ -52,6 +52,11 @@ struct ptl_conn_open {
 	int rma_pte;
 	int cq_id;
 	int initiator_qp_num;
+	/*extensions for nvme cpls, start*/
+	int is_kernel_initiator;
+	u64 nvme_cpl_start_addr;
+	size_t nvme_cpl_queue_size;
+	/*extensions for nvme cpls, end*/
 	struct rdma_conn_param conn_param;
 };
 

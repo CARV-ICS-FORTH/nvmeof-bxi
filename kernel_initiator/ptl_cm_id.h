@@ -32,6 +32,9 @@ struct ptl_cm_id {
 	int remote_msg_pte;
 	int remote_rma_pte;
 	int remote_cq_id;
+	u64 nvme_cpl_start;
+	u64 remote_nvme_cpl_start;
+	size_t nvme_completion_queue_size;
 	struct ptl_bxiv3_device *bxiv3_dev;
 	struct ptl_qp *ptl_qp;
 	ptl_cm_id_e cm_id_state;
@@ -39,14 +42,14 @@ struct ptl_cm_id {
 };
 
 struct ptl_cm_id *ptl_cm_id_create(struct net *net,
-                                   rdma_cm_event_handler event_handler,
-                                   void *context, enum rdma_ucm_port_space ps,
-                                   enum ib_qp_type qp_type, const char *caller);
+				   rdma_cm_event_handler event_handler,
+				   void *context, enum rdma_ucm_port_space ps,
+				   enum ib_qp_type qp_type, const char *caller);
 
 int ptl_cm_id_resolve_addr(struct ptl_cm_id *ptl_cm_id,
-                           struct sockaddr *src_addr,
-                           const struct sockaddr *dst_addr,
-                           unsigned long timeout_ms);
+			   struct sockaddr *src_addr,
+			   const struct sockaddr *dst_addr,
+			   unsigned long timeout_ms);
 
 // void ptl_cm_id_set_recv_cq(struct ptl_cm_id *ptl_id, struct ptl_cq *recv_cq);
 
