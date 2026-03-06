@@ -392,7 +392,7 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 	if (conn_open->is_kernel_initiator) {
 		ptl_id->remote_nvme_cpl_start_addr = conn_open->nvme_cpl_start_addr;
 		ptl_id->nvme_cpl_queue_size = conn_open->nvme_cpl_queue_size;
-		ptl_id->is_remote_a_kernel_initiator = true;
+		ptl_id->remote_is_a_kernel_initiator = true;
 		SPDK_PTL_DEBUG("A kernel initiator {nid:%d, pid:%d, msg_pte: %d, rma_pte: "
 			       "%d} just connected. NVMe cpl start addr "
 			       "(IOVA) = 0x%" PRIx64 " and nvme cpl queue size is: %lu",

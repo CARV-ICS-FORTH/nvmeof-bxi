@@ -61,16 +61,17 @@ struct ptl_qp *ptl_qp_create(struct ptl_cm_id *ptl_id, struct ptl_pd *ptl_pd,
 	/*appropriate wiring needed*/
 	INIT_LIST_HEAD(&ptl_qp->fake_qp.rdma_mrs);
 	INIT_LIST_HEAD(&ptl_qp->fake_qp.sig_mrs);
-	/*Where we keep the list of ptl_mrs*/
 	INIT_LIST_HEAD(&ptl_qp->ptl_mr_list);
+
 	ptl_qp->fake_qp.send_cq = &ptl_qp->send_cq->fake_cq;
 	ptl_qp->fake_qp.recv_cq = &ptl_qp->recv_cq->fake_cq;
 	ptl_qp->fake_qp.qp_context = attr->qp_context;
 	ptl_qp->fake_qp.qp_num = ptl_qp->qpn;
 	/*Add queue pair in the queue pair map of the device*/
 	qp_map_entry = kzalloc(sizeof(*qp_map_entry), GFP_KERNEL);
-	if (!qp_map_entry)
+	if (!qp_map_entry) {
 		return ERR_PTR(-ENOMEM);
+	}
 
 	qp_map_entry->key = ptl_qp->qpn;
 	qp_map_entry->ptl_qp  = ptl_qp;

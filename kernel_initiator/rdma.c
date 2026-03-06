@@ -67,6 +67,9 @@ struct nvme_rdma_qe {
 	struct ib_cqe cqe;
 	void *data;
 	u64 dma;
+	/*<gesalous>*/
+	u32 id;
+	/*<gesalous>*/
 };
 
 struct nvme_rdma_sgl {
@@ -162,10 +165,10 @@ static DEFINE_MUTEX(nvme_rdma_ctrl_mutex);
 static bool register_always = true;
 module_param(register_always, bool, 0444);
 MODULE_PARM_DESC(register_always,
-		 "Use memory registration even for contiguous memory regions");
+                 "Use memory registration even for contiguous memory regions");
 
 static int nvme_rdma_cm_handler(struct rdma_cm_id *cm_id,
-				struct rdma_cm_event *event);
+                                struct rdma_cm_event *event);
 static void nvme_rdma_recv_done(struct ib_cq *cq, struct ib_wc *wc);
 static void nvme_rdma_complete_rq(struct request *rq);
 
@@ -190,16 +193,16 @@ static inline size_t nvme_rdma_inline_data_size(struct nvme_rdma_queue *queue)
 }
 
 static void nvme_rdma_free_qe(struct ib_device *ibdev, struct nvme_rdma_qe *qe,
-			      size_t capsule_size,
-			      enum dma_data_direction dir)
+                              size_t capsule_size,
+                              enum dma_data_direction dir)
 {
 	ib_portals_dma_unmap_single(ibdev, qe->dma, capsule_size, dir);
 	kfree(qe->data);
 }
 
 static int nvme_rdma_alloc_qe(struct ib_device *ibdev, struct nvme_rdma_qe *qe,
-			      size_t capsule_size,
-			      enum dma_data_direction dir)
+                              size_t capsule_size,
+                              enum dma_data_direction dir)
 {
 	qe->data = kzalloc(capsule_size, GFP_KERNEL);
 	if (!qe->data) {
@@ -217,9 +220,9 @@ static int nvme_rdma_alloc_qe(struct ib_device *ibdev, struct nvme_rdma_qe *qe,
 }
 
 static void nvme_rdma_free_ring(struct ib_device *ibdev,
-				struct nvme_rdma_qe *ring, size_t ib_queue_size,
-				size_t capsule_size,
-				enum dma_data_direction dir)
+                                struct nvme_rdma_qe *ring, size_t ib_queue_size,
+                                size_t capsule_size,
+                                enum dma_data_direction dir)
 {
 	int i;
 
@@ -230,28 +233,63 @@ static void nvme_rdma_free_ring(struct ib_device *ibdev,
 }
 
 static struct nvme_rdma_qe *nvme_rdma_alloc_ring(struct ib_device *ibdev,
-		size_t ib_queue_size,
-		size_t capsule_size,
-		enum dma_data_direction dir)
+                                                 size_t ib_queue_size,
+                                                 size_t capsule_size,
+                                                 enum dma_data_direction dir)
 {
 	struct nvme_rdma_qe *ring;
 	int i;
-	PTL_DEBUG("GESALOUSTRA: IB_QUEUE_SIZE = %lu capsule size = %lu", ib_queue_size, capsule_size);
+	PTL_DEBUG("CORE_DRIVER: IB_QUEUE_SIZE = %lu capsule size = %lu", ib_queue_size, capsule_size);
 	ring = kcalloc(ib_queue_size, sizeof(struct nvme_rdma_qe), GFP_KERNEL);
 	if (!ring) {
 		return NULL;
 	}
+	/*<gesalous> non-matching feat*/
+	struct nvme_completion *nvme_cpl_buf;
+	dma_addr_t nvme_cpl_iova;
+	/**
+	 * We derive from the vanilla driver and allocate all buffers (aka
+	 * ring[i]->data) in a single contiguous buffer. Then we are going to
+	 * populate the ring elements as usual and send to the target the
+	 * starting address where the cpls are localted. With this change we
+	 * will be able to send nvme_cpl and data as RMA operations to the same
+	 * PTE and ensure FIFO ordering. When the BXI nic supports matching we
+	 * can remove this approach
+	 * */
+	/*1. Allocate physically contiguous kernel memory*/
+	nvme_cpl_buf = kzalloc(ib_queue_size * sizeof(struct nvme_completion), GFP_KERNEL);
+	if (!nvme_cpl_buf) {
+		PTL_FATAL("Memory allocation for nvme cpls failed");
+		return ERR_PTR(-ENOMEM);
+	}
+	/* 2. Map it to a contiguous IOVA range*/
+	nvme_cpl_iova = ib_portals_dma_map_single(
+	                        ibdev, nvme_cpl_buf, ib_queue_size * sizeof(struct nvme_completion),
+	                        dir);
+	if (ib_portals_dma_mapping_error(ibdev, nvme_cpl_iova)) {
+		PTL_FATAL("Failed to create IOVA to map nvme cpl buffers");
+		kfree(nvme_cpl_buf);
+		goto out_free_ring;
+	}
+	for (i = 0; i < ib_queue_size; i++) {
+		ring[i].data = &nvme_cpl_buf[i];
+		ring[i].dma = nvme_cpl_iova + (i * sizeof(struct nvme_completion));
+		ring[i].id = i;/*XXX TODO XXX Probably the id extension is useless*/
+	}
 
+
+	/*<vanilla> start*/
 	/*
 	 * Bind the CQEs (post recv buffers) DMA mapping to the RDMA queue
 	 * lifetime. It's safe, since any chage in the underlying RDMA device
 	 * will issue error recovery and queue re-creation.
 	 */
-	for (i = 0; i < ib_queue_size; i++) {
-		if (nvme_rdma_alloc_qe(ibdev, &ring[i], capsule_size, dir)) {
-			goto out_free_ring;
-		}
-	}
+	// for (i = 0; i < ib_queue_size; i++) {
+	//      if (nvme_rdma_alloc_qe(ibdev, &ring[i], capsule_size, dir)) {
+	//              goto out_free_ring;
+	//      }
+	// }
+	/*<vanilla>, end*/
 
 	return ring;
 
@@ -263,7 +301,7 @@ out_free_ring:
 static void nvme_rdma_qp_event(struct ib_event *event, void *context)
 {
 	pr_debug("QP event %s (%d)\n", ib_portals_event_msg(event->event),
-		 event->event);
+	         event->event);
 }
 
 static int nvme_rdma_wait_for_cm(struct nvme_rdma_queue *queue)
@@ -279,7 +317,7 @@ static int nvme_rdma_wait_for_cm(struct nvme_rdma_queue *queue)
 }
 
 static int nvme_rdma_create_qp(struct nvme_rdma_queue *queue,
-			       const int factor)
+                               const int factor)
 {
 	struct nvme_rdma_device *dev = queue->device;
 	struct ib_qp_init_attr init_attr;
@@ -309,7 +347,7 @@ static int nvme_rdma_create_qp(struct nvme_rdma_queue *queue,
 }
 
 static void nvme_rdma_exit_request(struct blk_mq_tag_set *set,
-				   struct request *rq, unsigned int hctx_idx)
+                                   struct request *rq, unsigned int hctx_idx)
 {
 	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);
 
@@ -317,8 +355,8 @@ static void nvme_rdma_exit_request(struct blk_mq_tag_set *set,
 }
 
 static int nvme_rdma_init_request(struct blk_mq_tag_set *set,
-				  struct request *rq, unsigned int hctx_idx,
-				  unsigned int numa_node)
+                                  struct request *rq, unsigned int hctx_idx,
+                                  unsigned int numa_node)
 {
 	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(set->driver_data);
 	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);
@@ -334,8 +372,8 @@ static int nvme_rdma_init_request(struct blk_mq_tag_set *set,
 	/* metadata nvme_rdma_sgl struct is located after command's data SGL */
 	if (queue->pi_support)
 		req->metadata_sgl = (void *)nvme_req(rq) +
-				    sizeof(struct nvme_rdma_request) +
-				    NVME_RDMA_DATA_SGL_SIZE;
+		                    sizeof(struct nvme_rdma_request) +
+		                    NVME_RDMA_DATA_SGL_SIZE;
 
 	req->queue = queue;
 	nvme_req(rq)->cmd = req->sqe.data;
@@ -344,7 +382,7 @@ static int nvme_rdma_init_request(struct blk_mq_tag_set *set,
 }
 
 static int nvme_rdma_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
-			       unsigned int hctx_idx)
+                               unsigned int hctx_idx)
 {
 	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(data);
 	struct nvme_rdma_queue *queue = &ctrl->queues[hctx_idx + 1];
@@ -356,7 +394,7 @@ static int nvme_rdma_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 }
 
 static int nvme_rdma_init_admin_hctx(struct blk_mq_hw_ctx *hctx, void *data,
-				     unsigned int hctx_idx)
+                                     unsigned int hctx_idx)
 {
 	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(data);
 	struct nvme_rdma_queue *queue = &ctrl->queues[0];
@@ -370,7 +408,7 @@ static int nvme_rdma_init_admin_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 static void nvme_rdma_free_dev(struct kref *ref)
 {
 	struct nvme_rdma_device *ndev =
-		container_of(ref, struct nvme_rdma_device, ref);
+	        container_of(ref, struct nvme_rdma_device, ref);
 
 	mutex_lock(&device_list_mutex);
 	list_del(&ndev->entry);
@@ -413,7 +451,7 @@ nvme_rdma_find_get_device(struct rdma_cm_id *cm_id)
 	kref_init(&ndev->ref);
 
 	ndev->pd = ib_portals_alloc_pd(
-			   ndev->dev, register_always ? 0 : IB_PD_UNSAFE_GLOBAL_RKEY);
+	                   ndev->dev, register_always ? 0 : IB_PD_UNSAFE_GLOBAL_RKEY);
 	if (IS_ERR(ndev->pd)) {
 		goto out_free_dev;
 	}
@@ -423,7 +461,7 @@ nvme_rdma_find_get_device(struct rdma_cm_id *cm_id)
 		goto out_free_pd;
 	}
 	ndev->num_inline_segments =
-		min(NVME_RDMA_MAX_INLINE_SEGMENTS, ndev->dev->attrs.max_send_sge - 1);
+	        min(NVME_RDMA_MAX_INLINE_SEGMENTS, ndev->dev->attrs.max_send_sge - 1);
 	list_add(&ndev->entry, &device_list);
 out_unlock:
 	mutex_unlock(&device_list_mutex);
@@ -473,13 +511,13 @@ static void nvme_rdma_destroy_queue_ib(struct nvme_rdma_queue *queue)
 	nvme_rdma_free_cq(queue);
 
 	nvme_rdma_free_ring(ibdev, queue->rsp_ring, queue->queue_size,
-			    sizeof(struct nvme_completion), DMA_FROM_DEVICE);
+	                    sizeof(struct nvme_completion), DMA_FROM_DEVICE);
 
 	nvme_rdma_dev_put(dev);
 }
 
 static int nvme_rdma_get_max_fr_pages(struct ib_device *ibdev,
-				      bool pi_support)
+                                      bool pi_support)
 {
 	u32 max_page_list_len;
 
@@ -493,15 +531,15 @@ static int nvme_rdma_get_max_fr_pages(struct ib_device *ibdev,
 }
 
 static int nvme_rdma_create_cq(struct ib_device *ibdev,
-			       struct nvme_rdma_queue *queue)
+                               struct nvme_rdma_queue *queue)
 {
 	PTL_DEBUG("CORE_DRIVER: NVME CREATE_CQ"); // here we are
 
 	int ret, comp_vector, idx = nvme_rdma_queue_idx(queue);
 
 	PTL_DEBUG("CORE_DRIVER: NVME CREATE_CQ for ib_device: %s num_comp_vectors: "
-		  "%d idx: %d",
-		  ibdev->name, ibdev->num_comp_vectors, idx); // here we are
+	          "%d idx: %d",
+	          ibdev->name, ibdev->num_comp_vectors, idx); // here we are
 	/*
 	 * Spread I/O queues completion vectors according their queue index.
 	 * Admin queues can always go on completion vector 0.
@@ -510,15 +548,15 @@ static int nvme_rdma_create_cq(struct ib_device *ibdev,
 	comp_vector = (idx == 0 ? idx : idx - 1) % ibdev->num_comp_vectors;
 
 	PTL_DEBUG("CORE_DRIVER: Successfully calculated comp vector to: %d",
-		  comp_vector);
+	          comp_vector);
 
 	/* Polling queues need direct cq polling context */
 	if (nvme_rdma_poll_queue(queue))
 		queue->ib_cq = ib_portals_alloc_cq(ibdev, queue, queue->cq_size,
-						   comp_vector, IB_POLL_DIRECT);
+		                                   comp_vector, IB_POLL_DIRECT);
 	else
 		queue->ib_cq = ib_portals_cq_pool_get(ibdev, queue->cq_size, comp_vector,
-						      IB_POLL_SOFTIRQ);
+		                                      IB_POLL_SOFTIRQ);
 
 	PTL_DEBUG("CORE_DRIVER: OK got the PTL_CQ!");
 	if (IS_ERR(queue->ib_cq)) {
@@ -578,8 +616,8 @@ static int nvme_rdma_create_queue_ib(struct nvme_rdma_queue *queue)
 	}
 
 	queue->rsp_ring =
-		nvme_rdma_alloc_ring(ibdev, queue->queue_size,
-				     sizeof(struct nvme_completion), DMA_FROM_DEVICE);
+	        nvme_rdma_alloc_ring(ibdev, queue->queue_size,
+	                             sizeof(struct nvme_completion), DMA_FROM_DEVICE);
 	if (!queue->rsp_ring) {
 		ret = -ENOMEM;
 		goto out_destroy_qp;
@@ -593,24 +631,24 @@ static int nvme_rdma_create_queue_ib(struct nvme_rdma_queue *queue)
 	pages_per_mr = nvme_rdma_get_max_fr_pages(ibdev, queue->pi_support) + 1;
 	PTL_DEBUG("CORE_DRIVER: Calling mr_pool_init");
 	ret = ib_portals_mr_pool_init(queue->qp, &queue->qp->rdma_mrs,
-				      queue->queue_size, IB_MR_TYPE_MEM_REG,
-				      pages_per_mr, 0);
+	                              queue->queue_size, IB_MR_TYPE_MEM_REG,
+	                              pages_per_mr, 0);
 	if (ret) {
 		dev_err(queue->ctrl->ctrl.device,
-			"failed to initialize MR pool sized %d for QID %d\n",
-			queue->queue_size, nvme_rdma_queue_idx(queue));
+		        "failed to initialize MR pool sized %d for QID %d\n",
+		        queue->queue_size, nvme_rdma_queue_idx(queue));
 		goto out_destroy_ring;
 	}
 
 	if (queue->pi_support) {
 		PTL_DEBUG("CORE_DRIVER: Calling mr_pool_init for PI support ");
 		ret = ib_portals_mr_pool_init(queue->qp, &queue->qp->sig_mrs,
-					      queue->queue_size, IB_MR_TYPE_INTEGRITY,
-					      pages_per_mr, pages_per_mr);
+		                              queue->queue_size, IB_MR_TYPE_INTEGRITY,
+		                              pages_per_mr, pages_per_mr);
 		if (ret) {
 			dev_err(queue->ctrl->ctrl.device,
-				"failed to initialize PI MR pool sized %d for QID %d\n",
-				queue->queue_size, nvme_rdma_queue_idx(queue));
+			        "failed to initialize PI MR pool sized %d for QID %d\n",
+			        queue->queue_size, nvme_rdma_queue_idx(queue));
 			goto out_destroy_mr_pool;
 		}
 	}
@@ -622,7 +660,7 @@ out_destroy_mr_pool:
 	ib_portals_mr_pool_destroy(queue->qp, &queue->qp->rdma_mrs);
 out_destroy_ring:
 	nvme_rdma_free_ring(ibdev, queue->rsp_ring, queue->queue_size,
-			    sizeof(struct nvme_completion), DMA_FROM_DEVICE);
+	                    sizeof(struct nvme_completion), DMA_FROM_DEVICE);
 out_destroy_qp:
 	rdma_cm_portals_destroy_qp(queue->cm_id);
 out_destroy_ib_cq:
@@ -633,7 +671,7 @@ out_put_dev:
 }
 
 static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl, int idx,
-				 size_t queue_size)
+                                 size_t queue_size)
 {
 	struct nvme_rdma_queue *queue;
 	struct sockaddr *src_addr = NULL;
@@ -658,10 +696,10 @@ static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl, int idx,
 	queue->queue_size = queue_size;
 
 	queue->cm_id = rdma_cm_portals_create_id(&init_net, nvme_rdma_cm_handler,
-		       queue, RDMA_PS_TCP, IB_QPT_RC);
+	                                         queue, RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(queue->cm_id)) {
 		dev_info(ctrl->ctrl.device, "failed to create CM ID: %ld\n",
-			 PTR_ERR(queue->cm_id));
+		         PTR_ERR(queue->cm_id));
 		ret = PTR_ERR(queue->cm_id);
 		goto out_destroy_mutex;
 	}
@@ -672,18 +710,18 @@ static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl, int idx,
 
 	queue->cm_error = -ETIMEDOUT;
 	ret = rdma_cm_portals_resolve_addr(queue->cm_id, src_addr,
-					   (struct sockaddr *)&ctrl->addr,
-					   NVME_RDMA_CM_TIMEOUT_MS);
+	                                   (struct sockaddr *)&ctrl->addr,
+	                                   NVME_RDMA_CM_TIMEOUT_MS);
 	if (ret) {
 		dev_info(ctrl->ctrl.device, "rdma_cm_portals_resolve_addr failed (%d).\n",
-			 ret);
+		         ret);
 		goto out_destroy_cm_id;
 	}
 
 	ret = nvme_rdma_wait_for_cm(queue);
 	if (ret) {
 		dev_info(ctrl->ctrl.device, "rdma connection establishment failed (%d)\n",
-			 ret);
+		         ret);
 		goto out_destroy_cm_id;
 	}
 
@@ -765,13 +803,13 @@ static int nvme_rdma_start_queue(struct nvme_rdma_ctrl *ctrl, int idx)
 			__nvme_rdma_stop_queue(queue);
 		}
 		dev_info(ctrl->ctrl.device, "failed to connect queue: %d ret=%d\n", idx,
-			 ret);
+		         ret);
 	}
 	return ret;
 }
 
 static int nvme_rdma_start_io_queues(struct nvme_rdma_ctrl *ctrl, int first,
-				     int last)
+                                     int last)
 {
 	int i, ret = 0;
 
@@ -832,15 +870,15 @@ out_free_queues:
 static int nvme_rdma_alloc_tag_set(struct nvme_ctrl *ctrl)
 {
 	unsigned int cmd_size =
-		sizeof(struct nvme_rdma_request) + NVME_RDMA_DATA_SGL_SIZE;
+	        sizeof(struct nvme_rdma_request) + NVME_RDMA_DATA_SGL_SIZE;
 
 	if (ctrl->max_integrity_segments) {
 		cmd_size += sizeof(struct nvme_rdma_sgl) + NVME_RDMA_METADATA_SGL_SIZE;
 	}
 
 	return nvme_alloc_io_tag_set(
-		       ctrl, &to_rdma_ctrl(ctrl)->tag_set, &nvme_rdma_mq_ops,
-		       ctrl->opts->nr_poll_queues ? HCTX_MAX_TYPES : 2, cmd_size);
+	               ctrl, &to_rdma_ctrl(ctrl)->tag_set, &nvme_rdma_mq_ops,
+	               ctrl->opts->nr_poll_queues ? HCTX_MAX_TYPES : 2, cmd_size);
 }
 
 static void nvme_rdma_destroy_admin_queue(struct nvme_rdma_ctrl *ctrl)
@@ -848,14 +886,14 @@ static void nvme_rdma_destroy_admin_queue(struct nvme_rdma_ctrl *ctrl)
 	if (ctrl->async_event_sqe.data) {
 		cancel_work_sync(&ctrl->ctrl.async_event_work);
 		nvme_rdma_free_qe(ctrl->device->dev, &ctrl->async_event_sqe,
-				  sizeof(struct nvme_command), DMA_TO_DEVICE);
+		                  sizeof(struct nvme_command), DMA_TO_DEVICE);
 		ctrl->async_event_sqe.data = NULL;
 	}
 	nvme_rdma_free_queue(&ctrl->queues[0]);
 }
 
 static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,
-		bool new)
+                                           bool new)
 {
 	bool pi_capable = false;
 	int error;
@@ -874,7 +912,7 @@ static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,
 	}
 
 	ctrl->max_fr_pages =
-		nvme_rdma_get_max_fr_pages(ctrl->device->dev, pi_capable);
+	        nvme_rdma_get_max_fr_pages(ctrl->device->dev, pi_capable);
 
 	/*
 	 * Bind the async event SQE DMA mapping to the admin queue lifetime.
@@ -882,15 +920,15 @@ static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,
 	 * error recovery and queue re-creation.
 	 */
 	error = nvme_rdma_alloc_qe(ctrl->device->dev, &ctrl->async_event_sqe,
-				   sizeof(struct nvme_command), DMA_TO_DEVICE);
+	                           sizeof(struct nvme_command), DMA_TO_DEVICE);
 	if (error) {
 		goto out_free_queue;
 	}
 
 	if (new) {
 		error = nvme_alloc_admin_tag_set(
-				&ctrl->ctrl, &ctrl->admin_tag_set, &nvme_rdma_admin_mq_ops,
-				sizeof(struct nvme_rdma_request) + NVME_RDMA_DATA_SGL_SIZE);
+		                &ctrl->ctrl, &ctrl->admin_tag_set, &nvme_rdma_admin_mq_ops,
+		                sizeof(struct nvme_rdma_request) + NVME_RDMA_DATA_SGL_SIZE);
 		if (error) {
 			goto out_free_async_qe;
 		}
@@ -936,7 +974,7 @@ out_remove_admin_tag_set:
 out_free_async_qe:
 	if (ctrl->async_event_sqe.data) {
 		nvme_rdma_free_qe(ctrl->device->dev, &ctrl->async_event_sqe,
-				  sizeof(struct nvme_command), DMA_TO_DEVICE);
+		                  sizeof(struct nvme_command), DMA_TO_DEVICE);
 		ctrl->async_event_sqe.data = NULL;
 	}
 out_free_queue:
@@ -945,7 +983,7 @@ out_free_queue:
 }
 
 static int nvme_rdma_configure_io_queues(struct nvme_rdma_ctrl *ctrl,
-		bool new)
+                                         bool new)
 {
 	int ret, nr_queues;
 
@@ -994,7 +1032,7 @@ static int nvme_rdma_configure_io_queues(struct nvme_rdma_ctrl *ctrl,
 	 * start all new queues now.
 	 */
 	ret = nvme_rdma_start_io_queues(ctrl, nr_queues,
-					ctrl->tag_set.nr_hw_queues + 1);
+	                                ctrl->tag_set.nr_hw_queues + 1);
 	if (ret) {
 		goto out_wait_freeze_timed_out;
 	}
@@ -1016,7 +1054,7 @@ out_free_io_queues:
 }
 
 static void nvme_rdma_teardown_admin_queue(struct nvme_rdma_ctrl *ctrl,
-		bool remove)
+                                           bool remove)
 {
 	nvme_quiesce_admin_queue(&ctrl->ctrl);
 	blk_sync_queue(ctrl->ctrl.admin_q);
@@ -1030,7 +1068,7 @@ static void nvme_rdma_teardown_admin_queue(struct nvme_rdma_ctrl *ctrl,
 }
 
 static void nvme_rdma_teardown_io_queues(struct nvme_rdma_ctrl *ctrl,
-		bool remove)
+                                         bool remove)
 {
 	if (ctrl->ctrl.queue_count > 1) {
 		nvme_quiesce_io_queues(&ctrl->ctrl);
@@ -1072,7 +1110,7 @@ free_ctrl:
 }
 
 static void nvme_rdma_reconnect_or_remove(struct nvme_rdma_ctrl *ctrl,
-		int status)
+                                          int status)
 {
 	enum nvme_ctrl_state state = nvme_ctrl_state(&ctrl->ctrl);
 
@@ -1084,9 +1122,9 @@ static void nvme_rdma_reconnect_or_remove(struct nvme_rdma_ctrl *ctrl,
 
 	if (nvmf_should_reconnect(&ctrl->ctrl, status)) {
 		dev_info(ctrl->ctrl.device, "Reconnecting in %d seconds...\n",
-			 ctrl->ctrl.opts->reconnect_delay);
+		         ctrl->ctrl.opts->reconnect_delay);
 		queue_delayed_work(nvme_wq, &ctrl->reconnect_work,
-				   ctrl->ctrl.opts->reconnect_delay * HZ);
+		                   ctrl->ctrl.opts->reconnect_delay * HZ);
 	} else {
 		nvme_delete_ctrl(&ctrl->ctrl);
 	}
@@ -1117,8 +1155,8 @@ static int nvme_rdma_setup_ctrl(struct nvme_rdma_ctrl *ctrl, bool new)
 
 	if (ctrl->ctrl.opts->queue_size > ctrl->ctrl.sqsize + 1) {
 		dev_warn(ctrl->ctrl.device,
-			 "queue_size %zu > ctrl sqsize %u, clamping down\n",
-			 ctrl->ctrl.opts->queue_size, ctrl->ctrl.sqsize + 1);
+		         "queue_size %zu > ctrl sqsize %u, clamping down\n",
+		         ctrl->ctrl.opts->queue_size, ctrl->ctrl.sqsize + 1);
 	}
 
 	if (ctrl->ctrl.max_integrity_segments) {
@@ -1129,14 +1167,14 @@ static int nvme_rdma_setup_ctrl(struct nvme_rdma_ctrl *ctrl, bool new)
 
 	if (ctrl->ctrl.sqsize + 1 > max_queue_size) {
 		dev_warn(ctrl->ctrl.device,
-			 "ctrl sqsize %u > max queue size %u, clamping down\n",
-			 ctrl->ctrl.sqsize + 1, max_queue_size);
+		         "ctrl sqsize %u > max queue size %u, clamping down\n",
+		         ctrl->ctrl.sqsize + 1, max_queue_size);
 		ctrl->ctrl.sqsize = max_queue_size - 1;
 	}
 
 	if (ctrl->ctrl.sqsize + 1 > ctrl->ctrl.maxcmd) {
 		dev_warn(ctrl->ctrl.device, "sqsize %u > ctrl maxcmd %u, clamping down\n",
-			 ctrl->ctrl.sqsize + 1, ctrl->ctrl.maxcmd);
+		         ctrl->ctrl.sqsize + 1, ctrl->ctrl.maxcmd);
 		ctrl->ctrl.sqsize = ctrl->ctrl.maxcmd - 1;
 	}
 
@@ -1161,7 +1199,7 @@ static int nvme_rdma_setup_ctrl(struct nvme_rdma_ctrl *ctrl, bool new)
 		enum nvme_ctrl_state state = nvme_ctrl_state(&ctrl->ctrl);
 
 		WARN_ON_ONCE(state != NVME_CTRL_DELETING &&
-			     state != NVME_CTRL_DELETING_NOIO);
+		             state != NVME_CTRL_DELETING_NOIO);
 		WARN_ON_ONCE(new);
 		ret = -EINVAL;
 		goto destroy_io;
@@ -1190,7 +1228,7 @@ destroy_admin:
 static void nvme_rdma_reconnect_ctrl_work(struct work_struct *work)
 {
 	struct nvme_rdma_ctrl *ctrl = container_of(
-					      to_delayed_work(work), struct nvme_rdma_ctrl, reconnect_work);
+	                                      to_delayed_work(work), struct nvme_rdma_ctrl, reconnect_work);
 	int ret;
 
 	++ctrl->ctrl.nr_reconnects;
@@ -1201,7 +1239,7 @@ static void nvme_rdma_reconnect_ctrl_work(struct work_struct *work)
 	}
 
 	dev_info(ctrl->ctrl.device, "Successfully reconnected (%d attempts)\n",
-		 ctrl->ctrl.nr_reconnects);
+	         ctrl->ctrl.nr_reconnects);
 
 	ctrl->ctrl.nr_reconnects = 0;
 
@@ -1209,14 +1247,14 @@ static void nvme_rdma_reconnect_ctrl_work(struct work_struct *work)
 
 requeue:
 	dev_info(ctrl->ctrl.device, "Failed reconnect attempt %d/%d\n",
-		 ctrl->ctrl.nr_reconnects, ctrl->ctrl.opts->max_reconnects);
+	         ctrl->ctrl.nr_reconnects, ctrl->ctrl.opts->max_reconnects);
 	nvme_rdma_reconnect_or_remove(ctrl, ret);
 }
 
 static void nvme_rdma_error_recovery_work(struct work_struct *work)
 {
 	struct nvme_rdma_ctrl *ctrl =
-		container_of(work, struct nvme_rdma_ctrl, err_work);
+	        container_of(work, struct nvme_rdma_ctrl, err_work);
 
 	nvme_stop_keep_alive(&ctrl->ctrl);
 	flush_work(&ctrl->ctrl.async_event_work);
@@ -1231,7 +1269,7 @@ static void nvme_rdma_error_recovery_work(struct work_struct *work)
 		enum nvme_ctrl_state state = nvme_ctrl_state(&ctrl->ctrl);
 
 		WARN_ON_ONCE(state != NVME_CTRL_DELETING &&
-			     state != NVME_CTRL_DELETING_NOIO);
+		             state != NVME_CTRL_DELETING_NOIO);
 		return;
 	}
 
@@ -1261,14 +1299,14 @@ static void nvme_rdma_end_request(struct nvme_rdma_request *req)
 }
 
 static void nvme_rdma_wr_error(struct ib_cq *cq, struct ib_wc *wc,
-			       const char *op)
+                               const char *op)
 {
 	struct nvme_rdma_queue *queue = wc->qp->qp_context;
 	struct nvme_rdma_ctrl *ctrl = queue->ctrl;
 
 	if (nvme_ctrl_state(&ctrl->ctrl) == NVME_CTRL_LIVE)
 		dev_info(ctrl->ctrl.device, "%s for CQE 0x%p failed with status %s (%d)\n",
-			 op, wc->wr_cqe, ib_portals_wc_status_msg(wc->status), wc->status);
+		         op, wc->wr_cqe, ib_portals_wc_status_msg(wc->status), wc->status);
 	nvme_rdma_error_recovery(ctrl);
 }
 
@@ -1282,7 +1320,7 @@ static void nvme_rdma_memreg_done(struct ib_cq *cq, struct ib_wc *wc)
 static void nvme_rdma_inv_rkey_done(struct ib_cq *cq, struct ib_wc *wc)
 {
 	struct nvme_rdma_request *req =
-		container_of(wc->wr_cqe, struct nvme_rdma_request, reg_cqe);
+	        container_of(wc->wr_cqe, struct nvme_rdma_request, reg_cqe);
 
 	if (unlikely(wc->status != IB_WC_SUCCESS)) {
 		nvme_rdma_wr_error(cq, wc, "LOCAL_INV");
@@ -1292,7 +1330,7 @@ static void nvme_rdma_inv_rkey_done(struct ib_cq *cq, struct ib_wc *wc)
 }
 
 static int nvme_rdma_inv_rkey(struct nvme_rdma_queue *queue,
-			      struct nvme_rdma_request *req)
+                              struct nvme_rdma_request *req)
 {
 	struct ib_send_wr wr = {
 		.opcode = IB_WR_LOCAL_INV,
@@ -1309,7 +1347,7 @@ static int nvme_rdma_inv_rkey(struct nvme_rdma_queue *queue,
 }
 
 static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev,
-				    struct request *rq)
+                                    struct request *rq)
 {
 	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);
 
@@ -1319,30 +1357,30 @@ static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev,
 		int i;
 		for_each_sg(req->metadata_sgl->sg_table.sgl, s, req->metadata_sgl->nents, i) {
 			PTL_DEBUG("CORE_DRIVER: calling unmap-sg[%d out of %d]: virt_addr=%p, iova=0x%llx, length=%u for request: 0x%llx",
-				  i, req->metadata_sgl->nents,
-				  sg_virt(s), sg_dma_address(s), s->length, (u64)rq);
+			          i, req->metadata_sgl->nents,
+			          sg_virt(s), sg_dma_address(s), s->length, (u64)rq);
 		}
 		/*</gesalous>*/
 		ib_portals_dma_unmap_sg(ibdev, req->metadata_sgl->sg_table.sgl,
-					req->metadata_sgl->nents, rq_dma_dir(rq));
+		                        req->metadata_sgl->nents, rq_dma_dir(rq));
 		sg_free_table_chained(&req->metadata_sgl->sg_table,
-				      NVME_INLINE_METADATA_SG_CNT);
+		                      NVME_INLINE_METADATA_SG_CNT);
 	}
 	/*<gesalous> debug remove later*/
 	struct scatterlist *s;
 	int i;
 	for_each_sg(req->data_sgl.sg_table.sgl, s, req->data_sgl.nents, i) {
 		PTL_DEBUG("CORE_DRIVER: calling unmap-sg[%d out of %d ]: virt_addr=%p, iova=0x%llx, length=%u for rq: 0x%llx",
-			  i, req->data_sgl.nents, sg_virt(s), sg_dma_address(s), s->length, (u64)rq);
+		          i, req->data_sgl.nents, sg_virt(s), sg_dma_address(s), s->length, (u64)rq);
 	}
 	/*</gesalous>*/
 	ib_portals_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl,
-				req->data_sgl.nents, rq_dma_dir(rq));
+	                        req->data_sgl.nents, rq_dma_dir(rq));
 	sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);
 }
 
 static void nvme_rdma_unmap_data(struct nvme_rdma_queue *queue,
-				 struct request *rq)
+                                 struct request *rq)
 {
 	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);
 	struct nvme_rdma_device *dev = queue->device;
@@ -1377,8 +1415,8 @@ static int nvme_rdma_set_sg_null(struct nvme_command *c)
 }
 
 static int nvme_rdma_map_sg_inline(struct nvme_rdma_queue *queue,
-				   struct nvme_rdma_request *req,
-				   struct nvme_command *c, int count)
+                                   struct nvme_rdma_request *req,
+                                   struct nvme_command *c, int count)
 {
 	struct nvme_sgl_desc *sg = &c->common.dptr.sgl;
 	struct ib_sge *sge = &req->sge[1];
@@ -1403,8 +1441,8 @@ static int nvme_rdma_map_sg_inline(struct nvme_rdma_queue *queue,
 }
 
 static int nvme_rdma_map_sg_single(struct nvme_rdma_queue *queue,
-				   struct nvme_rdma_request *req,
-				   struct nvme_command *c)
+                                   struct nvme_rdma_request *req,
+                                   struct nvme_command *c)
 {
 	struct nvme_keyed_sgl_desc *sg = &c->common.dptr.ksgl;
 
@@ -1416,8 +1454,8 @@ static int nvme_rdma_map_sg_single(struct nvme_rdma_queue *queue,
 }
 
 static int nvme_rdma_map_sg_fr(struct nvme_rdma_queue *queue,
-			       struct nvme_rdma_request *req,
-			       struct nvme_command *c, int count)
+                               struct nvme_rdma_request *req,
+                               struct nvme_command *c, int count)
 {
 	struct nvme_keyed_sgl_desc *sg = &c->common.dptr.ksgl;
 	int nr;
@@ -1432,7 +1470,7 @@ static int nvme_rdma_map_sg_fr(struct nvme_rdma_queue *queue,
 	 * the block virtual boundary.
 	 */
 	nr = ib_portals_map_mr_sg(req->mr, req->data_sgl.sg_table.sgl, count, NULL,
-				  SZ_4K);
+	                          SZ_4K);
 	if (unlikely(nr < count)) {
 		ib_portals_mr_pool_put(queue->qp, &queue->qp->rdma_mrs, req->mr);
 		req->mr = NULL;
@@ -1452,7 +1490,7 @@ static int nvme_rdma_map_sg_fr(struct nvme_rdma_queue *queue,
 	req->reg_wr.mr = req->mr;
 	req->reg_wr.key = req->mr->rkey;
 	req->reg_wr.access =
-		IB_ACCESS_LOCAL_WRITE | IB_ACCESS_REMOTE_READ | IB_ACCESS_REMOTE_WRITE;
+	        IB_ACCESS_LOCAL_WRITE | IB_ACCESS_REMOTE_READ | IB_ACCESS_REMOTE_WRITE;
 
 	sg->addr = cpu_to_le64(req->mr->iova);
 	put_unaligned_le24(req->mr->length, sg->length);
@@ -1463,9 +1501,9 @@ static int nvme_rdma_map_sg_fr(struct nvme_rdma_queue *queue,
 }
 
 static void nvme_rdma_set_sig_domain(struct blk_integrity *bi,
-				     struct nvme_command *cmd,
-				     struct ib_sig_domain *domain, u16 control,
-				     u8 pi_type)
+                                     struct nvme_command *cmd,
+                                     struct ib_sig_domain *domain, u16 control,
+                                     u8 pi_type)
 {
 	domain->sig_type = IB_SIG_TYPE_T10_DIF;
 	domain->sig.dif.bg_type = IB_T10DIF_CRC;
@@ -1484,9 +1522,9 @@ static void nvme_rdma_set_sig_domain(struct blk_integrity *bi,
 }
 
 static void nvme_rdma_set_sig_attrs(struct blk_integrity *bi,
-				    struct nvme_command *cmd,
-				    struct ib_sig_attrs *sig_attrs,
-				    u8 pi_type)
+                                    struct nvme_command *cmd,
+                                    struct ib_sig_attrs *sig_attrs,
+                                    u8 pi_type)
 {
 	u16 control = le16_to_cpu(cmd->rw.control);
 
@@ -1524,9 +1562,9 @@ static void nvme_rdma_sig_done(struct ib_cq *cq, struct ib_wc *wc)
 }
 
 static int nvme_rdma_map_sg_pi(struct nvme_rdma_queue *queue,
-			       struct nvme_rdma_request *req,
-			       struct nvme_command *c, int count,
-			       int pi_count)
+                               struct nvme_rdma_request *req,
+                               struct nvme_command *c, int count,
+                               int pi_count)
 {
 	struct nvme_rdma_sgl *sgl = &req->data_sgl;
 	struct ib_reg_wr *wr = &req->reg_wr;
@@ -1544,8 +1582,8 @@ static int nvme_rdma_map_sg_pi(struct nvme_rdma_queue *queue,
 	}
 
 	nr = ib_portals_map_mr_sg_pi(req->mr, sgl->sg_table.sgl, count, NULL,
-				     req->metadata_sgl->sg_table.sgl, pi_count, NULL,
-				     SZ_4K);
+	                             req->metadata_sgl->sg_table.sgl, pi_count, NULL,
+	                             SZ_4K);
 	if (unlikely(nr)) {
 		goto mr_put;
 	}
@@ -1564,7 +1602,7 @@ static int nvme_rdma_map_sg_pi(struct nvme_rdma_queue *queue,
 	wr->mr = req->mr;
 	wr->key = req->mr->rkey;
 	wr->access =
-		IB_ACCESS_LOCAL_WRITE | IB_ACCESS_REMOTE_READ | IB_ACCESS_REMOTE_WRITE;
+	        IB_ACCESS_LOCAL_WRITE | IB_ACCESS_REMOTE_READ | IB_ACCESS_REMOTE_WRITE;
 
 	sg->addr = cpu_to_le64(req->mr->iova);
 	xfer_len = req->mr->length;
@@ -1588,15 +1626,15 @@ mr_put:
 }
 
 static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,
-				 int *count, int *pi_count)
+                                 int *count, int *pi_count)
 {
 	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);
 	int ret;
 
 	req->data_sgl.sg_table.sgl = (struct scatterlist *)(req + 1);
 	ret = sg_alloc_table_chained(&req->data_sgl.sg_table,
-				     blk_rq_nr_phys_segments(rq),
-				     req->data_sgl.sg_table.sgl, NVME_INLINE_SG_CNT);
+	                             blk_rq_nr_phys_segments(rq),
+	                             req->data_sgl.sg_table.sgl, NVME_INLINE_SG_CNT);
 	if (ret) {
 		return -ENOMEM;
 	}
@@ -1604,7 +1642,7 @@ static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,
 	req->data_sgl.nents = blk_rq_map_sg(rq->q, rq, req->data_sgl.sg_table.sgl);
 
 	*count = ib_portals_dma_map_sg(ibdev, req->data_sgl.sg_table.sgl,
-				       req->data_sgl.nents, rq_dma_dir(rq));
+	                               req->data_sgl.nents, rq_dma_dir(rq));
 	if (unlikely(*count <= 0)) {
 		ret = -EIO;
 		goto out_free_table;
@@ -1612,19 +1650,19 @@ static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,
 
 	if (blk_integrity_rq(rq)) {
 		req->metadata_sgl->sg_table.sgl =
-			(struct scatterlist *)(req->metadata_sgl + 1);
+		        (struct scatterlist *)(req->metadata_sgl + 1);
 		ret = sg_alloc_table_chained(
-			      &req->metadata_sgl->sg_table, rq->nr_integrity_segments,
-			      req->metadata_sgl->sg_table.sgl, NVME_INLINE_METADATA_SG_CNT);
+		              &req->metadata_sgl->sg_table, rq->nr_integrity_segments,
+		              req->metadata_sgl->sg_table.sgl, NVME_INLINE_METADATA_SG_CNT);
 		if (unlikely(ret)) {
 			ret = -ENOMEM;
 			goto out_unmap_sg;
 		}
 
 		req->metadata_sgl->nents =
-			blk_rq_map_integrity_sg(rq, req->metadata_sgl->sg_table.sgl);
+		        blk_rq_map_integrity_sg(rq, req->metadata_sgl->sg_table.sgl);
 		*pi_count = ib_portals_dma_map_sg(ibdev, req->metadata_sgl->sg_table.sgl,
-						  req->metadata_sgl->nents, rq_dma_dir(rq));
+		                                  req->metadata_sgl->nents, rq_dma_dir(rq));
 		if (unlikely(*pi_count <= 0)) {
 			ret = -EIO;
 			goto out_free_pi_table;
@@ -1635,26 +1673,26 @@ static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,
 
 out_free_pi_table:
 	sg_free_table_chained(&req->metadata_sgl->sg_table,
-			      NVME_INLINE_METADATA_SG_CNT);
+	                      NVME_INLINE_METADATA_SG_CNT);
 out_unmap_sg:
 	/*<gesalous> debug remove later*/;
 	struct scatterlist *s;
 	int i;
 	for_each_sg(req->data_sgl.sg_table.sgl, s, req->data_sgl.nents, i) {
 		PTL_DEBUG("CORE_DRIVER: calling unmap-sg[%d out of %d]: virt_addr=%p, iova=0x%llx, length=%u, for request: 0x%llx",
-			  i, req->data_sgl.nents,
-			  sg_virt(s), sg_dma_address(s), s->length, (u64)rq);
+		          i, req->data_sgl.nents,
+		          sg_virt(s), sg_dma_address(s), s->length, (u64)rq);
 	}
 	/*</gesalous>*/
 	ib_portals_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl,
-				req->data_sgl.nents, rq_dma_dir(rq));
+	                        req->data_sgl.nents, rq_dma_dir(rq));
 out_free_table:
 	sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);
 	return ret;
 }
 
 static int nvme_rdma_map_data(struct nvme_rdma_queue *queue, struct request *rq,
-			      struct nvme_command *c)
+                              struct nvme_command *c)
 {
 	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);
 	struct nvme_rdma_device *dev = queue->device;
@@ -1712,7 +1750,7 @@ static void nvme_rdma_send_done(struct ib_cq *cq, struct ib_wc *wc)
 {
 	struct nvme_rdma_qe *qe = container_of(wc->wr_cqe, struct nvme_rdma_qe, cqe);
 	struct nvme_rdma_request *req =
-		container_of(qe, struct nvme_rdma_request, sqe);
+	        container_of(qe, struct nvme_rdma_request, sqe);
 
 	if (unlikely(wc->status != IB_WC_SUCCESS)) {
 		nvme_rdma_wr_error(cq, wc, "SEND");
@@ -1722,8 +1760,8 @@ static void nvme_rdma_send_done(struct ib_cq *cq, struct ib_wc *wc)
 }
 
 static int nvme_rdma_post_send(struct nvme_rdma_queue *queue,
-			       struct nvme_rdma_qe *qe, struct ib_sge *sge,
-			       u32 num_sge, struct ib_send_wr *first)
+                               struct nvme_rdma_qe *qe, struct ib_sge *sge,
+                               u32 num_sge, struct ib_send_wr *first)
 {
 	struct ib_send_wr wr;
 	int ret;
@@ -1748,13 +1786,13 @@ static int nvme_rdma_post_send(struct nvme_rdma_queue *queue,
 	ret = ib_portals_post_send(queue->qp, first, NULL);
 	if (unlikely(ret)) {
 		dev_err(queue->ctrl->ctrl.device, "%s failed with error code %d\n",
-			__func__, ret);
+		        __func__, ret);
 	}
 	return ret;
 }
 
 static int nvme_rdma_post_recv(struct nvme_rdma_queue *queue,
-			       struct nvme_rdma_qe *qe)
+                               struct nvme_rdma_qe *qe)
 {
 	struct ib_recv_wr wr;
 	struct ib_sge list;
@@ -1771,10 +1809,11 @@ static int nvme_rdma_post_recv(struct nvme_rdma_queue *queue,
 	wr.sg_list = &list;
 	wr.num_sge = 1;
 
+	PTL_DEBUG("CORE_DRIVER: Posting recv buffer. Meta is ring[%u] qe addr: 0x%llx", qe->id, (u64)qe);
 	ret = ib_portals_post_recv(queue->qp, &wr, NULL);
 	if (unlikely(ret)) {
 		dev_err(queue->ctrl->ctrl.device, "%s failed with error code %d\n",
-			__func__, ret);
+		        __func__, ret);
 	}
 	return ret;
 }
@@ -1807,7 +1846,7 @@ static void nvme_rdma_submit_async_event(struct nvme_ctrl *arg)
 	int ret;
 
 	ib_portals_dma_sync_single_for_cpu(dev, sqe->dma, sizeof(*cmd),
-					   DMA_TO_DEVICE);
+	                                   DMA_TO_DEVICE);
 
 	memset(cmd, 0, sizeof(*cmd));
 	cmd->common.opcode = nvme_admin_async_event;
@@ -1818,15 +1857,15 @@ static void nvme_rdma_submit_async_event(struct nvme_ctrl *arg)
 	sqe->cqe.done = nvme_rdma_async_done;
 
 	ib_portals_dma_sync_single_for_device(dev, sqe->dma, sizeof(*cmd),
-					      DMA_TO_DEVICE);
+	                                      DMA_TO_DEVICE);
 
 	ret = nvme_rdma_post_send(queue, sqe, &sge, 1, NULL);
 	WARN_ON_ONCE(ret);
 }
 
 static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,
-				       struct nvme_completion *cqe,
-				       struct ib_wc *wc)
+                                       struct nvme_completion *cqe,
+                                       struct ib_wc *wc)
 {
 	struct request *rq;
 	struct nvme_rdma_request *req;
@@ -1834,14 +1873,14 @@ static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,
 	rq = nvme_find_rq(nvme_rdma_tagset(queue), cqe->command_id);
 	if (!rq) {
 		dev_err(queue->ctrl->ctrl.device, "got bad command_id %#x on QP %#x\n",
-			cqe->command_id, queue->qp->qp_num);
+		        cqe->command_id, queue->qp->qp_num);
 		nvme_rdma_error_recovery(queue->ctrl);
 		return;
 	}
 	req = blk_mq_rq_to_pdu(rq);
 	PTL_DEBUG("CORE_DRIVER NVME_RSP: got completion for {command id, "
-		  "request}: {%d, 0x%llx} does it have req->mr? %s",
-		  cqe->command_id, (u64)rq, req->mr ? "YES" : "NO");
+	          "request}: {%d, 0x%llx} does it have req->mr? %s",
+	          cqe->command_id, (u64)rq, req->mr ? "YES" : "NO");
 
 	req->status = cqe->status;
 	req->result = cqe->result;
@@ -1857,8 +1896,8 @@ static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,
 		if (req->mr) {
 			if (wc->ex.invalidate_rkey != req->mr->rkey) {
 				dev_err(queue->ctrl->ctrl.device,
-					"Bogus remote invalidation for rkey %#x\n",
-					req->mr ? req->mr->rkey : 333);
+				        "Bogus remote invalidation for rkey %#x\n",
+				        req->mr ? req->mr->rkey : 333);
 				nvme_rdma_error_recovery(queue->ctrl);
 			}
 		}
@@ -1868,7 +1907,7 @@ static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,
 		ret = nvme_rdma_inv_rkey(queue, req);
 		if (unlikely(ret < 0)) {
 			dev_err(queue->ctrl->ctrl.device,
-				"Queueing INV WR for rkey %#x failed (%d)\n", req->mr->rkey, ret);
+			        "Queueing INV WR for rkey %#x failed (%d)\n", req->mr->rkey, ret);
 			nvme_rdma_error_recovery(queue->ctrl);
 		}
 		/* the local invalidation completion will end the request */
@@ -1894,7 +1933,7 @@ static void nvme_rdma_recv_done(struct ib_cq * cq, struct ib_wc * wc)
 	/* sanity checking for received data length */
 	if (unlikely(wc->byte_len < len)) {
 		dev_err(queue->ctrl->ctrl.device, "Unexpected nvme completion length(%d)\n",
-			wc->byte_len);
+		        wc->byte_len);
 		nvme_rdma_error_recovery(queue->ctrl);
 		return;
 	}
@@ -1919,7 +1958,16 @@ static void nvme_rdma_recv_done(struct ib_cq * cq, struct ib_wc * wc)
 static int nvme_rdma_conn_established(struct nvme_rdma_queue * queue)
 {
 	int ret, i;
-
+	/*<gesalous> non-matching feat*/
+	/**
+	 * Create at this point a list entry that exposes the whole address space for data + nvme completions.
+	 *As we mentioned earlier, we implement also nvme completions as RMA operations to use the same PTE
+	 * and keep FIFO ordering since matching is not currently available in BXI nics. It is important to mention that e
+	 * everything is safe because BXI nic intelligently uses a separate page table for the NIC. As a result,
+	 * rma operation in random locations cannot happend
+	 **/
+	int ib_portals_enable_rma_ops(struct ib_qp * qp, struct ib_cq * cq);
+	ib_portals_enable_rma_ops(queue->qp, queue->ib_cq);
 	for (i = 0; i < queue->queue_size; i++) {
 		ret = nvme_rdma_post_recv(queue, &queue->rsp_ring[i]);
 		if (ret) {
@@ -1931,7 +1979,7 @@ static int nvme_rdma_conn_established(struct nvme_rdma_queue * queue)
 }
 
 static int nvme_rdma_conn_rejected(struct nvme_rdma_queue * queue,
-				   struct rdma_cm_event * ev)
+                                   struct rdma_cm_event * ev)
 {
 	struct rdma_cm_id *cm_id = queue->cm_id;
 	int status = ev->status;
@@ -1946,11 +1994,11 @@ static int nvme_rdma_conn_rejected(struct nvme_rdma_queue * queue,
 		u16 sts = le16_to_cpu(rej_data->sts);
 
 		dev_err(queue->ctrl->ctrl.device,
-			"Connect rejected: status %d (%s) nvme status %d (%s).\n", status,
-			rej_msg, sts, nvme_rdma_cm_msg(sts));
+		        "Connect rejected: status %d (%s) nvme status %d (%s).\n", status,
+		        rej_msg, sts, nvme_rdma_cm_msg(sts));
 	} else {
 		dev_err(queue->ctrl->ctrl.device, "Connect rejected: status %d (%s).\n",
-			status, rej_msg);
+		        status, rej_msg);
 	}
 
 	return -ECONNRESET;
@@ -1973,9 +2021,9 @@ static int nvme_rdma_addr_resolved(struct nvme_rdma_queue * queue)
 	ret = rdma_cm_portals_resolve_route(queue->cm_id, NVME_RDMA_CM_TIMEOUT_MS);
 	if (ret) {
 		dev_err(ctrl->device, "rdma_cm_portals_resolve_route failed (%d).\n",
-			queue->cm_error);
+		        queue->cm_error);
 		PTL_FATAL("resolve route failed sorry ctrl->device NULL? %s cm_error: %d",
-			  ctrl->device ? "NO" : "YES", queue->cm_error);
+		          ctrl->device ? "NO" : "YES", queue->cm_error);
 		goto out_destroy_queue;
 	}
 
@@ -2030,13 +2078,13 @@ static int nvme_rdma_route_resolved(struct nvme_rdma_queue * queue)
 		/* cntlid should only be set when creating an I/O queue */
 		priv.cntlid = cpu_to_le16(ctrl->ctrl.cntlid);
 	}
-	/*<gesalous>*/
+	/*<gesalous> non-matching feat*/
 	PTL_DEBUG("CORE_DRIVER: queue_idx=%d "
-		  "rsp_ring[0].dma=0x%llx queue_size=%d sizeof(nvme_completion)=%zu",
-		  nvme_rdma_queue_idx(queue),
-		  (u64)queue->rsp_ring[0].dma,
-		  queue->queue_size,
-		  sizeof(struct nvme_completion));
+	          "rsp_ring[0].dma=0x%llx queue_size=%d sizeof(nvme_completion)=%zu",
+	          nvme_rdma_queue_idx(queue),
+	          (u64)queue->rsp_ring[0].dma,
+	          queue->queue_size,
+	          sizeof(struct nvme_completion));
 	/**
 	 * CUSTOM EXTENSION: Portals-Optimized Completion Management
 	 *
@@ -2067,18 +2115,15 @@ static int nvme_rdma_route_resolved(struct nvme_rdma_queue * queue)
 	 * initiator's memory, ensuring that the completion is only visible after
 	 * the data payload has been globally observed, maintaining NVMe semantics.
 	 */
-
+	struct ptl_obj_conn_params ptl_params = {.nvme_cpl_start_dma_addr = queue->rsp_ring[0].dma, queue->queue_size};
 	int rdma_cm_portals_connect_locked_with_ptl_params(
-		struct rdma_cm_id * id, struct rdma_conn_param * param,
-		u64 nvme_cpl_start_dma_addr, size_t queue_size);
-	ret = rdma_cm_portals_connect_locked_with_ptl_params(queue->cm_id, &param, queue->rsp_ring[0].dma,
-		queue->queue_size);
-	/*</gesalous>*/
+	        struct rdma_cm_id * id, struct rdma_conn_param * param, struct ptl_obj_conn_params * ptl_params);
+	ret = rdma_cm_portals_connect_locked_with_ptl_params(queue->cm_id, &param, &ptl_params);
 	//vanilla
 	// ret = rdma_cm_portals_connect_locked(queue->cm_id, &param);
 	if (ret) {
 		dev_err(ctrl->ctrl.device, "rdma_cm_portals_connect_locked failed (%d).\n",
-			ret);
+		        ret);
 		return ret;
 	}
 
@@ -2086,7 +2131,7 @@ static int nvme_rdma_route_resolved(struct nvme_rdma_queue * queue)
 }
 
 static int nvme_rdma_cm_handler(struct rdma_cm_id * cm_id,
-				struct rdma_cm_event * ev)
+                                struct rdma_cm_event * ev)
 {
 	struct nvme_rdma_queue *queue = cm_id->context;
 	int cm_error = 0;
@@ -2095,7 +2140,7 @@ static int nvme_rdma_cm_handler(struct rdma_cm_id * cm_id,
 	/*</gesalous>*/
 
 	dev_dbg(queue->ctrl->ctrl.device, "%s (%d): status %d id %p\n",
-		rdma_cm_portals_event_msg(ev->event), ev->event, ev->status, cm_id);
+	        rdma_cm_portals_event_msg(ev->event), ev->event, ev->status, cm_id);
 
 	PTL_DEBUG("CORE_DRIVER: Going into the switch shit");
 
@@ -2127,7 +2172,7 @@ static int nvme_rdma_cm_handler(struct rdma_cm_id * cm_id,
 	case RDMA_CM_EVENT_ADDR_CHANGE:
 	case RDMA_CM_EVENT_TIMEWAIT_EXIT:
 		dev_dbg(queue->ctrl->ctrl.device,
-			"disconnect received - connection closed\n");
+		        "disconnect received - connection closed\n");
 		nvme_rdma_error_recovery(queue->ctrl);
 		break;
 	case RDMA_CM_EVENT_DEVICE_REMOVAL:
@@ -2135,7 +2180,7 @@ static int nvme_rdma_cm_handler(struct rdma_cm_id * cm_id,
 		break;
 	default:
 		dev_err(queue->ctrl->ctrl.device, "Unexpected RDMA CM event (%d)\n",
-			ev->event);
+		        ev->event);
 		nvme_rdma_error_recovery(queue->ctrl);
 		break;
 	}
@@ -2166,9 +2211,9 @@ static enum blk_eh_timer_return nvme_rdma_timeout(struct request * rq)
 	int qid = nvme_rdma_queue_idx(queue);
 
 	dev_warn(ctrl->ctrl.device,
-		 "I/O tag %d (%04x) opcode %#x (%s) QID %d timeout\n", rq->tag,
-		 nvme_cid(rq), cmd->common.opcode, nvme_fabrics_opcode_str(qid, cmd),
-		 qid);
+	         "I/O tag %d (%04x) opcode %#x (%s) QID %d timeout\n", rq->tag,
+	         nvme_cid(rq), cmd->common.opcode, nvme_fabrics_opcode_str(qid, cmd),
+	         qid);
 
 	if (nvme_ctrl_state(&ctrl->ctrl) != NVME_CTRL_LIVE) {
 		/*
@@ -2197,7 +2242,7 @@ static enum blk_eh_timer_return nvme_rdma_timeout(struct request * rq)
 }
 
 static blk_status_t nvme_rdma_queue_rq(struct blk_mq_hw_ctx * hctx,
-				       const struct blk_mq_queue_data * bd)
+                                       const struct blk_mq_queue_data * bd)
 {
 	struct nvme_ns *ns = hctx->queue->queuedata;
 	struct nvme_rdma_queue *queue = hctx->driver_data;
@@ -2219,14 +2264,14 @@ static blk_status_t nvme_rdma_queue_rq(struct blk_mq_hw_ctx * hctx,
 	dev = queue->device->dev;
 
 	req->sqe.dma = ib_portals_dma_map_single(
-			       dev, req->sqe.data, sizeof(struct nvme_command), DMA_TO_DEVICE);
+	                       dev, req->sqe.data, sizeof(struct nvme_command), DMA_TO_DEVICE);
 	err = ib_portals_dma_mapping_error(dev, req->sqe.dma);
 	if (unlikely(err)) {
 		return BLK_STS_RESOURCE;
 	}
 
 	ib_portals_dma_sync_single_for_cpu(dev, sqe->dma, sizeof(struct nvme_command),
-					   DMA_TO_DEVICE);
+	                                   DMA_TO_DEVICE);
 
 	ret = nvme_setup_cmd(ns, rq);
 	if (ret) {
@@ -2253,10 +2298,10 @@ static blk_status_t nvme_rdma_queue_rq(struct blk_mq_hw_ctx * hctx,
 	sqe->cqe.done = nvme_rdma_send_done;
 
 	ib_portals_dma_sync_single_for_device(
-		dev, sqe->dma, sizeof(struct nvme_command), DMA_TO_DEVICE);
+	        dev, sqe->dma, sizeof(struct nvme_command), DMA_TO_DEVICE);
 
 	err = nvme_rdma_post_send(queue, sqe, req->sge, req->num_sge,
-				  req->mr ? &req->reg_wr.wr : NULL);
+	                          req->mr ? &req->reg_wr.wr : NULL);
 	if (unlikely(err)) {
 		goto err_unmap;
 	}
@@ -2276,12 +2321,12 @@ err:
 	nvme_cleanup_cmd(rq);
 unmap_qe:
 	ib_portals_dma_unmap_single(dev, req->sqe.dma, sizeof(struct nvme_command),
-				    DMA_TO_DEVICE);
+	                            DMA_TO_DEVICE);
 	return ret;
 }
 
 static int nvme_rdma_poll(struct blk_mq_hw_ctx * hctx,
-			  struct io_comp_batch * iob)
+                          struct io_comp_batch * iob)
 {
 	struct nvme_rdma_queue *queue = hctx->driver_data;
 
@@ -2331,7 +2376,7 @@ static void nvme_rdma_complete_rq(struct request * rq)
 
 	nvme_rdma_unmap_data(queue, rq);
 	ib_portals_dma_unmap_single(ibdev, req->sqe.dma, sizeof(struct nvme_command),
-				    DMA_TO_DEVICE);
+	                            DMA_TO_DEVICE);
 	nvme_complete_rq(rq);
 }
 
@@ -2363,7 +2408,7 @@ static const struct blk_mq_ops nvme_rdma_admin_mq_ops = {
 };
 
 static void nvme_rdma_shutdown_ctrl(struct nvme_rdma_ctrl * ctrl,
-				    bool shutdown)
+                                    bool shutdown)
 {
 	nvme_rdma_teardown_io_queues(ctrl, shutdown);
 	nvme_quiesce_admin_queue(&ctrl->ctrl);
@@ -2379,7 +2424,7 @@ static void nvme_rdma_delete_ctrl(struct nvme_ctrl * ctrl)
 static void nvme_rdma_reset_ctrl_work(struct work_struct * work)
 {
 	struct nvme_rdma_ctrl *ctrl =
-		container_of(work, struct nvme_rdma_ctrl, ctrl.reset_work);
+	        container_of(work, struct nvme_rdma_ctrl, ctrl.reset_work);
 	int ret;
 
 	nvme_stop_ctrl(&ctrl->ctrl);
@@ -2475,7 +2520,7 @@ nvme_rdma_alloc_ctrl(struct device * dev, struct nvmf_ctrl_options * opts)
 
 	PTL_DEBUG("CORE_DRIVER: Allocating nvme controller...Step 2 ok");
 	ret = inet_pton_with_scope(&init_net, AF_UNSPEC, opts->traddr, opts->trsvcid,
-				   &ctrl->addr);
+	                           &ctrl->addr);
 	if (ret) {
 		pr_err("malformed address passed: %s:%s\n", opts->traddr, opts->trsvcid);
 		goto out_free_ctrl;
@@ -2484,7 +2529,7 @@ nvme_rdma_alloc_ctrl(struct device * dev, struct nvmf_ctrl_options * opts)
 
 	if (opts->mask & NVMF_OPT_HOST_TRADDR) {
 		ret = inet_pton_with_scope(&init_net, AF_UNSPEC, opts->host_traddr, NULL,
-					   &ctrl->src_addr);
+		                           &ctrl->src_addr);
 		if (ret) {
 			pr_err("malformed src address passed: %s\n", opts->host_traddr);
 			goto out_free_ctrl;
@@ -2502,19 +2547,19 @@ nvme_rdma_alloc_ctrl(struct device * dev, struct nvmf_ctrl_options * opts)
 	INIT_WORK(&ctrl->ctrl.reset_work, nvme_rdma_reset_ctrl_work);
 
 	ctrl->ctrl.queue_count =
-		opts->nr_io_queues + opts->nr_write_queues + opts->nr_poll_queues + 1;
+	        opts->nr_io_queues + opts->nr_write_queues + opts->nr_poll_queues + 1;
 	ctrl->ctrl.sqsize = opts->queue_size - 1;
 	ctrl->ctrl.kato = opts->kato;
 
 	ret = -ENOMEM;
 	ctrl->queues =
-		kcalloc(ctrl->ctrl.queue_count, sizeof(*ctrl->queues), GFP_KERNEL);
+	        kcalloc(ctrl->ctrl.queue_count, sizeof(*ctrl->queues), GFP_KERNEL);
 	if (!ctrl->queues) {
 		goto out_free_ctrl;
 	}
 
 	ret = nvme_init_ctrl(&ctrl->ctrl, dev, &nvme_rdma_ctrl_ops,
-			     0 /* no quirks, we're perfect! */);
+	                     0 /* no quirks, we're perfect! */);
 
 	if (ret) {
 		goto out_kfree_queues;
@@ -2531,7 +2576,7 @@ out_free_ctrl:
 }
 
 static struct nvme_ctrl *nvme_rdma_create_ctrl(struct device * dev,
-		struct nvmf_ctrl_options * opts)
+                                               struct nvmf_ctrl_options * opts)
 {
 	struct nvme_rdma_ctrl *ctrl;
 	bool changed;
@@ -2562,8 +2607,8 @@ static struct nvme_ctrl *nvme_rdma_create_ctrl(struct device * dev,
 	}
 
 	dev_info(ctrl->ctrl.device,
-		 "new ctrl: NQN \"%s\", addr %pISpcs, hostnqn: %s\n",
-		 nvmf_ctrl_subsysnqn(&ctrl->ctrl), &ctrl->addr, opts->host->nqn);
+	         "new ctrl: NQN \"%s\", addr %pISpcs, hostnqn: %s\n",
+	         nvmf_ctrl_subsysnqn(&ctrl->ctrl), &ctrl->addr, opts->host->nqn);
 
 	mutex_lock(&nvme_rdma_ctrl_mutex);
 	list_add_tail(&ctrl->list, &nvme_rdma_ctrl_list);
@@ -2589,14 +2634,14 @@ static struct nvmf_transport_ops nvme_rdma_transport = {
 	.module = THIS_MODULE,
 	.required_opts = NVMF_OPT_TRADDR,
 	.allowed_opts = NVMF_OPT_TRSVCID | NVMF_OPT_RECONNECT_DELAY |
-			NVMF_OPT_HOST_TRADDR | NVMF_OPT_CTRL_LOSS_TMO |
-			NVMF_OPT_NR_WRITE_QUEUES | NVMF_OPT_NR_POLL_QUEUES |
-			NVMF_OPT_TOS,
+	                NVMF_OPT_HOST_TRADDR | NVMF_OPT_CTRL_LOSS_TMO |
+	                NVMF_OPT_NR_WRITE_QUEUES | NVMF_OPT_NR_POLL_QUEUES |
+	                NVMF_OPT_TOS,
 	.create_ctrl = nvme_rdma_create_ctrl,
 };
 
 static void nvme_rdma_remove_one(struct ib_device * ib_device,
-				 void *client_data)
+                                 void *client_data)
 {
 	struct nvme_rdma_ctrl *ctrl;
 	struct nvme_rdma_device *ndev;
@@ -2629,7 +2674,7 @@ static void nvme_rdma_remove_one(struct ib_device * ib_device,
 }
 
 static struct ib_client nvme_rdma_ib_client = {.name = "nvme_rdma",
-						       .remove = nvme_rdma_remove_one
+	                                               .remove = nvme_rdma_remove_one
 };
 
 /*<gesalous>*/
@@ -2654,18 +2699,18 @@ static int __ptl_init_devices(void)
 		}
 
 		strlcpy(bxiv3_dev_map.bxiv3_dev[iface_id]->fake_ib_dev.name, "BXIv3",
-			IB_DEVICE_NAME_MAX);
+		        IB_DEVICE_NAME_MAX);
 		bxiv3_dev_map.bxiv3_dev[iface_id]->fake_ib_dev.attrs.device_cap_flags =
-			IB_DEVICE_MEM_MGT_EXTENSIONS;
+		        IB_DEVICE_MEM_MGT_EXTENSIONS;
 		bxiv3_dev_map.bxiv3_dev[iface_id]->fake_ib_dev.attrs.max_send_sge =
-			PTL_BXIV3_DEVICE_MAX_INLINE_SEGMENTS;
+		        PTL_BXIV3_DEVICE_MAX_INLINE_SEGMENTS;
 		bxiv3_dev_map.bxiv3_dev[iface_id]->fake_ib_dev.num_comp_vectors =
-			num_online_cpus();
+		        num_online_cpus();
 		++bxiv3_dev_map.num_nicia;
 	}
 
 	PTL_INFO("Initialized %u BXIv3 interfaces: %s", bxiv3_dev_map.num_nicia,
-		 bxiv3_dev_map.num_nicia ? "OK" : "Sorry no bxiv3 nics found");
+	         bxiv3_dev_map.num_nicia ? "OK" : "Sorry no bxiv3 nics found");
 
 	return bxiv3_dev_map.num_nicia ? 0 : -EOPNOTSUPP;
 }

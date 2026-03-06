@@ -11,10 +11,10 @@
 extern struct ptl_bxiv3_dev_map bxiv3_dev_map;
 static unsigned long next_nicia_num = 0;
 struct ptl_cm_id *ptl_cm_id_create(struct net *net,
-                                   rdma_cm_event_handler event_handler,
-                                   void *context, enum rdma_ucm_port_space ps,
-                                   enum ib_qp_type qp_type,
-                                   const char *caller)
+				   rdma_cm_event_handler event_handler,
+				   void *context, enum rdma_ucm_port_space ps,
+				   enum ib_qp_type qp_type,
+				   const char *caller)
 {
 	struct ptl_cm_id *ptl_cm_id;
 	(void)qp_type;
@@ -23,8 +23,9 @@ struct ptl_cm_id *ptl_cm_id_create(struct net *net,
 		return ERR_PTR(-EOPNOTSUPP);
 	}
 	ptl_cm_id = kzalloc(sizeof(*ptl_cm_id), GFP_KERNEL);
-	if (!ptl_cm_id)
+	if (!ptl_cm_id) {
 		return ERR_PTR(-ENOMEM);
+	}
 	ptl_cm_id->object_type = PTL_CM_ID;
 	ptl_cm_id->net = get_net(net);
 	ptl_cm_id->event_handler = event_handler;
@@ -33,7 +34,7 @@ struct ptl_cm_id *ptl_cm_id_create(struct net *net,
 	/*Wiring staff of the og rdma_cm_id for the bottom layer of the driver to work */
 	kref_get(&bxiv3_dev_map.bxiv3_dev[next_nicia_num]->count);
 	ptl_cm_id->fake_cm_id.device =
-	        &bxiv3_dev_map.bxiv3_dev[next_nicia_num]->fake_ib_dev;
+		&bxiv3_dev_map.bxiv3_dev[next_nicia_num]->fake_ib_dev;
 
 	ptl_cm_id->fake_cm_id.context = context;
 	ptl_cm_id->fake_cm_id.event_handler = event_handler;/*Just in case*/
@@ -55,15 +56,16 @@ struct ptl_cm_id *ptl_cm_id_create(struct net *net,
 }
 
 int ptl_cm_id_resolve_addr(struct ptl_cm_id *ptl_cm_id,
-                           struct sockaddr *src_addr,
-                           const struct sockaddr *dst_addr,
-                           unsigned long timeout_ms)
+			   struct sockaddr *src_addr,
+			   const struct sockaddr *dst_addr,
+			   unsigned long timeout_ms)
 {
 
 	struct sockaddr_in *addr_in;
 	struct sockaddr_in6 *addr_in6;
-	if (!ptl_cm_id || !dst_addr)
+	if (!ptl_cm_id || !dst_addr) {
 		return -EINVAL;
+	}
 
 	switch (dst_addr->sa_family) {
 	case AF_INET: {
@@ -95,10 +97,11 @@ int ptl_cm_id_resolve_addr(struct ptl_cm_id *ptl_cm_id,
 	ptl_cm_id->nid = ptl_cm_id->bxiv3_dev->proc_id.phys.nid;
 	ptl_cm_id->pid = ptl_cm_id->bxiv3_dev->proc_id.phys.pid;
 	PTL_DEBUG("Resolved Target address: {nid:%d,pid:%d} initiator is "
-	          "{nid:%d, pid:%d}",
-	          ptl_cm_id->remote_nid, ptl_cm_id->remote_pid, ptl_cm_id->nid,
-	          ptl_cm_id->pid);
-	PTL_DEBUG("Statically assign ptl_cm_id to BXIv3-1 XXX TODO XXX: spread it dynamically Ok: %s", "yes");
+		  "{nid:%d, pid:%d}",
+		  ptl_cm_id->remote_nid, ptl_cm_id->remote_pid, ptl_cm_id->nid,
+		  ptl_cm_id->pid);
+	PTL_DEBUG("Statically assign ptl_cm_id to BXIv3-1 XXX TODO XXX: spread it dynamically Ok: %s",
+		  "yes");
 	return 0;
 }
 

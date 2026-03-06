@@ -9,7 +9,9 @@ struct ptl_recv_op {
 	struct ib_cqe *wr_cqe;
 	struct ptl_qp *ptl_qp;
 	u64 wr_id;
+	bool is_set;
 };
+
 
 struct ptl_send_op {
 	ptl_obj_type_e object_type;

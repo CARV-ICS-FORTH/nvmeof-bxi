@@ -17,9 +17,7 @@
 #include <linux/spinlock.h>
 #include <portals4.h>
 
-//og
-// #define PTL_RMA_ME_OPTS (PTL_ME_OP_PUT | PTL_ME_OP_GET | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_EVENT_UNLINK_DISABLE | PTL_ME_EVENT_COMM_DISABLE)
-#define PTL_RMA_ME_OPTS (PTL_ME_OP_PUT | PTL_ME_OP_GET | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_EVENT_UNLINK_DISABLE)
+
 /**
  * Maximum size of the buffers to receive messages regarding the connection
  * protocol
@@ -120,8 +118,9 @@ struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id)
 	spin_lock_init(&bxiv3_dev->pte_table_lock);
 	/*Reserve PTL_CP_SERVER_PTE for the connection management*/
 	set_bit(PTL_CP_SERVER_PTE, bxiv3_dev->pte_table);
-	/*Reserve for RMA operations*/
-	set_bit(PTL_RMA_PTE, bxiv3_dev->pte_table);
+	/*<gesalous> non-matching feat*/
+	/*Reserve for RMA operations, deactivate this feat for the non-matching case*/
+	// set_bit(PTL_RMA_PTE, bxiv3_dev->pte_table);
 	bxiv3_dev->iface_id = iface_id;
 	kref_init(&bxiv3_dev->count);
 
@@ -242,10 +241,11 @@ struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id)
 	}
 	bxiv3_dev->ptl_cq_pool = ptl_cq_pool_create(bxiv3_dev);
 
-	PTL_DEBUG("Creating the completion queue for the RMA operations...");
-	bxiv3_dev->rma_operations_eq = ptl_cq_create(NULL, bxiv3_dev, PTL_CP_SERVER_CQ_ENTRIES, PTL_RMA_PTE, IB_POLL_SOFTIRQ);
-	PTL_DEBUG("Creating the completion queue for the RMA operations...SUCCESS");
-	ptl_bxiv3_device_enable_rma(bxiv3_dev, PTL_RMA_PTE, bxiv3_dev->rma_operations_eq);
+	/*<gesalous> deactivate these steps for the non-matching feat*/
+	// PTL_DEBUG("Creating the completion queue for the RMA operations...");
+	// bxiv3_dev->rma_operations_eq = ptl_cq_create(NULL, bxiv3_dev, PTL_CP_SERVER_CQ_ENTRIES, PTL_RMA_PTE, IB_POLL_SOFTIRQ);
+	// PTL_DEBUG("Creating the completion queue for the RMA operations...SUCCESS");
+	// ptl_bxiv3_device_enable_rma(bxiv3_dev, PTL_RMA_PTE, bxiv3_dev->rma_operations_eq);
 
 	/* QP Map hashtable init */
 	hash_init(bxiv3_dev->qp_map);

@@ -107,8 +107,9 @@ struct ptl_cq *ptl_cq_pool_get(struct ptl_cq_pool *ptl_cq_pool, int nr_cqes,
 	/* Search the free list for a CQ with sufficient entries */
 	spin_lock(&ptl_cq_pool->cq_list_lock);
 	list_for_each_entry(tmp_cq, &ptl_cq_pool->ptl_cq_list_free, head) {
-		if (tmp_cq->nr_cqes < nr_cqes)
+		if (tmp_cq->nr_cqes < nr_cqes) {
 			continue;
+		}
 		ptl_cq = tmp_cq;
 		list_del(&ptl_cq->head);
 		list_add(&ptl_cq->head, &ptl_cq_pool->ptl_cq_list_reserved);

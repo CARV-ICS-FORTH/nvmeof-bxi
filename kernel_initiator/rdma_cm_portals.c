@@ -40,7 +40,7 @@
 #define GES_UNIMPL_RATELIMIT_PERIOD HZ
 #define GES_UNIMPL_RATELIMIT_BURST 10
 static DEFINE_RATELIMIT_STATE(ges_unimpl_rs, GES_UNIMPL_RATELIMIT_PERIOD,
-			      GES_UNIMPL_RATELIMIT_BURST);
+                              GES_UNIMPL_RATELIMIT_BURST);
 
 #define RDMACM_IB_UNIMPL(fmt, ...)                                             \
   do {                                                                         \
@@ -53,8 +53,8 @@ static DEFINE_RATELIMIT_STATE(ges_unimpl_rs, GES_UNIMPL_RATELIMIT_PERIOD,
 static bool ges_fail_fast = true;
 module_param_named(fail_fast, ges_fail_fast, bool, 0644);
 MODULE_PARM_DESC(
-	fail_fast,
-	"If true, return -EOPNOTSUPP for all ops; if false, always succeed.");
+        fail_fast,
+        "If true, return -EOPNOTSUPP for all ops; if false, always succeed.");
 
 /* --- Helpers ---- */
 static inline int ges_ret(int fail_code)
@@ -67,16 +67,16 @@ static inline int ges_ret(int fail_code)
 
 
 const char *ptl_msg_types[PTL_NUM_MSGS] = {"NVMeOF_cmd",
-					   "NVMeOF_cpl",
-					   "NVMeOF_rma",
-					   "PTL_OPEN_CONNECTION",
-					   "PTL_OPEN_CONNECTION_REPLY",
-					   "PTL_OPEN_CONNECTION",
-					   "PTL_OPEN_CONNECTION_REPLY"
-					  };
+                                           "NVMeOF_cpl",
+                                           "NVMeOF_rma",
+                                           "PTL_OPEN_CONNECTION",
+                                           "PTL_OPEN_CONNECTION_REPLY",
+                                           "PTL_CLOSE_CONNECTION",
+                                           "PTL_CLOSE_CONNECTION_REPLY"
+                                          };
 
 static int rdma_cm_ptl_send_request(struct ptl_conn_send_buffer *send_buffer,
-				    struct ptl_cm_id *ptl_id)
+                                    struct ptl_cm_id *ptl_id)
 {
 	extern struct ptl_bxiv3_dev_map bxiv3_dev_map;
 
@@ -93,7 +93,7 @@ static int rdma_cm_ptl_send_request(struct ptl_conn_send_buffer *send_buffer,
 	send_buffer->md.length = send_buffer->conn_msg.msg_header.total_msg_size;
 	send_buffer->md.cpu_start = &send_buffer->conn_msg;
 	send_buffer->md.start = ib_portals_dma_map_single(&ptl_id->bxiv3_dev->fake_ib_dev,
-				send_buffer->md.cpu_start, send_buffer->md.length, DMA_FROM_DEVICE);
+	                                                  send_buffer->md.cpu_start, send_buffer->md.length, DMA_FROM_DEVICE);
 	if (ib_portals_dma_mapping_error(&ptl_id->bxiv3_dev->fake_ib_dev, send_buffer->md.start)) {
 		PTL_FATAL("DMA mapping failed for length %llu on PtlMDBInd", send_buffer->md.length);
 		return -EIO;
@@ -112,21 +112,21 @@ static int rdma_cm_ptl_send_request(struct ptl_conn_send_buffer *send_buffer,
 
 	// ptl_hdr_data_t hdr = PTL_NI_ARG_INVALID;
 	PTL_DEBUG("Sending message: %s and total "
-		  "size in B: %llu to {nid:%d,pid:%d,pte:%d}",
-		  ptl_msg_types[send_buffer->conn_msg.msg_header.msg_type],
-		  send_buffer->conn_msg.msg_header.total_msg_size,
-		  target.phys.nid, target.phys.pid, peer_info->dest.pte);
+	          "size in B: %llu to {nid:%d,pid:%d,pte:%d}",
+	          ptl_msg_types[send_buffer->conn_msg.msg_header.msg_type],
+	          send_buffer->conn_msg.msg_header.total_msg_size,
+	          target.phys.nid, target.phys.pid, peer_info->dest.pte);
 
 	rc = PtlPut(send_buffer->md_handle,/* MD handle */
-		    0,/* local offset */
-		    send_buffer->conn_msg.msg_header.total_msg_size,/* length */
-		    PTL_ACK_REQ,/* acknowledgment requested */
-		    target, /* target process */
-		    peer_info->dest.pte,  /* portal table index */
-		    0,
-		    0, /* remote offset */
-		    send_buffer,
-		    message_type);
+	            0,/* local offset */
+	            send_buffer->conn_msg.msg_header.total_msg_size,/* length */
+	            PTL_ACK_REQ,/* acknowledgment requested */
+	            target, /* target process */
+	            peer_info->dest.pte,  /* portal table index */
+	            0,
+	            0, /* remote offset */
+	            send_buffer,
+	            message_type);
 
 	if (rc != PTL_OK) {
 		PTL_FATAL("PtlPut failed with code: %d", rc);
@@ -139,11 +139,11 @@ static int rdma_cm_ptl_send_request(struct ptl_conn_send_buffer *send_buffer,
 /* --- API stubs ---- */
 
 struct rdma_cm_id *__rdma_cm_portals_create_kernel_id(
-	struct net *net, rdma_cm_event_handler event_handler, void *context,
-	enum rdma_ucm_port_space ps, enum ib_qp_type qp_type, const char *caller)
+        struct net *net, rdma_cm_event_handler event_handler, void *context,
+        enum rdma_ucm_port_space ps, enum ib_qp_type qp_type, const char *caller)
 {
 	struct ptl_cm_id *ptl_cm_id =
-		ptl_cm_id_create(net, event_handler, context, ps, qp_type, caller);
+	        ptl_cm_id_create(net, event_handler, context, ps, qp_type, caller);
 	return &ptl_cm_id->fake_cm_id;
 }
 
@@ -205,9 +205,9 @@ EXPORT_SYMBOL_GPL(rdma_cm_portals_destroy_id);
 // }
 
 int rdma_cm_portals_resolve_addr(struct rdma_cm_id *id,
-				 struct sockaddr *src_addr,
-				 const struct sockaddr *dst_addr,
-				 unsigned long timeout_ms)
+                                 struct sockaddr *src_addr,
+                                 const struct sockaddr *dst_addr,
+                                 unsigned long timeout_ms)
 {
 	struct rdma_cm_event event = {0};
 	struct ptl_cm_id *ptl_cm_id = container_of(id, struct ptl_cm_id, fake_cm_id);
@@ -238,7 +238,7 @@ int rdma_cm_portals_resolve_addr(struct rdma_cm_id *id,
 EXPORT_SYMBOL_GPL(rdma_cm_portals_resolve_addr);
 
 int rdma_cm_portals_resolve_route(struct rdma_cm_id *id,
-				  unsigned long timeout_ms)
+                                  unsigned long timeout_ms)
 {
 	/**
 	 * XXX TODO XXX Think if we need here to do something like ping the
@@ -256,21 +256,21 @@ int rdma_cm_portals_resolve_route(struct rdma_cm_id *id,
 EXPORT_SYMBOL_GPL(rdma_cm_portals_resolve_route);
 
 
-
-int rdma_cm_portals_connect_locked_with_ptl_params(
-	struct rdma_cm_id *id, struct rdma_conn_param *param,
-	u64 nvme_cpl_start_dma_addr, size_t queue_size)
+/*<gesalous> non-matching feat*/
+int rdma_cm_portals_connect_locked_with_ptl_params(struct rdma_cm_id *id, struct rdma_conn_param *param, struct ptl_obj_conn_params *ptl_params)
 {
 	struct ptl_cm_id *ptl_id = container_of(id, struct ptl_cm_id, fake_cm_id);
 	PTL_CHECK(ptl_id, PTL_CM_ID);
-	ptl_id->nvme_cpl_start =  nvme_cpl_start_dma_addr;
-	ptl_id->nvme_completion_queue_size = queue_size;
+	ptl_id->nvme_cpl_start =  ptl_params->nvme_cpl_start_dma_addr;
+	ptl_id->nvme_completion_queue_size = ptl_params->queue_size;
 	return rdma_cm_portals_connect_locked(id, param);
 }
 EXPORT_SYMBOL_GPL(rdma_cm_portals_connect_locked_with_ptl_params);
 
+
+
 int rdma_cm_portals_connect_locked(struct rdma_cm_id *id,
-				   struct rdma_conn_param *param)
+                                   struct rdma_conn_param *param)
 {
 	struct ptl_conn_send_buffer *send_buffer;
 	char *private_data_buf;
@@ -291,7 +291,7 @@ int rdma_cm_portals_connect_locked(struct rdma_cm_id *id,
 	send_buffer->conn_msg.msg_header.version = PTL_SPDK_PROTOCOL_VERSION;
 	send_buffer->conn_msg.msg_header.msg_type = PTL_OPEN_CONNECTION;
 	send_buffer->conn_msg.msg_header.total_msg_size = sizeof(send_buffer->conn_msg) +
-		param->private_data_len;
+	                                                  param->private_data_len;
 	if (send_buffer->conn_msg.msg_header.total_msg_size > RDMA_PTL_MSG_BUFFER_SIZE) {
 		PTL_FATAL("Buffer too small");
 	}
@@ -308,7 +308,9 @@ int rdma_cm_portals_connect_locked(struct rdma_cm_id *id,
 	PTL_DEBUG("Initator QP NUM: %d", send_buffer->conn_msg.conn_open.initiator_qp_num);
 	/*Inform the target about the match bits I (the initiator) use for my recv operations*/
 	send_buffer->conn_msg.conn_open.msg_pte = ptl_id->ptl_qp->recv_cq->pte;
-	send_buffer->conn_msg.conn_open.rma_pte = PTL_RMA_PTE;
+	// send_buffer->conn_msg.conn_open.rma_pte = PTL_RMA_PTE;
+	/*<gesalous> deactivate this for the non-matching feat*/
+	send_buffer->conn_msg.conn_open.rma_pte = send_buffer->conn_msg.conn_open.msg_pte;
 	send_buffer->conn_msg.conn_open.cq_id = ptl_id->ptl_qp->recv_cq->ptl_cq_id;
 	send_buffer->conn_msg.conn_open.initiator_qp_num = ptl_id->ptl_qp->qpn;
 	/*Extensions*/
@@ -330,11 +332,11 @@ int rdma_cm_portals_connect_locked(struct rdma_cm_id *id,
 		memcpy(private_data_buf, param->private_data, param->private_data_len);
 		send_buffer->conn_msg.conn_open.conn_param.private_data_len = param->private_data_len;
 		PTL_DEBUG("CONN_PARAM: Serialized connection params of size: %u "
-			  "in OPEN_CONNECTION_REQUEST conn_msg size is: %lu "
-			  "total message size: %llu param private data len = %u",
-			  param->private_data_len,
-			  sizeof(send_buffer->conn_msg),
-			  send_buffer->conn_msg.msg_header.total_msg_size, param->private_data_len);
+		          "in OPEN_CONNECTION_REQUEST conn_msg size is: %lu "
+		          "total message size: %llu param private data len = %u",
+		          param->private_data_len,
+		          sizeof(send_buffer->conn_msg),
+		          send_buffer->conn_msg.msg_header.total_msg_size, param->private_data_len);
 	}
 
 	/*Keep a copy also of conn param in ptl_cm_id, Why? XXX TODO XXX*/
@@ -363,7 +365,7 @@ int rdma_cm_portals_disconnect(struct rdma_cm_id *id)
 EXPORT_SYMBOL_GPL(rdma_cm_portals_disconnect);
 
 int rdma_cm_portals_create_qp(struct rdma_cm_id *id, struct ib_pd *pd,
-			      struct ib_qp_init_attr *attr)
+                              struct ib_qp_init_attr *attr)
 {
 	struct ptl_cm_id *ptl_id;
 	struct ptl_pd *ptl_pd;
@@ -419,8 +421,8 @@ const void *rdma_cm_portals_reject_msg(struct rdma_cm_id *id, int status)
 EXPORT_SYMBOL_GPL(rdma_cm_portals_reject_msg);
 
 const void *rdma_cm_portals_consumer_reject_data(struct rdma_cm_id *id,
-		struct rdma_cm_event *ev,
-		u8 *data_len)
+                                                 struct rdma_cm_event *ev,
+                                                 u8 *data_len)
 {
 	(void)id;
 	(void)ev;
@@ -442,7 +444,7 @@ int rdma_cm_portals_set_service_type(struct rdma_cm_id *id, u8 tos)
 EXPORT_SYMBOL_GPL(rdma_cm_portals_set_service_type);
 
 int rdma_cm_portals_connect(struct rdma_cm_id *id,
-			    struct rdma_conn_param *conn_param)
+                            struct rdma_conn_param *conn_param)
 {
 	(void)id;
 	(void)conn_param;
@@ -454,5 +456,5 @@ EXPORT_SYMBOL_GPL(rdma_cm_portals_connect);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION(
-	"RDMACM implementation over Portals4 shim (no-op / fail-fast)");
+        "RDMACM implementation over Portals4 shim (no-op / fail-fast)");
 MODULE_AUTHOR("Giorgis Saloustris (Chatzis) gesalous@ics.forth.gr");

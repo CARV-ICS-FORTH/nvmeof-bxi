@@ -13,6 +13,7 @@
 #include <asm-generic/errno-base.h>
 #include <linux/err.h>
 #include <linux/hashtable.h>
+#include <nvme.h>
 #include <portals4.h>
 #include <portals4_bxiext.h>
 
@@ -38,9 +39,11 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event, struct ptl_cq *
 	cm_event = kzalloc(sizeof(*cm_event), GFP_KERNEL);
 
 	qpn = ptl_uuid_get_initiator_qp_num(msg->conn_open_reply.session_id);
-	PTL_DEBUG("<PTL_OPEN_CONNECTION_REPLY> rlength: %llu mlength: %llu", event->rlength, event->mlength);
+	PTL_DEBUG("<PTL_OPEN_CONNECTION_REPLY> rlength: %llu mlength: %llu", event->rlength,
+	          event->mlength);
 	PTL_DEBUG("Initiator qp num for which this event is: %d", qpn);
-	PTL_DEBUG("Target qp num for which this event is: %d", ptl_uuid_get_target_qp_num(msg->conn_open_reply.session_id));
+	PTL_DEBUG("Target qp num for which this event is: %d",
+	          ptl_uuid_get_target_qp_num(msg->conn_open_reply.session_id));
 	spin_lock(&ptl_cq->bxiv3_dev->qp_map_lock);
 	hash_for_each_possible(ptl_cq->bxiv3_dev->qp_map, entry, node, qpn) {
 		if (entry->key == qpn) {
@@ -52,7 +55,8 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event, struct ptl_cq *
 	ptl_qp->ptl_id->remote_rma_pte = msg->conn_open_reply.rma_pte;
 	ptl_qp->ptl_id->remote_cq_id = msg->conn_open_reply.cq_id;
 	ptl_qp->ptl_id->session_id = msg->conn_open_reply.session_id;
-	ptl_qp->ptl_id->session_id = ptl_uuid_set_cq_num(ptl_qp->ptl_id->session_id, msg->conn_open_reply.cq_id);
+	ptl_qp->ptl_id->session_id = ptl_uuid_set_cq_num(ptl_qp->ptl_id->session_id,
+	                                                 msg->conn_open_reply.cq_id);
 	ptl_qp->ptl_id->session_id = ptl_uuid_set_op_type(ptl_qp->ptl_id->session_id, NVMeOF_cmd);
 
 	spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);
@@ -73,37 +77,70 @@ static void ptl_handle_close_connection_reply(ptl_event_t *event, struct ptl_cq 
 	struct ptl_conn_recv_buffer *recv_buffer = event->user_ptr;
 	struct ptl_conn_msg *msg = recv_buffer->conn_msg;
 	PTL_DEBUG("<PTL_CLOSE_CONNECTION_REPLY>");
-	PTL_DEBUG("Initiator qp num for which this event is: %d", ptl_uuid_get_initiator_qp_num(msg->conn_close_reply.session_id));
-	PTL_DEBUG("Target qp num for which this event is: %d", ptl_uuid_get_target_qp_num(msg->conn_close_reply.session_id));
+	PTL_DEBUG("Initiator qp num for which this event is: %d",
+	          ptl_uuid_get_initiator_qp_num(msg->conn_close_reply.session_id));
+	PTL_DEBUG("Target qp num for which this event is: %d",
+	          ptl_uuid_get_target_qp_num(msg->conn_close_reply.session_id));
 	PTL_DEBUG("</PTL_CLOSE_CONNECTION_REPLY>");
 }
 
 static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq)
 {
+	struct ptl_recv_op *recv_op_meta = NULL;
+	struct ptl_qp *ptl_qp;
+	u64 recv_op_meta_idx;
 	struct ib_wc wc;
-	PTL_DEBUG("<NVMeoF_cpl>, start processing");
+	/*<gesalous> non-matching feat*/
+	//vanilla case
+	//recv_op = event->user_ptr;
 
-	struct ptl_recv_op* recv_op = event->user_ptr;
-	if (recv_op == NULL) {
-		PTL_FATAL("Cannot happen, where is the metadata for the recv_op?");
+	ptl_qp = event->user_ptr;
+	if (ptl_qp == NULL) {
+		PTL_FATAL("Null context? cannot happen!");
+	}
+	PTL_CHECK(ptl_qp, PTL_QP);
+	PTL_DEBUG("nvme_cpl: got nvme_completion at addr: 0x%llx pte: %d qpn: %d", event->start, event->pt_index, ptl_qp->qpn);
+
+	recv_op_meta_idx = (event->start - ptl_qp->ptl_id->nvme_cpl_start) / sizeof(struct nvme_completion);
+	if (recv_op_meta_idx >= ptl_qp->recv_op_meta_size) {
+		PTL_FATAL("Wrong recv_op_meta_idx: it is: %llu size is: %lu", recv_op_meta_idx, ptl_qp->recv_op_meta_size);
+	}
+	recv_op_meta = &ptl_qp->recv_op_meta[recv_op_meta_idx];
+	// PTL_DEBUG("nvme_cpl: recv_op_meta_idx = %llu for qpn: %d",recv_op_meta_idx, ptl_qp->qpn);
+	if (false == recv_op_meta->is_set) {
+		PTL_FATAL("Metadata not set for qpn: %d ? Wrong", ptl_qp->qpn);
 	}
 	wc.status =
 	        event->ni_fail_type == PTL_NI_OK ? IB_WC_SUCCESS : IB_WC_LOC_PROT_ERR;
 	wc.opcode = IB_WC_RECV;
-	wc.wr_id = recv_op->wr_id;
-	wc.wr_cqe = recv_op->wr_cqe;
+	wc.wr_id = recv_op_meta->wr_id;//Not usefull from the driver
+	wc.wr_cqe = recv_op_meta->wr_cqe;//Very useful!
 	wc.byte_len = event->rlength;
-	wc.qp = &recv_op->ptl_qp->fake_qp;
-	wc.src_qp = recv_op->ptl_qp->qpn;
+	wc.qp = &recv_op_meta->ptl_qp->fake_qp;//Very useful!
+	wc.src_qp = recv_op_meta->ptl_qp->qpn;
 	wc.wc_flags = IB_WC_WITH_INVALIDATE;
 	wc.ex.invalidate_rkey = PTL_MAGIC_FAKE_MR_KEY;
 
-	recv_op->wr_cqe->done(&ptl_cq->fake_cq, &wc);
+	recv_op_meta->is_set = false;
+	recv_op_meta->wr_cqe->done(&ptl_cq->fake_cq, &wc);
 }
 
 static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq)
 {
-	PTL_DEBUG("Target performed an RDMA write to me");
+	struct ptl_qp *ptl_qp = event->user_ptr;
+	if (NULL == ptl_qp) {
+		PTL_FATAL("NULL context");
+	}
+	PTL_CHECK(ptl_qp, PTL_QP);
+
+	//sanity check
+	if (event->rlength == sizeof(struct nvme_completion)) {
+		PTL_FATAL("This should not happen!");
+		return;
+	}
+	PTL_DEBUG("nvme_write: Target performed an RDMA write to me at iova:0x%llx, "
+	          "ignore it is just data from the target pte: %d qpn: %d",
+	          event->start, event->pt_index, ptl_qp->qpn);
 }
 
 static void ptl_cnxt_process_put(ptl_event_t event, struct ptl_cq *ptl_cq)
@@ -214,8 +251,7 @@ static void ptl_cnxt_process_auto_unlink(ptl_event_t event, struct ptl_cq *ptl_c
 
 	if (PTL_RECV_OP == *obj_type) {
 		recv_op = event.user_ptr;
-		PTL_DEBUG("Autounlink for an NVMeOF_cpl buffer. Free metadata and continue");
-		kfree(recv_op);
+		PTL_FATAL("Autounlink for an NVMeOF_cpl buffer. This should not happen without matching support");
 		return;
 	}
 	if (PTL_CONN_RECV_BUFFER != *obj_type) {
@@ -294,7 +330,7 @@ void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh)
 				PTL_FATAL("Cannot handle event of type: %d", event.type);
 			}
 			if (event.ni_fail_type != PTL_OK) {
-				PTL_FATAL("Oops error");
+				PTL_FATAL("Oops error: reason %s", PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE));
 			}
 			handler[event.type](event, ptl_cq);
 			continue;
@@ -358,7 +394,8 @@ struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
 		          pte, rc);
 		goto free_cq;
 	}
-	PTL_DEBUG("Enabled for iface_id: %d PTE: %u and created cq with %d number of entries", bxiv3_dev->iface_id,
+	PTL_DEBUG("Enabled for iface_id: %d PTE: %u and created cq with %d number of entries",
+	          bxiv3_dev->iface_id,
 	          cq->pte, nr_cqes);
 	return cq;
 free_cq:

@@ -11,6 +11,14 @@ struct ptl_qp {
 	struct ptl_cq *recv_cq;
 	struct list_head ptl_mr_list;
 	spinlock_t ptl_mr_list_lock;
+	/*<gesalous> non-matching feat*/
+	/*The one and only list entry for all data plus nvme completions*/
+	ptl_le_t rma_le;
+	ptl_handle_le_t rma_leh;
+	/*For each nvme_cpl we keep metadata*/
+	struct ptl_recv_op *recv_op_meta;
+	size_t recv_op_meta_size;
+
 	struct ib_qp fake_qp;
 	int qpn;
 };

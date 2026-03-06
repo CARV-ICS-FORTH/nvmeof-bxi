@@ -8,6 +8,11 @@
 #define PTL_FATAL_RATELIMIT_PERIOD HZ
 #define PTL_FATAL_RATELIMIT_BURST 10
 
+
+//og
+// #define PTL_RMA_ME_OPTS (PTL_ME_OP_PUT | PTL_ME_OP_GET | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_EVENT_UNLINK_DISABLE | PTL_ME_EVENT_COMM_DISABLE)
+#define PTL_RMA_ME_OPTS (PTL_ME_OP_PUT | PTL_ME_OP_GET | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_EVENT_UNLINK_DISABLE)
+
 /* Fatal error: log, delay a bit so it reaches logs, then BUG */
 #define PTL_FATAL(fmt, ...)                                                     \
   do {                                                                          \
@@ -62,4 +67,9 @@ typedef enum ptl_obj_type {
 	PTL_CONN_SEND_BUFFER,
 	PTL_MR
 } ptl_obj_type_e;
+
+struct ptl_obj_conn_params {
+	u64 nvme_cpl_start_dma_addr;
+	size_t queue_size;
+};
 #endif
