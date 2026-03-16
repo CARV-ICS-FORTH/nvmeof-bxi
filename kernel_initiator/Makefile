@@ -9,8 +9,8 @@ PWD  := $(shell pwd)
 # Optional: path to private NVMe host headers (drivers/nvme/host/nvme.h)
 # Override with:
 #   make NVME_HOST_DIR=/path/to/linux-source/drivers/nvme/host
-NVME_HOST_DIR ?= /root/rpmbuild/BUILD/kernel-5.14.0-570.55.1.el9_6/linux-5.14.0-570.55.1.el9.x86_64/drivers/nvme/host
-
+#original NVME_HOST_DIR ?= /root/rpmbuild/BUILD/kernel-5.14.0-570.55.1.el9_6/linux-5.14.0-570.55.1.el9.x86_64/drivers/nvme/host
+NVME_HOST_DIR ?= /root/rpmbuild/BUILD/kernel-5.14.0-611.36.1.el9_7/linux-5.14.0-611.36.1.el9.x86_64/drivers/nvme/host
 # Path to BXI Portals4 kernel headers (from kmod-bxi3-portals-devel)
 # Override with:
 #   make BXI_PORTALS4_DIR=/usr/src/bxi3-portals/include
