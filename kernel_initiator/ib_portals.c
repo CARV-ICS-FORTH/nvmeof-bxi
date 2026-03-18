@@ -797,7 +797,7 @@ int ib_portals_enable_rma_ops(struct ib_qp *qp, struct ib_cq *cq)
 	ptl_qp->rma_le.length = PTL_SIZE_MAX;
 	ptl_qp->rma_le.uid = PTL_UID_ANY;
 	ptl_qp->rma_le.ct_handle = PTL_CT_NONE;
-	ptl_qp->rma_le.options = PTL_RMA_ME_OPTS;
+	ptl_qp->rma_le.options = PTL_RMA_LE_OPTS;
 	rc = PtlLEAppend(ptl_qp->ptl_id->bxiv3_dev->nicia_handle,
 	                 ptl_qp->recv_cq->pte, &ptl_qp->rma_le,
 	                 PTL_PRIORITY_LIST, ptl_qp, &ptl_qp->rma_leh);

@@ -54,8 +54,8 @@ struct ptl_context_rdma_read_op {
 struct ptl_context_op_meta {
 	ptl_obj_type_e obj_type;
 #if !PTL_USE_MATCHING
-	ptl_md_t md;
-	ptl_msg_t msg;
+	// ptl_md_t md;
+	// ptl_msg_t msg;
 #endif
 	uint64_t wr_id;
 #if PTL_ENABLE_BIND_PER_OP
@@ -67,7 +67,7 @@ struct ptl_context_op_meta {
 		struct ptl_context_send_op send_op;
 		struct ptl_context_recv_op recv_op;
 		struct ptl_context_rdma_write_op rdma_write_op;
-		struct ptl_context_rdma_write_op rdma_read_op;
+		struct ptl_context_rdma_write_op rdma_read_op;//?
 	};
 	bool signal_app;
 };

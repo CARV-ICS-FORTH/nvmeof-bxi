@@ -11,7 +11,7 @@
 
 //og
 // #define PTL_RMA_ME_OPTS (PTL_ME_OP_PUT | PTL_ME_OP_GET | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_EVENT_UNLINK_DISABLE | PTL_ME_EVENT_COMM_DISABLE)
-#define PTL_RMA_ME_OPTS (PTL_ME_OP_PUT | PTL_ME_OP_GET | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_EVENT_UNLINK_DISABLE)
+#define PTL_RMA_LE_OPTS (PTL_LE_OP_PUT | PTL_LE_OP_GET | PTL_LE_EVENT_LINK_DISABLE | PTL_LE_EVENT_UNLINK_DISABLE)
 
 /* Fatal error: log, delay a bit so it reaches logs, then BUG */
 #define PTL_FATAL(fmt, ...)                                                     \

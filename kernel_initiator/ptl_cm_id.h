@@ -42,14 +42,14 @@ struct ptl_cm_id {
 };
 
 struct ptl_cm_id *ptl_cm_id_create(struct net *net,
-				   rdma_cm_event_handler event_handler,
-				   void *context, enum rdma_ucm_port_space ps,
-				   enum ib_qp_type qp_type, const char *caller);
+                                   rdma_cm_event_handler event_handler,
+                                   void *context, enum rdma_ucm_port_space ps,
+                                   enum ib_qp_type qp_type, const char *caller);
 
 int ptl_cm_id_resolve_addr(struct ptl_cm_id *ptl_cm_id,
-			   struct sockaddr *src_addr,
-			   const struct sockaddr *dst_addr,
-			   unsigned long timeout_ms);
+                           struct sockaddr *src_addr,
+                           const struct sockaddr *dst_addr,
+                           unsigned long timeout_ms);
 
 // void ptl_cm_id_set_recv_cq(struct ptl_cm_id *ptl_id, struct ptl_cq *recv_cq);
 

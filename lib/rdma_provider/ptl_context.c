@@ -111,6 +111,11 @@ static struct ptl_context_op_meta *ptl_cnxt_process_put(ptl_event_t event, struc
 {
 	struct ptl_context_op_meta *recv_meta;
 
+	if (PTL_OK != event.ni_fail_type) {
+		SPDK_PTL_FATAL("Corrupted event code {%d, %s}", event.ni_fail_type, PtlToStr(event.ni_fail_type,
+				PTL_STR_FAIL_TYPE));
+	}
+
 	if (NULL == event.user_ptr) {
 		SPDK_PTL_DEBUG("NVMe: RECV operation with null context received an RDMA_WRITE");
 		return NULL;
@@ -220,6 +225,12 @@ static struct ptl_context_op_meta *ptl_cnxt_process_reply(ptl_event_t event, str
 {
 	struct ptl_context_op_meta *rdma_read_meta = event.user_ptr;
 
+	if (event.ni_fail_type != PTL_NI_OK) {
+		SPDK_PTL_FATAL("Operation failed with code: {%d %s}", event.ni_fail_type,
+			       PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE));
+		return NULL;
+	}
+
 	if (rdma_read_meta == NULL) {
 		SPDK_PTL_DEBUG("Caution RDMA read without a context app does not want a signal ok.");
 		return NULL;
@@ -229,12 +240,11 @@ static struct ptl_context_op_meta *ptl_cnxt_process_reply(ptl_event_t event, str
 		SPDK_PTL_FATAL("Corrupted obj type should have been a PTL_RDMA_READ_OP");
 	}
 
-
-	if (event.ni_fail_type != PTL_NI_OK) {
-		SPDK_PTL_FATAL("Operation failed with code: %s", PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE));
-	}
-
 	if (++rdma_read_meta->rdma_read_op.parts_acked < rdma_read_meta->rdma_read_op.total_parts) {
+		SPDK_PTL_DEBUG(
+			"PtlMsgGet once done! Not all parts however acked: %d total: %d",
+			rdma_read_meta->rdma_read_op.parts_acked,
+			rdma_read_meta->rdma_read_op.total_parts);
 		return NULL;
 	}
 
@@ -710,6 +720,34 @@ static void ptl_cnxt_init_rma_pte(struct ptl_context *ptl_cnxt)
 #endif
 }
 
+
+static void ptl_cnxt_dev_print_ni_limits(const struct ptl_ni_limits *limits)
+{
+	SPDK_PTL_DEBUG("ptl_ni_limits:");
+	SPDK_PTL_DEBUG("  max_entries           = %d",  limits->max_entries);
+	SPDK_PTL_DEBUG("  max_unexpected_headers= %d",  limits->max_unexpected_headers);
+	SPDK_PTL_DEBUG("  max_mds               = %d",  limits->max_mds);
+	SPDK_PTL_DEBUG("  max_cts               = %d",  limits->max_cts);
+	SPDK_PTL_DEBUG("  max_eqs               = %d",  limits->max_eqs);
+	SPDK_PTL_DEBUG("  max_pt_index          = %d",  limits->max_pt_index);
+	SPDK_PTL_DEBUG("  max_iovecs            = %d",  limits->max_iovecs);
+	SPDK_PTL_DEBUG("  max_list_size         = %d",  limits->max_list_size);
+	SPDK_PTL_DEBUG("  max_triggered_ops     = %d",  limits->max_triggered_ops);
+	SPDK_PTL_DEBUG("  max_msg_size          = %lu", limits->max_msg_size);
+	SPDK_PTL_DEBUG("  max_atomic_size       = %lu", limits->max_atomic_size);
+	SPDK_PTL_DEBUG("  max_fetch_atomic_size = %lu", limits->max_fetch_atomic_size);
+	SPDK_PTL_DEBUG("  max_waw_ordered_size  = %lu", limits->max_waw_ordered_size);
+	SPDK_PTL_DEBUG("  max_war_ordered_size  = %lu", limits->max_war_ordered_size);
+	SPDK_PTL_DEBUG("  max_volatile_size     = %lu", limits->max_volatile_size);
+	SPDK_PTL_DEBUG("  features              = 0x%x", limits->features);
+	SPDK_PTL_DEBUG("  bxi_max_cqs           = %u",  limits->bxi_max_cqs);
+	SPDK_PTL_DEBUG("  bxi_compute_line      = %u",  limits->bxi_compute_line);
+	SPDK_PTL_DEBUG("  cq_mode               = %d", (int)limits->cq_mode);
+	SPDK_PTL_DEBUG("  host_cq_size          = %lu", limits->host_cq_size);
+}
+
+
+
 struct ptl_context *ptl_cnxt_get(void)
 {
 	static pthread_mutex_t cnxt_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -769,30 +807,26 @@ struct ptl_context *ptl_cnxt_get(void)
 	SPDK_PTL_DEBUG("Is target?: %d", ptl_context.is_target);
 
 	memset(&desired, 0, sizeof(desired));
-
-	desired.max_entries = 479075;
-	//This affects EQAlloc
-	desired.max_eqs = 1024;
-	//This affect MDBind
-	desired.max_mds = 479075;
-	//This affects max ptes?
-	desired.max_pt_index = 511;
-	// desired.max_list_size = 479075;
-	// desired.max_unexpected_headers = 479075;
+	// desired.max_entries = 52987;
+	// desired.max_unexpected_headers = 52987;
+	// desired.max_mds = 52987;
 	// desired.max_cts = 1024;
+	// desired.max_eqs = 1024;
+	// desired.max_pt_index = 511;
 	// desired.max_iovecs = 1073741823;
-	// desired.max_triggered_ops = 479075;
-	// desired.max_msg_size = 68719476735UL;
+	// desired.max_list_size = 52987;
+	// desired.max_triggered_ops = 52987;
+	// desired.max_msg_size = 68719476735;
 	// desired.max_atomic_size = 0;
 	// desired.max_fetch_atomic_size = 0;
 	// desired.max_waw_ordered_size = 0;
 	// desired.max_war_ordered_size = 0;
 	// desired.max_volatile_size = 60;
-	desired.features = PTL_BXI3_SERVICE;
+	desired.features = PTL_BXI3_DEBUG | PTL_BXI3_SERVICE;//XXX TODO XXX check again
 	// desired.bxi_max_cqs = 1;
-	// desired.bxi_compute_line = 2374264728;
-	// desired.cq_mode = 32767;
-	// desired.host_cq_size = 139646804452922;
+	// desired.bxi_compute_line = 0;
+	// desired.cq_mode = 0;
+	// desired.host_cq_size = 0;
 
 #if PTL_USE_MATCHING
 	ret = PtlNIInit(PTL_IFACE_DEFAULT, PTL_NI_MATCHING | PTL_NI_PHYSICAL,
@@ -806,6 +840,7 @@ struct ptl_context *ptl_cnxt_get(void)
 		SPDK_PTL_FATAL("PtlNIInit failed with code: %d for nid: %d and pid: %d", ret,
 			       ptl_context.nid, ptl_context.pid);
 	}
+	ptl_cnxt_dev_print_ni_limits(&actual);
 
 	ret = PtlGetPhysId(ptl_context.ni_handle, &actual_phys_id);
 	if (ret != PTL_OK) {

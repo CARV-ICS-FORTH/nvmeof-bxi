@@ -68,7 +68,7 @@ static pthread_mutex_t g_memory_domains_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void spdk_ptl_print_access_flags(uint32_t access_flags)
 {
-	SPDK_PTL_INFO("IBV Access Flags (0x%x):", access_flags);
+	SPDK_PTL_DEBUG("IBV Access Flags (0x%x):", access_flags);
 
 	struct {
 		uint32_t flag;
@@ -94,15 +94,15 @@ static void spdk_ptl_print_access_flags(uint32_t access_flags)
 	for (int i = 0; flag_names[i].name != NULL; i++) {
 		if (access_flags & flag_names[i].flag) {
 			if (found) {
-				SPDK_PTL_INFO(" | ");
+				SPDK_PTL_DEBUG(" | ");
 			}
-			SPDK_PTL_INFO("%s", flag_names[i].name);
+			SPDK_PTL_DEBUG("%s", flag_names[i].name);
 			found = true;
 		}
 	}
 
 	if (!found) {
-		SPDK_PTL_INFO("No access flags set");
+		SPDK_PTL_DEBUG("No access flags set");
 	}
 }
 

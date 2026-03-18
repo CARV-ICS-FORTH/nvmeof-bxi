@@ -19,6 +19,7 @@
 #include <infiniband/verbs.h>
 #include <netinet/in.h>
 #include <portals4.h>
+#include <portals4_bxiext.h>
 #include <pthread.h>
 #include <rdma/rdma_cma.h>
 #include <semaphore.h>
@@ -851,8 +852,8 @@ static void rdma_ptl_boot_cp_server(struct  ptl_cm_id *cm_id, const char *role)
 				 PTL_PRIORITY_LIST, &ptl_control_plane_server.me_handle[i], &ptl_control_plane_server.me_handle[i]);
 #else
 		memset(&list_entry, 0, sizeof(list_entry));
-		list_entry.ignore_bits = RDMA_PTL_IGNORE;
-		list_entry.match_bits = RDMA_PTL_MATCH;
+		// list_entry.ignore_bits = RDMA_PTL_IGNORE;
+		// list_entry.match_bits = RDMA_PTL_MATCH;
 		list_entry.match_id.phys.nid = PTL_NID_ANY;
 		list_entry.match_id.phys.pid = PTL_PID_ANY;
 		list_entry.min_free = 0;
@@ -865,7 +866,8 @@ static void rdma_ptl_boot_cp_server(struct  ptl_cm_id *cm_id, const char *role)
 				 PTL_PRIORITY_LIST, &ptl_control_plane_server.le_handle[i], &ptl_control_plane_server.le_handle[i]);
 #endif
 		if (rc != PTL_OK) {
-			SPDK_PTL_FATAL("PtlLEAppend failed in control plane server with code: %d\n", rc);
+			SPDK_PTL_FATAL("PtlLEAppend failed in control plane server with code: {%d = %s} for PTE: %d", rc,
+				       PtlToStr(rc, PTL_STR_ERROR), PTL_CP_SERVER_PTE);
 		}
 	}
 

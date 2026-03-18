@@ -87,11 +87,37 @@ static void ptl_bxiv3_device_enable_rma(struct ptl_bxiv3_device *bxiv3_dev,
 	bxiv3_dev->rma_le.length = PTL_SIZE_MAX;
 	bxiv3_dev->rma_le.uid = PTL_UID_ANY;
 	bxiv3_dev->rma_le.ct_handle = PTL_CT_NONE;
-	bxiv3_dev->rma_le.options = PTL_RMA_ME_OPTS;
+	bxiv3_dev->rma_le.options = PTL_RMA_LE_OPTS;
 	rc = PtlLEAppend(bxiv3_dev->nicia_handle, bxiv3_dev->rma_pte, &bxiv3_dev->rma_le, PTL_PRIORITY_LIST, bxiv3_dev, &bxiv3_dev->rma_leh);
 	if (PTL_OK != rc) {
 		PTL_FATAL("Failed to expose address space for rma operations. Reason: %s", PtlToStr(rc, PTL_STR_ERROR));
 	}
+}
+
+
+static void ptl_bxiv3_dev_print_ni_limits(const struct ptl_ni_limits *limits)
+{
+	PTL_DEBUG("ptl_ni_limits:");
+	PTL_DEBUG("  max_entries           = %d",  limits->max_entries);
+	PTL_DEBUG("  max_unexpected_headers= %d",  limits->max_unexpected_headers);
+	PTL_DEBUG("  max_mds               = %d",  limits->max_mds);
+	PTL_DEBUG("  max_cts               = %d",  limits->max_cts);
+	PTL_DEBUG("  max_eqs               = %d",  limits->max_eqs);
+	PTL_DEBUG("  max_pt_index          = %d",  limits->max_pt_index);
+	PTL_DEBUG("  max_iovecs            = %d",  limits->max_iovecs);
+	PTL_DEBUG("  max_list_size         = %d",  limits->max_list_size);
+	PTL_DEBUG("  max_triggered_ops     = %d",  limits->max_triggered_ops);
+	PTL_DEBUG("  max_msg_size          = %llu", limits->max_msg_size);
+	PTL_DEBUG("  max_atomic_size       = %llu", limits->max_atomic_size);
+	PTL_DEBUG("  max_fetch_atomic_size = %llu", limits->max_fetch_atomic_size);
+	PTL_DEBUG("  max_waw_ordered_size  = %llu", limits->max_waw_ordered_size);
+	PTL_DEBUG("  max_war_ordered_size  = %llu", limits->max_war_ordered_size);
+	PTL_DEBUG("  max_volatile_size     = %llu", limits->max_volatile_size);
+	PTL_DEBUG("  features              = 0x%x", limits->features);
+	PTL_DEBUG("  bxi_max_cqs           = %u",  limits->bxi_max_cqs);
+	PTL_DEBUG("  bxi_compute_line      = %u",  limits->bxi_compute_line);
+	PTL_DEBUG("  cq_mode               = %d", (int)limits->cq_mode);
+	PTL_DEBUG("  host_cq_size          = %llu", limits->host_cq_size);
 }
 
 struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id)
@@ -127,29 +153,36 @@ struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id)
 	PTL_DEBUG("Initializing BXIv3 device for iface id: %d...", iface_id);
 
 	memset(&desired, 0, sizeof(desired));
+	// desired.max_entries = 52987;
+	// desired.max_unexpected_headers = 52987;
+	// desired.max_mds = 52987;
+	// desired.max_cts = 1024;
+	// desired.max_eqs = 1024;
+	// desired.max_pt_index = 511;
+	// desired.max_iovecs = 1073741823;
+	// desired.max_list_size = 52987;
+	// desired.max_triggered_ops = 52987;
+	// desired.max_msg_size = 68719476735;
+	// desired.max_atomic_size = 0;
+	// desired.max_fetch_atomic_size = 0;
+	// desired.max_waw_ordered_size = 0;
+	// desired.max_war_ordered_size = 0;
+	// desired.max_volatile_size = 60;
+	desired.features = PTL_BXI3_DEBUG | PTL_BXI3_SERVICE;//XXX TODO XXX check again
+	// desired.bxi_max_cqs = 1;
+	// desired.bxi_compute_line = 0;
+	// desired.cq_mode = 0;
+	// desired.host_cq_size = 0;
 
-	desired.max_entries = 479075;
-	//This affects EQAlloc
-	desired.max_eqs = 1024;
-	//This affect MDBind
-	desired.max_mds = 479075;
-	//This affects max ptes?
-	desired.max_pt_index = 511;
-	desired.features = PTL_BXI3_SERVICE;
 	rc = PtlNIInit(iface_id, PTL_NI_NO_MATCHING | PTL_NI_PHYSICAL, PTL_PID_ANY,
-	               &desired, &bxiv3_dev->actual, &bxiv3_dev->nicia_handle);
+	               NULL, &bxiv3_dev->actual, &bxiv3_dev->nicia_handle);
 	if (PTL_OK != rc) {
 		PTL_WARN("PtlNIInit() failed with code: %d no ifcace: %d", rc,
 		         iface_id);
 		ret = -EIO;
 		goto clean_up;
 	}
-	PTL_DEBUG("--- Actual NI Limits ---");
-	PTL_DEBUG("max_eqs: %d", bxiv3_dev->actual.max_eqs);
-	PTL_DEBUG("bxi_max_cqs: %u", bxiv3_dev->actual.bxi_max_cqs);
-	PTL_DEBUG("features: 0x%x", bxiv3_dev->actual.features);
-	PTL_DEBUG("PTL_BXI3_MULTI_CQ enabled: %s", (bxiv3_dev->actual.features & PTL_BXI3_MULTI_CQ) ? "Yes" : "No");
-	PTL_DEBUG("PTL_BXI3_CQ_MODE enabled: %s", (bxiv3_dev->actual.features & PTL_BXI3_CQ_MODE) ? "Yes" : "No");
+	ptl_bxiv3_dev_print_ni_limits(&bxiv3_dev->actual);
 
 	rc = PtlGetPhysId(bxiv3_dev->nicia_handle, &bxiv3_dev->proc_id);
 	if (PTL_OK != rc) {
@@ -158,6 +191,7 @@ struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id)
 		ret = -EIO;
 		goto clean_up;
 	}
+	PTL_DEBUG("Initialized device %d with info {nid: %u pid: %u}", iface_id, bxiv3_dev->proc_id.phys.nid, bxiv3_dev->proc_id.phys.pid);
 	/*Create the ptl_cq for PTL_CP_SERVER_PTE*/
 	cpumask_clear(&cpu_mask);
 	node = 0; // TODO: replace by NIC's numa node
