@@ -1,121 +1,122 @@
-/**
- * @file ptl_uuid.c
- * @brief Portals UUID management and field extraction/insertion utilities
- *
- * This module provides functions to pack and unpack various fields into a 64-bit UUID.
- * The UUID is structured as follows:
- *
- * Layout (little-endian bit numbering):
- *   Bits 0-15   (Bytes 0-1):   Initiator Queue Pair Number (16-bit)
- *   Bits 16-31  (Bytes 2-3):   Target Queue Pair Number (16-bit)
- *   Bits 32-47  (Bytes 4-5):   Completion Queue ID (16-bit)
- *   Bits 48-63  (Bytes 6-7):   Operation Type (16-bit)
- *
- * All fields are 16-bit unsigned values (0x0000 - 0xFFFF).
- */
-
 #include "ptl_uuid.h"
+#include "ptl_connection.h"
 #include "ptl_log.h"
-#include <inttypes.h>
-#include <pthread.h>
-#include <stdint.h>
 
-/**
- * Bit masks for clearing specific field ranges in the UUID.
- * Each mask has 0s in the bits to be cleared and 1s elsewhere.
- */
-#define PTL_UUID_INITIATOR_QP_NUM_MASK 0xFFFFFFFFFFFF0000ULL  /**< Clear bits 0-15 */
-#define PTL_UUID_TARGET_QP_NUM_MASK    0xFFFFFFFF0000FFFFULL  /**< Clear bits 16-31 */
-#define PTL_UUID_CQ_MASK               0xFFFF0000FFFFFFFFULL  /**< Clear bits 32-47 */
-#define PTL_UUID_OP_TYPE_MASK          0x0000FFFFFFFFFFFFULL  /**< Clear bits 48-63 */
-#define PTL_UUID_MAX_QP_NUM            (1<<16)                /**< Maximum 16-bit value */
+/* User-space equivalent of unlikely and PTL_FATAL */
+#define unlikely(x) __builtin_expect(!!(x), 0)
 
 
-uint64_t ptl_uuid_set_op_type(uint64_t uuid, int op_type)
+u16 ptl_uuid_get_op_type(u64 *uuid)
 {
-	if (op_type < 0 || op_type > 0xFFFF) {
-		SPDK_PTL_FATAL("op_type too large");
+
+	ptl_uuid_t *ptl_uuid = (ptl_uuid_t *)uuid;
+	return le16_to_cpu(ptl_uuid->msg_type);
+}
+
+void ptl_uuid_set_op_type(u64 *uuid, u16 msg_type)
+{
+
+	ptl_uuid_t *ptl_uuid = (ptl_uuid_t *)uuid;
+	ptl_uuid->msg_type = cpu_to_le16(msg_type);
+}
+
+u16 ptl_uuid_get_cq_id(u64 *uuid)
+{
+	if (WARN_ON_ONCE(!uuid)) { return 0; }
+
+	return le16_to_cpu(ptl_uuid_as_const_uuid(uuid)->cq_id);
+}
+
+void ptl_uuid_set_cq_id(u64 *uuid, u16 cq_id)
+{
+	ptl_uuid_t *ptl_uuid = (ptl_uuid_t *)uuid;
+	ptl_uuid->cq_id = cpu_to_le16(cq_id);
+}
+
+u16 ptl_uuid_get_total_parts(u64 *uuid)
+{
+	const ptl_uuid_t *ptl_uuid = ptl_uuid_as_const_uuid(uuid);
+	if (ptl_uuid->msg_type != NVMeOF_cpl) {
+		SPDK_PTL_FATAL("Request for total parts for non NVMeOF_cpl message is not allowed!");
 	}
-	uint64_t op = op_type;
-	uuid &= PTL_UUID_OP_TYPE_MASK;  /* Clear bits 48-63 */
-	uuid |= (op << 48);              /* Set bits 48-63 */
-	return uuid;
+	return le16_to_cpu(ptl_uuid->uuid_nvmeof_cpl.total_parts);
 }
 
-
-int ptl_uuid_get_op_type(uint64_t uuid)
+void ptl_uuid_set_total_parts(u64 *uuid, u16 total_parts)
 {
-	return (int)((uuid >> 48) & 0xFFFF);  /* Extract bits 48-63 */
-}
-
-
-uint64_t ptl_uuid_set_target_qp_num(uint64_t uuid, int qp_num)
-{
-	if (qp_num < 0 || qp_num > 0xFFFF) {
-		SPDK_PTL_FATAL("qp number too large");
+	ptl_uuid_t *ptl_uuid = (ptl_uuid_t *)uuid;
+	if (ptl_uuid->msg_type != NVMeOF_cpl) {
+		SPDK_PTL_FATAL("Request for total parts for non NVMeOF_cpl message is not allowed!");
 	}
-	uint64_t qp = qp_num;
-	uuid &= PTL_UUID_TARGET_QP_NUM_MASK;  /* Clear bits 16-31 */
-	uuid |= (qp << 16);                    /* Set bits 16-31 */
-	return uuid;
+	ptl_uuid->uuid_nvmeof_cpl.total_parts = cpu_to_le16(total_parts);
 }
 
 
-int ptl_uuid_get_target_qp_num(uint64_t uuid)
+u16 ptl_uuid_get_nvme_cid(u64 *uuid)
 {
-	return (int)((uuid >> 16) & 0xFFFF);  /* Extract bits 16-31 */
-}
+	const ptl_uuid_t *ptl_uuid = ptl_uuid_as_const_uuid(uuid);
 
-
-uint64_t ptl_uuid_set_initiator_qp_num(uint64_t uuid, int qp_num)
-{
-	SPDK_PTL_DEBUG("UUID was %lu and qp num: %d", uuid, qp_num);
-	if (qp_num < 0 || qp_num > 0xFFFF) {
-		SPDK_PTL_FATAL("qp number too large");
+	if (NVMeOF_cpl == ptl_uuid->msg_type) {
+		return le16_to_cpu(ptl_uuid->uuid_nvmeof_cpl.cid);
 	}
 
-	uint64_t qp = qp_num;
-	uuid &= PTL_UUID_INITIATOR_QP_NUM_MASK;  /* Clear bits 0-15 */
-	uuid |= qp;                               /* Set bits 0-15 */
-	SPDK_PTL_DEBUG("UUID now is %lu", uuid);
-	return uuid;
-}
-
-
-int ptl_uuid_get_initiator_qp_num(uint64_t uuid)
-{
-	int qp_num = (int)(uuid & 0xFFFF);  /* Extract bits 0-15 */
-	return qp_num;
-}
-
-
-int ptl_uuid_get_cq_num(uint64_t uuid)
-{
-	return (int)((uuid >> 32) & 0xFFFF);  /* Extract bits 32-47 */
-}
-
-
-uint64_t ptl_uuid_set_cq_num(uint64_t uuid, int cq_num)
-{
-	if (cq_num < 0 || cq_num > 0xFFFF) {
-		SPDK_PTL_FATAL("cq number too large");
+	if (NVMeOF_rma == ptl_uuid->msg_type) {
+		return le16_to_cpu(ptl_uuid->uuid_nvmeof_rma.cid);
 	}
-	uuid = uuid & PTL_UUID_CQ_MASK;  /* Clear bits 32-47 */
-	uint64_t cq = cq_num;
-	uuid |= (cq << 32);               /* Set bits 32-47 */
-	return uuid;
+
+	SPDK_PTL_FATAL("get_cid is not allowed for message type: %d", ptl_uuid->msg_type);
 }
 
-
-uint64_t ptl_uuid_get_next_match_bit(void)
+void ptl_uuid_set_nvme_cid(u64 *uuid, u16 cid)
 {
-	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-	static uint64_t global_match_bits = PTL_UUID_RMA_MASK;
-	pthread_mutex_lock(&lock);
-	uint64_t my_match_bits = (global_match_bits >> 48) + 1;
-	my_match_bits <<= 48;
-	global_match_bits = my_match_bits;
-	SPDK_PTL_DEBUG("MATCH_BITS: Just gave match bit: %lu", my_match_bits);
-	pthread_mutex_unlock(&lock);
-	return my_match_bits;
+	ptl_uuid_t *ptl_uuid = (ptl_uuid_t *)uuid;
+
+	if (NVMeOF_cpl == ptl_uuid->msg_type) {
+		ptl_uuid->uuid_nvmeof_cpl.cid = cpu_to_le16(cid);
+		return;
+	}
+
+	if (NVMeOF_rma == ptl_uuid->msg_type) {
+		ptl_uuid->uuid_nvmeof_rma.cid = cpu_to_le16(cid);
+		return;
+	}
+
+	SPDK_PTL_FATAL("get_cid is not allowed for message type: %d", ptl_uuid->msg_type);
 }
+
+u16 ptl_uuid_get_target_qp_num(u64* uuid)
+{
+	const ptl_uuid_t *ptl_uuid = ptl_uuid_as_const_uuid(uuid);
+	if (NVMeOF_cmd != ptl_uuid->msg_type) {
+		SPDK_PTL_FATAL("get_target_qp_num is not allowed for message type: %d", ptl_uuid->msg_type);
+	}
+	return ptl_uuid->uuid_nvmeof_cmd.target_qp_num;
+}
+
+void ptl_uuid_set_target_qp_num(u64* uuid, u16 target_qp_num)
+{
+	ptl_uuid_t *ptl_uuid = (ptl_uuid_t *)uuid;
+	if (NVMeOF_cmd != ptl_uuid->msg_type) {
+		SPDK_PTL_FATAL("get_target_qp_num is not allowed for message type: %d", ptl_uuid->msg_type);
+	}
+	ptl_uuid->uuid_nvmeof_cmd.target_qp_num = cpu_to_le16(target_qp_num);
+}
+
+u16 ptl_uuid_get_initiator_qp_num(u64 *uuid)
+{
+	const ptl_uuid_t *ptl_uuid = ptl_uuid_as_const_uuid(uuid);
+	if (NVMeOF_cmd != ptl_uuid->msg_type) {
+		SPDK_PTL_FATAL("get_target_qp_num is not allowed for message type: %d", ptl_uuid->msg_type);
+	}
+	return ptl_uuid->uuid_nvmeof_cmd.initiator_qp_num;
+}
+
+void ptl_uuid_set_initiator_qp_num(u64 *uuid, u16 initiator_qp_num)
+{
+	ptl_uuid_t *ptl_uuid = (ptl_uuid_t *)uuid;
+	if (NVMeOF_cmd != ptl_uuid->msg_type) {
+		SPDK_PTL_FATAL("get_target_qp_num is not allowed for message type: %d", ptl_uuid->msg_type);
+	}
+	ptl_uuid->uuid_nvmeof_cmd.initiator_qp_num = initiator_qp_num;
+}
+

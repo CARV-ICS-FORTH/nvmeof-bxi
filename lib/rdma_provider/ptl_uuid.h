@@ -1,7 +1,20 @@
 #ifndef PTL_UUID_H
 #define PTL_UUID_H
-#include "ptl_log.h"
+
+#include <assert.h>
+#include <endian.h>
 #include <stdint.h>
+
+/* Map Linux kernel types to standard types */
+typedef uint8_t  u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+
+/* Endianness helpers for user-space */
+#define le16_to_cpu(x) le16toh(x)
+#define cpu_to_le16(x) htole16(x)
+
 
 /* In a nutshell 1 is reserved for target srq and 2 for RMA operations to the initiator*/
 #define PTL_UUID_TARGET_SRQ_MATCH_BITS 0x0001000000000000UL
@@ -13,112 +26,107 @@
 /* We use the 2 most significant bytes for match bits */
 #define PTL_UUID_IGNORE_MASK          0x0000FFFFFFFFFFFFUL
 
+/* User-space equivalent of kernel WARN_ON_ONCE */
+#define WARN_ON_ONCE(condition) ({                               \
+    int __ret = !!(condition);                                   \
+    if (__ret) fprintf(stderr, "WARNING: %s at %s:%d\n",         \
+                       #condition, __FILE__, __LINE__);          \
+    __ret;                                                       \
+})
 
+/* User-space equivalent of GENMASK */
+#define GENMASK(h, l) \
+    (((~0ULL) << (l)) & (~0ULL >> (64 - 1 - (h))))
+
+
+struct ptl_uuid_nvmeof_cmd {
+	u16 target_qp_num;
+	u16 initiator_qp_num;
+} __attribute((packed));
+
+struct ptl_uuid_nvmeof_cpl {
+	u16 cid;
+	u16 total_parts;
+} __attribute((packed));
+
+struct ptl_uuid_nvmeof_rma {
+	u16 cid;
+	u16 future_extension_1;
+} __attribute((packed));
+
+struct ptl_uuid_open_conn {
+	u16 future_extension_1;
+	u16 future_extension_2;
+} __attribute((packed));
+
+struct ptl_uuid_open_conn_rep {
+	u16 future_extension_1;
+	u16 future_extension_2;
+} __attribute((packed));
+
+struct ptl_uuid_close_conn {
+	u16 future_extension_1;
+	u16 future_extension_2;
+} __attribute((packed));
+
+
+struct ptl_uuid_close_conn_rep {
+	u16 future_extension_1;
+	u16 future_extension_2;
+} __attribute((packed));
 /**
- * ptl_uuid_set_op_type - Set the operation type field in a UUID
- * @uuid: The UUID to modify
- * @op_type: The operation type value (0x0000 - 0xFFFF)
- *
- * Sets the operation type field (bits 48-63) in the UUID.
- * The operation type identifies the type of operation being performed.
- *
- * Return: The modified UUID with the operation type field set
+ * @brief Portals4 UUID Layout (8 Bytes / Little-Endian)
  */
-uint64_t ptl_uuid_set_op_type(uint64_t uuid, int op_type);
+typedef struct {
+	u16 msg_type;
+	u16 cq_id;
+	union {
+		struct ptl_uuid_nvmeof_cmd uuid_nvmeof_cmd;
+		struct ptl_uuid_nvmeof_cpl uuid_nvmeof_cpl;
+		struct ptl_uuid_nvmeof_rma uuid_nvmeof_rma;
+		struct ptl_uuid_open_conn uuid_open_conn;
+		struct ptl_uuid_open_conn_rep uuid_open_conn_rep;
+		struct ptl_uuid_close_conn uuid_close_conn;
+		struct ptl_uuid_close_conn_rep uuid_close_conn_rep;
+	};
+} __attribute__((packed)) ptl_uuid_t;
 
 
-/**
- * ptl_uuid_get_op_type - Extract the operation type field from a UUID
- * @uuid: The UUID to extract from
- *
- * Extracts the operation type field (bits 48-63) from the UUID.
- *
- * Return: The operation type value (0x0000 - 0xFFFF)
- */
-int ptl_uuid_get_op_type(uint64_t uuid);
+static_assert(sizeof(ptl_uuid_t)    == 8,  "ptl_uuid_t must be 8 bytes");
+
+/* --- Zero-Copy Casting Helpers --- */
+
+static inline const ptl_uuid_t *ptl_uuid_as_const_uuid(const u64* raw)
+{
+	return (const ptl_uuid_t *)raw;
+}
+
+static inline ptl_uuid_t *ptl_uuid_as_uuid(u64 *raw)
+{
+	return (ptl_uuid_t *)raw;
+}
 
 
-/**
- * ptl_uuid_get_next_match_bit - Generate the next unique match bits value
- *
- * Generates and returns the next unique match bits value in a thread-safe manner.
- * Match bits are used to identify and match operations in the Portals protocol.
- * This function maintains a global counter that is incremented on each call.
- *
- * The match bits are stored in bits 48-63 of the UUID, allowing for up to
- * 65536 unique match bit values before wrapping around.
- *
- * Thread-safe: Uses a mutex to protect the global match bits counter.
- *
- * Return: The next unique match bits value (bits 48-63 set, lower bits clear)
- */
-uint64_t ptl_uuid_get_next_match_bit(void);
+
+u16 ptl_uuid_get_op_type(u64 *uuid);
+void ptl_uuid_set_op_type(u64 *uuid, u16 op_type);
+
+u16 ptl_uuid_get_nvme_cid(u64 *uuid);
+void ptl_uuid_set_nvme_cid(u64 *uuid, u16 nvme_cid);
+
+u16 ptl_uuid_get_total_parts(u64 *uuid);
+void ptl_uuid_set_total_parts(u64 *uuid, u16 total_parts);
+
+u16 ptl_uuid_get_cq_id(u64 *uuid);
+void ptl_uuid_set_cq_id(u64 *uuid, u16 cq_id);
+
+u16 ptl_uuid_get_target_qp_num(u64* uuid);
+void ptl_uuid_set_target_qp_num(u64* uuid, u16 target_qp_num);
+
+u16 ptl_uuid_get_initiator_qp_num(u64 *uuid);
+void ptl_uuid_set_initiator_qp_num(u64 *uuid, u16 initiator_qp_num);
 
 
-/**
- * ptl_uuid_set_target_qp_num - Set the target queue pair number in a UUID
- * @uuid: The UUID to modify
- * @qp_num: The target queue pair number (0x0000 - 0xFFFF)
- *
- * Sets the target queue pair number field (bits 16-31) in the UUID.
- * The target QP number identifies the queue pair on the target side.
- *
- * Return: The modified UUID with the target QP number field set
- */
-uint64_t ptl_uuid_set_target_qp_num(uint64_t uuid, int qp_num);
 
-/**
- * ptl_uuid_get_target_qp_num - Extract the target queue pair number from a UUID
- * @uuid: The UUID to extract from
- *
- * Extracts the target queue pair number field (bits 16-31) from the UUID.
- *
- * Return: The target queue pair number (0x0000 - 0xFFFF)
- */
-int ptl_uuid_get_target_qp_num(uint64_t uuid);
-
-/**
- * ptl_uuid_set_initiator_qp_num - Set the initiator queue pair number in a UUID
- * @uuid: The UUID to modify
- * @qp_num: The initiator queue pair number (0x0000 - 0xFFFF)
- *
- * Sets the initiator queue pair number field (bits 0-15) in the UUID.
- * The initiator QP number identifies the queue pair on the initiator side.
- *
- * Return: The modified UUID with the initiator QP number field set
- */
-uint64_t ptl_uuid_set_initiator_qp_num(uint64_t uuid, int qp_num);
-
-/**
- * ptl_uuid_get_initiator_qp_num - Extract the initiator queue pair number from a UUID
- * @uuid: The UUID to extract from
- *
- * Extracts the initiator queue pair number field (bits 0-15) from the UUID.
- *
- * Return: The initiator queue pair number (0x0000 - 0xFFFF)
- */
-int ptl_uuid_get_initiator_qp_num(uint64_t uuid);
-
-/**
- * ptl_uuid_get_cq_num - Extract the completion queue ID from a UUID
- * @uuid: The UUID to extract from
- *
- * Extracts the completion queue ID field (bits 32-47) from the UUID.
- *
- * Return: The completion queue ID (0x0000 - 0xFFFF)
- */
-int ptl_uuid_get_cq_num(uint64_t uuid);
-
-/**
- * ptl_uuid_set_cq_num - Set the completion queue ID in a UUID
- * @uuid: The UUID to modify
- * @cq_num: The completion queue ID (0x0000 - 0xFFFF)
- *
- * Sets the completion queue ID field (bits 32-47) in the UUID.
- * The CQ ID identifies the completion queue associated with this operation.
- *
- * Return: The modified UUID with the completion queue ID field set
- */
-uint64_t ptl_uuid_set_cq_num(uint64_t uuid, int cq_num);
-#endif
+#endif /* PTL_UUID_H */
 

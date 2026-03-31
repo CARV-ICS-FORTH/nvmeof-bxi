@@ -2079,6 +2079,7 @@ static int nvme_rdma_route_resolved(struct nvme_rdma_queue * queue)
 		priv.cntlid = cpu_to_le16(ctrl->ctrl.cntlid);
 	}
 	/*<gesalous> non-matching feat*/
+	PTL_DEBUG("CORE_DRIVER: hrqsize: %u hsqsize: %u (as set in rdma_conn_param)", priv.hrqsize, priv.hsqsize);
 	PTL_DEBUG("CORE_DRIVER: queue_idx=%d "
 	          "rsp_ring[0].dma=0x%llx queue_size=%d sizeof(nvme_completion)=%zu",
 	          nvme_rdma_queue_idx(queue),

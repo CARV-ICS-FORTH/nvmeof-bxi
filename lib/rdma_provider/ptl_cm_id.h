@@ -33,8 +33,10 @@ struct ptl_cm_id {
 	struct ptl_pd *ptl_pd;
 	struct ptl_qp *ptl_qp;
 	struct ptl_context *ptl_context;
+	/*<gesalous>, FIFO ordering feat*/
 	/*Encoded the initiator qp num and target*/
-	uint64_t session_id;
+	uint16_t initiator_qp_num;
+	uint16_t target_qp_num;
 	/*In case of no matching this field is ignored*/
 	uint64_t recv_match_bits;
 	/**

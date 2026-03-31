@@ -2,6 +2,7 @@
 #define PTL_QP_H
 #include "ptl_object_types.h"
 #include "rdma/ib_verbs.h"
+#include <portals4.h>
 struct ptl_cm_id;
 struct ptl_qp {
 	ptl_obj_type_e object_type;

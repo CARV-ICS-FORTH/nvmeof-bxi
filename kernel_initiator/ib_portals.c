@@ -22,7 +22,6 @@
 #include "mr_portals_pool.h"
 #include "portals4.h"
 #include "portals4_bxiext.h"
-#include "ptl_bxiv3_dev_map.h"
 #include "ptl_bxiv3_device.h"
 #include "ptl_cm_id.h"
 #include "ptl_connection.h"
@@ -410,11 +409,14 @@ static void ib_portals_send_nvmeof_cmd(struct ptl_qp *ptl_qp, struct ib_send_wr 
 	msg.target_id.phys.pid = ptl_qp->ptl_id->remote_pid;
 	msg.pt_index = ptl_qp->ptl_id->remote_msg_pte;
 	msg.user_ptr = send_op;
-	msg.hdr_data = ptl_qp->ptl_id->session_id;
+	ptl_uuid_set_op_type(&msg.hdr_data, NVMeOF_cmd);
+	ptl_uuid_set_cq_id(&msg.hdr_data, ptl_qp->ptl_id->remote_cq_id);
+	ptl_uuid_set_initiator_qp_num(&msg.hdr_data, ptl_qp->ptl_id->initiator_qp_num);
+	ptl_uuid_set_target_qp_num(&msg.hdr_data, ptl_qp->ptl_id->target_qp_num);
 	PTL_DEBUG("Send NVMeOF cmd: Target qp num: %d initiator qp num: %d cq_id: %d",
-	          ptl_uuid_get_target_qp_num(msg.hdr_data),
-	          ptl_uuid_get_initiator_qp_num(msg.hdr_data),
-	          ptl_uuid_get_cq_num(msg.hdr_data));
+	          ptl_qp->ptl_id->target_qp_num,
+	          ptl_qp->ptl_id->initiator_qp_num,
+	          ptl_qp->ptl_id->remote_cq_id);
 
 	rc = PtlMsgPutOnce(ptl_qp->ptl_id->bxiv3_dev->nicia_handle, &md, &msg);
 	if (PTL_OK != rc) {
@@ -434,7 +436,6 @@ int ib_portals_post_send(struct ib_qp *qp, struct ib_send_wr *wr,
 	ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
 	PTL_CHECK(ptl_qp, PTL_QP);
 
-	int ret = 0;
 
 	PTL_DEBUG("=== ib_portals_post_send called ===");
 

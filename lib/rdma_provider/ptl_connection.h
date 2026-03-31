@@ -24,15 +24,16 @@ struct ptl_conn_comm_pair_info {
 		/*PTE entry where initiator's control plane server expects reply*/
 		int pte;
 	} src, dest;
-};
+} __attribute((packed));
 
 struct ptl_conn_msg_header {
 	ptl_conn_msg_type_e msg_type;
+	uint32_t pad;
 	uint64_t version;
 	/*Due to rdma conn_param not all messages are of fixed size*/
 	uint64_t total_msg_size;
 	struct ptl_conn_comm_pair_info peer_info;
-};
+} __attribute((packed));
 
 struct ptl_conn_open {
 	struct sockaddr src_addr;
@@ -55,11 +56,12 @@ struct ptl_conn_open {
 	size_t nvme_cpl_queue_size;
 	/*extensions for nvme cpls, end*/
 	struct rdma_conn_param conn_param;
-};
+} __attribute((packed));
 
 struct ptl_conn_open_reply {
 	/*Contains initiator target qp nums*/
-	uint64_t session_id;
+	uint16_t initiator_qp_num;
+	uint16_t target_qp_num;
 	/*PTE where there are buffers for receive operations (NVMe-cmd)*/
 	int msg_pte;
 	/*
@@ -75,16 +77,18 @@ struct ptl_conn_open_reply {
 	int cq_id;
 	int status;
 	struct rdma_conn_param conn_param;
-};
+} __attribute((packed));
 
 struct ptl_conn_close {
-	uint64_t session_id;
-};
+	uint16_t initiator_qp_num;
+	uint16_t target_qp_num;
+} __attribute((packed));
 
 struct ptl_conn_close_reply {
-	uint64_t session_id;
+	uint16_t initiator_qp_num;
+	uint16_t target_qp_num;
 	int status;
-};
+} __attribute((packed));
 
 struct ptl_conn_msg {
 	struct ptl_conn_msg_header msg_header;
@@ -94,6 +98,6 @@ struct ptl_conn_msg {
 		struct ptl_conn_close conn_close;
 		struct ptl_conn_close_reply conn_close_reply;
 	};
-};
+} __attribute((packed));
 #endif
 

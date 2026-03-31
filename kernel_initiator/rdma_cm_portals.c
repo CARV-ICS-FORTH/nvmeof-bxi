@@ -346,6 +346,7 @@ int rdma_cm_portals_connect_locked(struct rdma_cm_id *id,
 		if (ptl_id->param.private_data == NULL) {
 			/*XXX TODO XXX rollback*/
 		}
+		/*keep a copy of the og params*/
 		memcpy((void *)ptl_id->param.private_data, param->private_data,
 		       param->private_data_len);
 	}

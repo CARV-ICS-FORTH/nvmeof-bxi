@@ -74,7 +74,8 @@ struct rdma_cm_event *ptl_cm_id_create_event(struct ptl_cm_id *ptl_id, struct pt
 	/*rdma_cm library uses the private_data field to negotiate a new connection*/
 	fake_event->param.conn = ptl_id->conn_param;
 	if (ptl_id->conn_param.private_data) {
-		SPDK_PTL_DEBUG("CONN_PARAM: setting connection params for this event");
+		SPDK_PTL_DEBUG("CONN_PARAM: copying %u B from ptl_id as connection params for this event",
+			       fake_event->param.conn.private_data_len);
 		fake_event->param.conn.private_data = calloc(1UL, fake_event->param.conn.private_data_len);
 		memcpy((void *)fake_event->param.conn.private_data, ptl_id->conn_param.private_data,
 		       fake_event->param.conn.private_data_len);

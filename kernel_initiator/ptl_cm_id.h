@@ -22,7 +22,8 @@ struct ptl_cm_id {
 	ptl_obj_type_e object_type;
 	struct rdma_cm_id fake_cm_id;
 	struct net *net;
-	u64 session_id;
+	u16 initiator_qp_num;
+	u16 target_qp_num;
 	rdma_cm_event_handler event_handler;
 	void *event_handler_context;
 	int nid;

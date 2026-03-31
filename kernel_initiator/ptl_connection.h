@@ -6,6 +6,7 @@
 #include <portals4.h>
 #include <rdma/rdma_cm.h>
 #define PTL_SPDK_PROTOCOL_VERSION 1UL
+
 /**
  * PTE for the connection server*/
 #define PTL_CP_SERVER_PTE 0
@@ -34,15 +35,16 @@ struct ptl_conn_comm_pair_info {
 		/*PTE entry where initiator's control plane server expects reply*/
 		int pte;
 	} src, dest;
-};
+} __attribute((packed));
 
 struct ptl_conn_msg_header {
 	ptl_conn_msg_type_e msg_type;
+	u32 pad;
 	u64 version;
 	/*Due to rdma conn_param not all messages are of fixed size*/
 	u64 total_msg_size;
 	struct ptl_conn_comm_pair_info peer_info;
-};
+} __attribute((packed));
 
 struct ptl_conn_open {
 	struct sockaddr src_addr;
@@ -58,25 +60,28 @@ struct ptl_conn_open {
 	size_t nvme_cpl_queue_size;
 	/*extensions for nvme cpls, end*/
 	struct rdma_conn_param conn_param;
-};
+} __attribute((packed));
 
 struct ptl_conn_open_reply {
-	u64 session_id;
+	u16 initiator_qp_num;
+	u16 target_qp_num;
 	int msg_pte;
 	int rma_pte;
 	int cq_id;
 	int status;
 	struct rdma_conn_param conn_param;
-};
+} __attribute((packed));
 
 struct ptl_conn_close {
-	u64 session_id;
-};
+	u16 initiator_qp_num;
+	u16 target_qp_num;
+} __attribute((packed));
 
 struct ptl_conn_close_reply {
-	u64 session_id;
+	u16 initiator_qp_num;
+	u16 target_qp_num;
 	int status;
-};
+} __attribute((packed));
 
 struct ptl_conn_msg {
 	struct ptl_conn_msg_header msg_header;
@@ -86,7 +91,7 @@ struct ptl_conn_msg {
 		struct ptl_conn_close conn_close;
 		struct ptl_conn_close_reply conn_close_reply;
 	};
-};
+} __attribute((packed));
 
 
 struct ptl_conn_send_buffer {
@@ -94,7 +99,7 @@ struct ptl_conn_send_buffer {
 	ptl_md_t md;
 	ptl_handle_md_t md_handle;
 	struct ptl_conn_msg conn_msg;
-};
+} __attribute((packed));
 
 struct ptl_conn_recv_buffer {
 	ptl_obj_type_e object_type;

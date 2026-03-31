@@ -62,7 +62,8 @@
 
 volatile int is_target;
 
-const char *ptl_msg_types[PTL_NUM_MSGS] = {"NVMeoF_cmd", "NVMeOF_cpl", "NVMeOF_rma", "PTL_OPEN_CONNECTION", "PTL_OPEN_CONNECTION_REPLY", "PTL_OPEN_CONNECTION", "PTL_OPEN_CONNECTION_REPLY"};
+
+const char *ptl_msg_types[PTL_NUM_MSGS] = {"NVMeoF_cmd", "NVMeOF_cpl", "NVMeOF_rma", "PTL_OPEN_CONNECTION", "PTL_OPEN_CONNECTION_REPLY", "PTL_CLOSE_CONNECTION", "PTL_CLOSE_CONNECTION_REPLY"};
 static void rdma_ptl_write_event_to_fd(int fd)
 {
 	uint64_t value = 1;
@@ -269,9 +270,8 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
 	ptl_process_t target;
 	ptl_md_t md;
-	ptl_hdr_data_t object_type = ptl_uuid_set_op_type(object_type,
-				     send_buffer->conn_msg.msg_header.msg_type);
-	;
+	ptl_hdr_data_t hdr_data = 0;
+	ptl_uuid_set_op_type(&hdr_data, send_buffer->conn_msg.msg_header.msg_type);
 	int rc;
 	struct ptl_conn_comm_pair_info *peer_info = &send_buffer->conn_msg.msg_header.peer_info;
 	target.phys.nid = peer_info->dest.nid;
@@ -310,7 +310,7 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 		    0x01ULL, /* match bits */
 		    0, /* remote offset */
 		    send_buffer, /* user ptr */
-		    object_type);
+		    hdr_data);
 
 	if (rc != PTL_OK) {
 		SPDK_PTL_FATAL("PtlPut failed with code: %d\n", rc);
@@ -333,9 +333,8 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 	struct ptl_cm_id * ptl_id = ptl_cm_id_create(listen_id->ptl_channel,
 				    NULL/*listen_id->fake_cm_id.context*/);
 
-	ptl_id->session_id = ptl_uuid_set_target_qp_num(ptl_id->session_id, ptl_id->ptl_qp_num);
-	ptl_id->session_id = ptl_uuid_set_initiator_qp_num(ptl_id->session_id,
-			     request_open_conn->conn_open.initiator_qp_num);
+	ptl_id->target_qp_num = ptl_id->ptl_qp_num;
+	ptl_id->initiator_qp_num = request_open_conn->conn_open.initiator_qp_num;
 	SPDK_PTL_DEBUG("[%s] CP server: Got a PTL_OPEN_CONNECTION request from "
 		       "nid: %d pid: %d pte: %d {msg_pte: %d rma_pte: %d}. Creating "
 		       "the fake event and send the OPEN_CONNECTION_REPLY pair is: target qp num: %d initiator qp num: %d",
@@ -365,12 +364,12 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 	// 	       "%lu and for RMA: %lu and has subscribed in cq_id: %d private date len is: %u",
 	// 	       ptl_id->recv_match_bits, ptl_id->rma_match_bits,
 	// 	       ptl_id->remote_cq_id, conn_open->conn_param.private_data_len);
-	ptl_id->session_id = ptl_uuid_set_cq_num(ptl_id->session_id, ptl_id->remote_cq_id);
 
 	rdma_cm_find_matching_local_ip(&ptl_id->fake_cm_id.route.addr.dst_addr,
 				       &ptl_id->fake_cm_id.route.addr.src_addr);
 	//Move it to rdma_create_qp
 	// ptl_id->fake_cm_id.qp->qp_num = ptl_id->ptl_qp_num;
+
 
 	/*extract conn_param*/
 	ptl_id->conn_param = conn_open->conn_param;
@@ -383,11 +382,11 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 		SPDK_PTL_DEBUG("CONN_PARAM: Deserializing conn_param private data of len: %u",
 			       ptl_id->conn_param.private_data_len);
 		memcpy((void *)ptl_id->conn_param.private_data,
-		       (char *)conn_open + sizeof(*conn_open),
+		       (char *)request_open_conn + sizeof(*request_open_conn),
 		       ptl_id->conn_param.private_data_len);
 	}
 
-	/*At the target side, someone wants to connect with us*/
+  /*At the target side, someone wants to connect with us*/
 	ptl_id->cm_id_state = PTL_CM_CONNECTING;
 	/*extension staff*/
 	if (conn_open->is_kernel_initiator) {
@@ -439,22 +438,21 @@ static void rdma_ptl_handle_open_conn_reply(struct ptl_cm_id *listen_id,
 			       open_conn_reply->status);
 	}
 	/*XXX TODO XXX*/
-	int qp_num =
-		is_target
-		? ptl_uuid_get_target_qp_num(conn_msg->conn_open_reply.session_id)
-		: ptl_uuid_get_initiator_qp_num(conn_msg->conn_open_reply.session_id);
+	int qp_num = is_target ? conn_msg->conn_open_reply.target_qp_num :
+		     conn_msg->conn_open_reply.initiator_qp_num;
 	SPDK_PTL_DEBUG(
-		"[%s] CP server: Got open connection reply! connection id is: %lu "
+		"[%s] CP server: Got open connection reply!"
 		"initiator qp num: %d target qp num: %d. Creating also the "
 		"fake_event OPEN CONNECTION *DONE*",
-		ptl_control_plane_server.role, open_conn_reply->session_id, qp_num,
-		ptl_uuid_get_target_qp_num(conn_msg->conn_open_reply.session_id));
+		ptl_control_plane_server.role, qp_num,
+		conn_msg->conn_open_reply.target_qp_num);
 	connection_id = rdma_ptl_conn_map_find_from_qp_num(qp_num);
 	if (connection_id == NULL) {
 		SPDK_PTL_FATAL("[%s] CP server: Could not find connection with qp num: %d",
 			       ptl_control_plane_server.role, qp_num);
 	}
-	connection_id->session_id = open_conn_reply->session_id;
+	connection_id->target_qp_num = open_conn_reply->target_qp_num;
+	connection_id->initiator_qp_num = open_conn_reply->initiator_qp_num;
 #if PTL_USE_MATCHING
 	connection_id->recv_match_bits = open_conn_reply->srq_match_bits;
 	connection_id->rma_match_bits = UINT64_MAX;
@@ -469,8 +467,6 @@ static void rdma_ptl_handle_open_conn_reply(struct ptl_cm_id *listen_id,
 	connection_id->remote_msg_pte = open_conn_reply->msg_pte;
 	connection_id->remote_rma_pte = open_conn_reply->rma_pte;
 	connection_id->remote_cq_id = open_conn_reply->cq_id;
-	connection_id->session_id = ptl_uuid_set_cq_num(connection_id->session_id,
-				    connection_id->remote_cq_id);
 
 
 	memcpy(&connection_id->conn_msg, conn_msg, sizeof(*conn_msg));
@@ -522,12 +518,12 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 			       ptl_control_plane_server.protocol_version);
 	}
 
-	int initiator_qp_num = ptl_uuid_get_initiator_qp_num(conn_close->session_id);
+	int initiator_qp_num = conn_close->initiator_qp_num;
 	if (initiator_qp_num == 0) {
 		SPDK_PTL_FATAL("initiator qp num == 0: Nida does not assign 0 qp numbers!");
 	}
 
-	int target_qp_num = ptl_uuid_get_target_qp_num(conn_close->session_id);
+	int target_qp_num = conn_close->target_qp_num;
 	if (target_qp_num == 0) {
 		SPDK_PTL_FATAL("target qp num == 0: Nida does not assign 0 qp numbers!");
 	}
@@ -543,11 +539,11 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 	// 	       &connection_id->fake_cm_id, connection_id->fake_cm_id.context);
 
 	SPDK_PTL_DEBUG(
-		"[%s] Got close connection request for connection id: %lu for "
+		"[%s] Got close connection for "
 		"initiator_qp_num: %d target_qp_num: %d. Found connection, "
 		"creating the fake RDMA_CM_EVENT_DISCONNECTED and send the "
 		"CLOSE_CONNECTION_REPLY. Context is NULL? %s Is target? %s",
-		ptl_control_plane_server.role, conn_close->session_id, initiator_qp_num,
+		ptl_control_plane_server.role, initiator_qp_num,
 		target_qp_num, connection_id->fake_cm_id.context ? "NO" : "YES", is_target ? "YES" : "NO");
 	// SPDK_PTL_DEBUG("[%s] CP server: Found connection id with target qp num: %d to close",
 	// 	       ptl_control_plane_server.role, target_qp_num);
@@ -571,7 +567,7 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 	reply_buf->conn_msg.msg_header.peer_info.dest = request->msg_header.peer_info.src;
 
 	reply_buf->conn_msg.conn_close_reply.status = PTL_OK;
-	reply_buf->conn_msg.conn_close_reply.session_id = connection_id->session_id;
+	reply_buf->conn_msg.conn_close_reply.initiator_qp_num = connection_id->initiator_qp_num;
 	rdma_cm_ptl_send_request(reply_buf);
 }
 
@@ -580,8 +576,8 @@ static void rdma_ptl_handle_close_conn_reply(struct ptl_conn_msg *conn_msg)
 {
 	struct ptl_conn_close_reply *close_reply = &conn_msg->conn_close_reply;
 	struct rdma_cm_event *fake_event;
-	int initiator_qp_num = ptl_uuid_get_initiator_qp_num(close_reply->session_id);
-	int target_qp_num = ptl_uuid_get_target_qp_num(close_reply->session_id);
+	int initiator_qp_num = close_reply->initiator_qp_num;
+	int target_qp_num = close_reply->target_qp_num;
 
 
 	if (initiator_qp_num == 0) {
@@ -597,8 +593,8 @@ static void rdma_ptl_handle_close_conn_reply(struct ptl_conn_msg *conn_msg)
 			       close_reply->status);
 	}
 
-	SPDK_PTL_DEBUG("[%s] Got a close connection reply! connection id is: %lu aldready done staff nothing to do",
-		       ptl_control_plane_server.role, close_reply->session_id);
+	SPDK_PTL_DEBUG("[%s] Got a close connection reply! connection id is: {initiator qp num: %d target_qp_num: %d } aldready done staff nothing to do",
+		       ptl_control_plane_server.role, close_reply->initiator_qp_num, close_reply->target_qp_num);
 
 	struct ptl_cm_id * connection_id = rdma_ptl_conn_map_find_from_qp_num(
 			is_target ? target_qp_num : initiator_qp_num);
@@ -1012,6 +1008,8 @@ int rdma_bind_addr(struct rdma_cm_id *id, struct sockaddr *addr)
 		SPDK_PTL_FATAL("Corrupted ptl_cm_id");
 	}
 	memcpy(&id->route.addr.src_addr, addr, sizeof(*addr));
+	struct ptl_context *cnxt = ptl_cnxt_get();
+	id->verbs = ptl_cnxt_get_ibv_context(cnxt);
 
 	return 0;
 }
@@ -1489,8 +1487,7 @@ int rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 	struct rdma_ptl_send_buffer *conn_reply_buf;
 	struct ptl_cm_id * ptl_id = ptl_cm_id_get(id);
 
-
-	struct ptl_srq *ptl_srq = ptl_id->ptl_qp->ptl_srq;
+	// struct ptl_srq *ptl_srq = ptl_id->ptl_qp->ptl_srq;
 
 	SPDK_PTL_DEBUG("Accepting initiator:{nid:%u,pid:%u,msg_pte:%u,rma_pte: %u}",
 		       ptl_id->remote_nid, ptl_id->remote_pid,
@@ -1498,8 +1495,8 @@ int rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 
 	char *conn_param_private_data;
 
-	SPDK_PTL_DEBUG("[%s] CP server: At accept sending uuid of the connection: %lu",
-		       ptl_control_plane_server.role, ptl_id->session_id);
+	SPDK_PTL_DEBUG("[%s] CP server: At accept sending uuid of the connection:{initiator_qp_num: %d, target_qp_num: %d}",
+		       ptl_control_plane_server.role, ptl_id->initiator_qp_num, ptl_id->target_qp_num);
 
 
 	if (sizeof(*conn_reply_buf) + conn_param->private_data_len > RDMA_PTL_MSG_BUFFER_SIZE) {
@@ -1525,7 +1522,8 @@ int rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param)
 
 
 	conn_reply_buf->conn_msg.conn_open_reply.status = PTL_OK;
-	conn_reply_buf->conn_msg.conn_open_reply.session_id = ptl_id->session_id;
+	conn_reply_buf->conn_msg.conn_open_reply.initiator_qp_num = ptl_id->initiator_qp_num;
+	conn_reply_buf->conn_msg.conn_open_reply.target_qp_num = ptl_id->target_qp_num;
 
 	/*Tell the initiator (you are the target) what are the match bits of my srq*/
 #if PTL_USE_MATCHING
@@ -1568,8 +1566,8 @@ int rdma_disconnect(struct rdma_cm_id *id)
 	struct rdma_ptl_send_buffer *conn_close_request;
 	struct ptl_cm_id *ptl_id = ptl_cm_id_get(id);
 	struct ptl_context *ptl_cnxt = ptl_cnxt_get();
-	int initiator_qp_num = ptl_uuid_get_initiator_qp_num(ptl_id->session_id);
-	int target_qp_num = ptl_uuid_get_target_qp_num(ptl_id->session_id);
+	int initiator_qp_num = ptl_id->initiator_qp_num;
+	int target_qp_num = ptl_id->target_qp_num;
 
 
 	if (initiator_qp_num == 0) {
@@ -1599,15 +1597,13 @@ int rdma_disconnect(struct rdma_cm_id *id)
 
 	if (ptl_id->cm_id_state == PTL_CM_DISCONNECTING) {
 		SPDK_PTL_DEBUG("[%s] CP server: No-op ptl_id already disconnecting/disconnected for queue pair initiator: %d target: %d",
-			       ptl_control_plane_server.role, ptl_uuid_get_initiator_qp_num(ptl_id->session_id),
-			       ptl_uuid_get_target_qp_num(ptl_id->session_id));
+			       ptl_control_plane_server.role, ptl_id->initiator_qp_num, ptl_id->target_qp_num);
 		ptl_id->cm_id_state = PTL_CM_DISCONNECTED;
 		return 0;
 	}
 
 	SPDK_PTL_DEBUG("[%s] CP server: Calling disconnect for queue pairs initiator: %d target: %d",
-		       ptl_control_plane_server.role, ptl_uuid_get_initiator_qp_num(ptl_id->session_id),
-		       ptl_uuid_get_target_qp_num(ptl_id->session_id));
+		       ptl_control_plane_server.role, ptl_id->initiator_qp_num, ptl_id->target_qp_num);
 	if (is_target) {
 		SPDK_PTL_DEBUG("CAUTION What? Initiating disconnect operation from the target.");
 	}
@@ -1626,7 +1622,8 @@ int rdma_disconnect(struct rdma_cm_id *id)
 	conn_close_request->conn_msg.msg_header.peer_info.src.nid = ptl_cnxt_get_nid(ptl_cnxt);
 	conn_close_request->conn_msg.msg_header.peer_info.src.pid = ptl_cnxt_get_pid(ptl_cnxt);
 	conn_close_request->conn_msg.msg_header.peer_info.src.pte = PTL_CP_SERVER_PTE;
-	conn_close_request->conn_msg.conn_close.session_id = ptl_id->session_id;
+	conn_close_request->conn_msg.conn_close.initiator_qp_num = ptl_id->initiator_qp_num;
+	conn_close_request->conn_msg.conn_close.target_qp_num = ptl_id->target_qp_num;
 
 
 	rdma_cm_ptl_send_request(conn_close_request);

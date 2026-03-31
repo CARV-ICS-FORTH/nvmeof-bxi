@@ -143,8 +143,10 @@ static struct ptl_context_op_meta *ptl_cnxt_process_put(ptl_event_t event, struc
 			recv_meta->recv_op.io_vector[0].iov_len, event.pt_index);
 	}
 
-	recv_meta->recv_op.initiator_qp_num =  ptl_uuid_get_initiator_qp_num(event.hdr_data);
-	recv_meta->recv_op.target_qp_num = ptl_uuid_get_target_qp_num(event.hdr_data);
+	recv_meta->recv_op.initiator_qp_num =  ptl_uuid_get_initiator_qp_num(&event.hdr_data);
+	recv_meta->recv_op.target_qp_num = ptl_uuid_get_target_qp_num(&event.hdr_data);
+	SPDK_PTL_DEBUG("RECV staff from {initiator_qp_num: %d target_qp_num: %d}",
+		       recv_meta->recv_op.initiator_qp_num, recv_meta->recv_op.target_qp_num);
 
 	if (event.rlength != 64 && event.rlength != 16) {
 		SPDK_PTL_FATAL("Wrong size, should have been either 64 B (NVMe command "
@@ -153,7 +155,7 @@ static struct ptl_context_op_meta *ptl_cnxt_process_put(ptl_event_t event, struc
 	}
 	if (recv_meta->recv_op.initiator_qp_num == 0 || recv_meta->recv_op.target_qp_num == 0) {
 		SPDK_PTL_DEBUG("Staff from header data: initiator qp num %d target qp num: %d",
-			       ptl_uuid_get_initiator_qp_num(event.hdr_data), ptl_uuid_get_target_qp_num(event.hdr_data));
+			       ptl_uuid_get_initiator_qp_num(&event.hdr_data), ptl_uuid_get_target_qp_num(&event.hdr_data));
 		SPDK_PTL_FATAL("Nida does not assign 0 qp num initiator = %d target = %d",
 			       recv_meta->recv_op.initiator_qp_num, recv_meta->recv_op.target_qp_num);
 	}

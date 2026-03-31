@@ -38,12 +38,11 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event, struct ptl_cq *
 	int qpn;
 	cm_event = kzalloc(sizeof(*cm_event), GFP_KERNEL);
 
-	qpn = ptl_uuid_get_initiator_qp_num(msg->conn_open_reply.session_id);
+	qpn = msg->conn_open_reply.initiator_qp_num;
 	PTL_DEBUG("<PTL_OPEN_CONNECTION_REPLY> rlength: %llu mlength: %llu", event->rlength,
 	          event->mlength);
 	PTL_DEBUG("Initiator qp num for which this event is: %d", qpn);
-	PTL_DEBUG("Target qp num for which this event is: %d",
-	          ptl_uuid_get_target_qp_num(msg->conn_open_reply.session_id));
+	PTL_DEBUG("Target qp num for which this event is: %d", msg->conn_open_reply.target_qp_num);
 	spin_lock(&ptl_cq->bxiv3_dev->qp_map_lock);
 	hash_for_each_possible(ptl_cq->bxiv3_dev->qp_map, entry, node, qpn) {
 		if (entry->key == qpn) {
@@ -51,13 +50,20 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event, struct ptl_cq *
 			break; // Exit immediately once found
 		}
 	}
+
+	if (NULL == ptl_qp) {
+		PTL_FATAL("No matching ptl_qp found in open_connection_reply for qp "
+		          "{initator_qp_num: %d, target_qp_num: %d}",
+		          msg->conn_open_reply.initiator_qp_num,
+		          msg->conn_open_reply.target_qp_num);
+	}
+
 	ptl_qp->ptl_id->remote_msg_pte = msg->conn_open_reply.msg_pte;
 	ptl_qp->ptl_id->remote_rma_pte = msg->conn_open_reply.rma_pte;
 	ptl_qp->ptl_id->remote_cq_id = msg->conn_open_reply.cq_id;
-	ptl_qp->ptl_id->session_id = msg->conn_open_reply.session_id;
-	ptl_qp->ptl_id->session_id = ptl_uuid_set_cq_num(ptl_qp->ptl_id->session_id,
-	                                                 msg->conn_open_reply.cq_id);
-	ptl_qp->ptl_id->session_id = ptl_uuid_set_op_type(ptl_qp->ptl_id->session_id, NVMeOF_cmd);
+	ptl_qp->ptl_id->initiator_qp_num = msg->conn_open_reply.initiator_qp_num;
+	ptl_qp->ptl_id->target_qp_num = msg->conn_open_reply.target_qp_num;
+	ptl_qp->ptl_id->remote_cq_id = msg->conn_open_reply.cq_id;
 
 	spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);
 	if (NULL == ptl_qp) {
@@ -77,10 +83,8 @@ static void ptl_handle_close_connection_reply(ptl_event_t *event, struct ptl_cq 
 	struct ptl_conn_recv_buffer *recv_buffer = event->user_ptr;
 	struct ptl_conn_msg *msg = recv_buffer->conn_msg;
 	PTL_DEBUG("<PTL_CLOSE_CONNECTION_REPLY>");
-	PTL_DEBUG("Initiator qp num for which this event is: %d",
-	          ptl_uuid_get_initiator_qp_num(msg->conn_close_reply.session_id));
-	PTL_DEBUG("Target qp num for which this event is: %d",
-	          ptl_uuid_get_target_qp_num(msg->conn_close_reply.session_id));
+	PTL_DEBUG("Initiator qp num for which this event is: %d", msg->conn_close_reply.initiator_qp_num);
+	PTL_DEBUG("Target qp num for which this event is: %d", msg->conn_close_reply.target_qp_num);
 	PTL_DEBUG("</PTL_CLOSE_CONNECTION_REPLY>");
 }
 
@@ -145,7 +149,7 @@ static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq)
 
 static void ptl_cnxt_process_put(ptl_event_t event, struct ptl_cq *ptl_cq)
 {
-	int op_type = ptl_uuid_get_op_type(event.hdr_data);
+	int op_type = ptl_uuid_get_op_type(&event.hdr_data);
 	/*XXX TODO XXX fix the target to report it specifically.*/
 	if (NVMeOF_cpl == op_type) {
 		ptl_handle_nvme_cpl(&event, ptl_cq);

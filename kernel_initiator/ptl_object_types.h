@@ -1,4 +1,3 @@
-#include "ptl_connection.h"
 #ifndef PTL_OBJECT_TYPES_H
 #define PTL_OBJECT_TYPES_H 1
 #include <linux/delay.h>

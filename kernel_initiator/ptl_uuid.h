@@ -1,82 +1,96 @@
-/**
- * @file ptl_uuid.h
- * @brief Portals UUID management and field extraction/insertion utilities - Header
- *
- * This header provides function declarations for packing and unpacking various
- * fields into a 64-bit UUID.
- *
- * Layout (little-endian bit numbering):
- *   Bits 0-15   (Bytes 0-1):   Initiator Queue Pair Number (16-bit)
- *   Bits 16-31  (Bytes 2-3):   Target Queue Pair Number (16-bit)
- *   Bits 32-47  (Bytes 4-5):   Completion Queue ID (16-bit)
- *   Bits 48-63  (Bytes 6-7):   Operation Type (16-bit)
- *
- * All fields are 16-bit unsigned values (0x0000 - 0xFFFF).
- */
-
 #ifndef PTL_UUID_H
 #define PTL_UUID_H
 
 #include <linux/types.h>
 
-/**
- * @brief Set the operation type field in the UUID
- * @param uuid The UUID to modify
- * @param op_type The operation type value (0-0xFFFF)
- * @return Modified UUID with operation type set
- */
-uint64_t ptl_uuid_set_op_type(uint64_t uuid, int op_type);
 
-/**
- * @brief Get the operation type field from the UUID
- * @param uuid The UUID to extract from
- * @return The operation type value
- */
-int ptl_uuid_get_op_type(uint64_t uuid);
+struct ptl_uuid_nvmeof_cmd {
+	u16 target_qp_num;
+	u16 initiator_qp_num;
+} __attribute((packed));
 
-/**
- * @brief Set the target queue pair number in the UUID
- * @param uuid The UUID to modify
- * @param qp_num The target QP number (0-0xFFFF)
- * @return Modified UUID with target QP number set
- */
-uint64_t ptl_uuid_set_target_qp_num(uint64_t uuid, int qp_num);
+struct ptl_uuid_nvmeof_cpl {
+	u16 cid;
+	u16 total_parts;
+} __attribute((packed));
 
-/**
- * @brief Get the target queue pair number from the UUID
- * @param uuid The UUID to extract from
- * @return The target QP number
- */
-int ptl_uuid_get_target_qp_num(uint64_t uuid);
+struct ptl_uuid_nvmeof_rma {
+	u16 cid;
+	u16 future_extension_1;
+} __attribute((packed));
 
-/**
- * @brief Set the initiator queue pair number in the UUID
- * @param uuid The UUID to modify
- * @param qp_num The initiator QP number (0-0xFFFF)
- * @return Modified UUID with initiator QP number set
- */
-uint64_t ptl_uuid_set_initiator_qp_num(uint64_t uuid, int qp_num);
+struct ptl_uuid_open_conn {
+	u16 future_extension_1;
+	u16 future_extension_2;
+} __attribute((packed));
 
-/**
- * @brief Get the initiator queue pair number from the UUID
- * @param uuid The UUID to extract from
- * @return The initiator QP number
- */
-int ptl_uuid_get_initiator_qp_num(uint64_t uuid);
+struct ptl_uuid_open_conn_rep {
+	u16 future_extension_1;
+	u16 future_extension_2;
+} __attribute((packed));
 
-/**
- * @brief Get the completion queue number from the UUID
- * @param uuid The UUID to extract from
- * @return The CQ number
- */
-int ptl_uuid_get_cq_num(uint64_t uuid);
+struct ptl_uuid_close_conn {
+	u16 future_extension_1;
+	u16 future_extension_2;
+} __attribute((packed));
 
+
+struct ptl_uuid_close_conn_rep {
+	u16 future_extension_1;
+	u16 future_extension_2;
+} __attribute((packed));
 /**
- * @brief Set the completion queue number in the UUID
- * @param uuid The UUID to modify
- * @param cq_num The CQ number (0-0xFFFF)
- * @return Modified UUID with CQ number set
+ * @brief Portals4 UUID Layout (8 Bytes / Little-Endian)
  */
-uint64_t ptl_uuid_set_cq_num(uint64_t uuid, int cq_num);
+typedef struct {
+	u16 msg_type;
+	u16 cq_id;
+	union {
+		struct ptl_uuid_nvmeof_cmd uuid_nvmeof_cmd;
+		struct ptl_uuid_nvmeof_cpl uuid_nvmeof_cpl;
+		struct ptl_uuid_nvmeof_rma uuid_nvmeof_rma;
+		struct ptl_uuid_open_conn uuid_open_conn;
+		struct ptl_uuid_open_conn_rep uuid_open_conn_rep;
+		struct ptl_uuid_close_conn uuid_close_conn;
+		struct ptl_uuid_close_conn_rep uuid_close_conn_rep;
+	};
+} __attribute__((packed)) ptl_uuid_t;
+
+
+
+/* --- Zero-Copy Casting Helpers --- */
+
+static inline const ptl_uuid_t *ptl_uuid_as_const_uuid(const u64* raw)
+{
+	return (const ptl_uuid_t *)raw;
+}
+
+static inline ptl_uuid_t *ptl_uuid_as_uuid(u64 *raw)
+{
+	return (ptl_uuid_t *)raw;
+}
+
+
+
+u16 ptl_uuid_get_op_type(u64 *uuid);
+void ptl_uuid_set_op_type(u64 *uuid, u16 op_type);
+
+u16 ptl_uuid_get_nvme_cid(u64 *uuid);
+void ptl_uuid_set_nvme_cid(u64 *uuid, u16 nvme_cid);
+
+u16 ptl_uuid_get_total_parts(u64 *uuid);
+void ptl_uuid_set_total_parts(u64 *uuid, u16 total_parts);
+
+u16 ptl_uuid_get_cq_id(u64 *uuid);
+void ptl_uuid_set_cq_id(u64 *uuid, u16 cq_id);
+
+u16 ptl_uuid_get_target_qp_num(u64* uuid);
+void ptl_uuid_set_target_qp_num(u64* uuid, u16 target_qp_num);
+
+u16 ptl_uuid_get_initiator_qp_num(u64 *uuid);
+void ptl_uuid_set_initiator_qp_num(u64 *uuid, u16 initiator_qp_num);
+
+
 
 #endif /* PTL_UUID_H */
+

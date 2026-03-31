@@ -610,6 +610,7 @@ spdk_rdma_provider_qp_disconnect(struct spdk_rdma_provider_qp *spdk_rdma_qp)
 
 	assert(spdk_rdma_qp != NULL);
 	SPDK_PTL_DEBUG("Calling disconnect for the queue pair...");
+	assert(0);
 	spdk_rdma_provider_qp_flush_send_wrs(spdk_rdma_qp, NULL);
 
 	if (spdk_rdma_qp->cm_id) {
@@ -797,7 +798,8 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 		msg.target_id.phys.nid = destination.phys.nid;
 		msg.target_id.phys.pid = destination.phys.pid;
 		msg.pt_index = ptl_qp->ptl_cm_id->remote_rma_pte;
-		msg.hdr_data = ptl_uuid_set_op_type(ptl_qp->ptl_cm_id->session_id, NVMeOF_rma);
+		ptl_uuid_set_op_type(&msg.hdr_data, NVMeOF_rma);
+		ptl_uuid_set_cq_id(&msg.hdr_data, ptl_qp->ptl_cm_id->remote_cq_id);
 		msg.remote_offset = remote_addr;
 		msg.user_ptr = rdma_read_meta;
 
@@ -917,7 +919,8 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 		msg.target_id.phys.nid = ptl_qp->ptl_cm_id->remote_nid;
 		msg.target_id.phys.pid = ptl_qp->ptl_cm_id->remote_pid;
 		msg.pt_index = ptl_qp->ptl_cm_id->remote_rma_pte;
-		msg.hdr_data = ptl_uuid_set_op_type(ptl_qp->ptl_cm_id->session_id, NVMeOF_rma);
+		ptl_uuid_set_op_type(&msg.hdr_data, NVMeOF_rma);
+		ptl_uuid_set_cq_id(&msg.hdr_data, ptl_qp->ptl_cm_id->remote_cq_id);
 		msg.remote_offset = remote_addr;
 		msg.user_ptr = rdma_write_meta;
 		msg.length = 0;
@@ -953,6 +956,7 @@ bool spdk_rdma_provider_ptl_parse_wr_list(struct spdk_rdma_provider_qp *spdk_rdm
 	if (count_rdma_reads > 1) {
 		SPDK_PTL_FATAL("Sorry unsupported feature with multiple rdma reads");
 	}
+	return 0;
 }
 
 static inline int spdk_rdma_provider_ptl_decode_cid(uint16_t cid, uint16_t queue_size, int qpn)
@@ -1081,8 +1085,8 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				: "NVMe-cmd-send",
 				target.phys.nid, target.phys.pid,
 				ptl_qp->ptl_cm_id->remote_msg_pte,
-				ptl_uuid_get_initiator_qp_num(ptl_qp->ptl_cm_id->session_id),
-				ptl_uuid_get_target_qp_num(ptl_qp->ptl_cm_id->session_id),
+				ptl_qp->ptl_cm_id->initiator_qp_num,
+				ptl_qp->ptl_cm_id->target_qp_num,
 				local_offset, send_meta ? "YES" : "NO");
 #if PTL_USE_MATCHING
 			rc = PtlPut(md_handle,
@@ -1106,10 +1110,12 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 			msg.target_id.phys.nid = ptl_qp->ptl_cm_id->remote_nid;
 			msg.target_id.phys.pid = ptl_qp->ptl_cm_id->remote_pid;
 			msg.pt_index = ptl_qp->ptl_cm_id->remote_msg_pte;
-			msg.hdr_data = ptl_uuid_set_op_type(
-					       ptl_qp->ptl_cm_id->session_id,
-					       md.length == sizeof(struct spdk_nvme_cmd) ? NVMeOF_cmd
-					       : NVMeOF_cpl);
+			ptl_uuid_set_op_type(
+				&msg.hdr_data,
+				md.length == sizeof(struct spdk_nvme_cmd)
+				? NVMeOF_cmd
+				: NVMeOF_cpl);
+			ptl_uuid_set_cq_id(&msg.hdr_data, ptl_qp->ptl_cm_id->remote_cq_id);
 
 			/*<gesalous> non-matching feat*/
 			msg.local_offset = 0;
@@ -1122,7 +1128,7 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				SPDK_PTL_DEBUG(
 					"Sending nvme completion. {Initiator QPN: %d, Base IOVA: %lu, cid: %u, remote_offset = "
 					"%lu}",
-					ptl_uuid_get_initiator_qp_num(ptl_qp->ptl_cm_id->session_id),
+					ptl_qp->ptl_cm_id->initiator_qp_num,
 					ptl_qp->ptl_cm_id->remote_nvme_cpl_start_addr,
 					spdk_rdma_provider_ptl_extract_CID((void *)wr->sg_list[0].addr, ptl_qp),
 					msg.remote_offset);
