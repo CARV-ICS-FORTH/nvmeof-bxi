@@ -1,5 +1,6 @@
 #include "ptl_cq.h"
 #include "asm-generic/errno.h"
+#include "ib_portals.h"
 #include "linux/gfp_types.h"
 #include "linux/slab.h"
 #include "ptl_bxiv3_device.h"
@@ -93,7 +94,7 @@ static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq)
 	struct ptl_recv_op *recv_op_meta = NULL;
 	struct ptl_qp *ptl_qp;
 	struct ib_wc wc;
-  u16 nvme_cid;
+	u16 nvme_cid;
 	/*<gesalous> non-matching feat*/
 	//vanilla case
 	//recv_op = event->user_ptr;
@@ -104,15 +105,15 @@ static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq)
 	}
 	PTL_CHECK(ptl_qp, PTL_QP);
 	PTL_DEBUG("nvme_cpl: got nvme_completion at addr: 0x%llx pte: %d qpn: %d", event->start, event->pt_index, ptl_qp->qpn);
- 
-  nvme_cid = ptl_uuid_get_nvme_cid(&event->hdr_data);
+
+	nvme_cid = ptl_uuid_get_nvme_cid(&event->hdr_data);
 	if (nvme_cid >= ptl_qp->recv_op_meta_size) {
 		PTL_FATAL("Wrong recv_op_meta_idx: it is: %u size is: %lu", nvme_cid, ptl_qp->recv_op_meta_size);
 	}
-  PTL_CHECK_NVME_CID(event, ptl_qp, nvme_cid);
-  recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
+	PTL_CHECK_NVME_CID(event, ptl_qp, nvme_cid);
+	recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
 
-  // PTL_DEBUG("nvme_cpl: recv_op_meta_idx = %llu for qpn: %d",recv_op_meta_idx, ptl_qp->qpn);
+	// PTL_DEBUG("nvme_cpl: recv_op_meta_idx = %llu for qpn: %d",recv_op_meta_idx, ptl_qp->qpn);
 	if (false == recv_op_meta->is_set) {
 		PTL_FATAL("Metadata not set for qpn: %d ? Wrong", ptl_qp->qpn);
 	}
@@ -241,6 +242,7 @@ static void ptl_cnxt_process_send(ptl_event_t event, struct ptl_cq *ptl_cq)
 static void ptl_cnxt_process_ack(ptl_event_t event, struct ptl_cq *ptl_cq)
 {
 	struct ptl_send_op *send_op;
+	struct ptl_conn_send_buffer *conn_send_buffer;
 	ptl_obj_type_e * obj_type = event.user_ptr;
 	struct ib_wc wc;
 	if (obj_type == NULL) {
@@ -249,9 +251,16 @@ static void ptl_cnxt_process_ack(ptl_event_t event, struct ptl_cq *ptl_cq)
 	}
 
 	if (PTL_CONN_SEND_BUFFER == *obj_type) {
-		PTL_DEBUG("PTL_EVENT_ACK for PTL_OPEN_CONNECTION do something XXX TODO XXX");
+		conn_send_buffer = event.user_ptr;
+		PTL_DEBUG("PTL_EVENT_ACK for PTL_OPEN_CONNECTION unmap buffer...");
+		ib_portals_dma_unmap_single(&conn_send_buffer->bxiv3_dev->fake_ib_dev,
+		                            conn_send_buffer->md.start,
+		                            conn_send_buffer->md.length, DMA_TO_DEVICE);
+		PTL_DEBUG("PTL_EVENT_ACK for PTL_OPEN_CONNECTION freeing buffer...");
+		kfree(conn_send_buffer);
 		return;
 	}
+
 	if (PTL_SEND_OP != *obj_type) {
 		PTL_FATAL("PTL_EVENT_ACK Corrupted object type");
 	}

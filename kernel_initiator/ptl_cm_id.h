@@ -21,6 +21,7 @@ typedef enum {
 struct ptl_cm_id {
 	ptl_obj_type_e object_type;
 	struct rdma_cm_id fake_cm_id;
+	spinlock_t state_lock;
 	struct net *net;
 	u16 initiator_qp_num;
 	u16 target_qp_num;

@@ -38,6 +38,7 @@ struct ptl_cm_id *ptl_cm_id_create(struct net *net,
 
 	ptl_cm_id->fake_cm_id.context = context;
 	ptl_cm_id->fake_cm_id.event_handler = event_handler;/*Just in case*/
+	spin_lock_init(&ptl_cm_id->state_lock);
 
 
 	//  ptl_cm_id->fake_cm_id.device =

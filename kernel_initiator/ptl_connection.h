@@ -4,6 +4,7 @@
 #include <linux/socket.h>
 #include <linux/types.h>
 #include <portals4.h>
+#include <portals4_bxiext.h>
 #include <rdma/rdma_cm.h>
 #define PTL_SPDK_PROTOCOL_VERSION 1UL
 
@@ -97,7 +98,8 @@ struct ptl_conn_msg {
 struct ptl_conn_send_buffer {
 	ptl_obj_type_e object_type;
 	ptl_md_t md;
-	ptl_handle_md_t md_handle;
+	ptl_msg_t msg;
+	struct ptl_bxiv3_device *bxiv3_dev;
 	struct ptl_conn_msg conn_msg;
 } __attribute((packed));
 
