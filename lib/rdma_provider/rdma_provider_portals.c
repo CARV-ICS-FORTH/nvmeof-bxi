@@ -3,9 +3,9 @@
  *   Copyright (c) Mellanox Technologies LTD. All rights reserved.
  *   Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
-#include "ptl_connection.h"
 #include "ptl_cm_id.h"
 #include "ptl_config.h"
+#include "ptl_connection.h"
 #include "ptl_context.h"
 #include "ptl_cq.h"
 #include "ptl_log.h"
@@ -18,6 +18,7 @@
 #include "ptl_uuid.h"
 #include "spdk/likely.h"
 #include "spdk/log.h"
+#include "spdk/nvme_spec.h"
 #include "spdk/string.h"
 #include "spdk/util.h"
 #include "spdk_internal/rdma_provider.h"
@@ -629,19 +630,32 @@ spdk_rdma_provider_qp_disconnect(struct spdk_rdma_provider_qp *spdk_rdma_qp)
 	return rc;
 }
 
+static inline uint16_t spdk_rdma_provider_ptl_extract_CID(void * args, struct ptl_qp *ptl_qp)
+{
+	struct spdk_nvme_cpl *cpl = args;
+	uint16_t hw_queue_idx = cpl->cid / ptl_qp->ptl_cm_id->nvme_cpl_queue_size;
+	uint16_t local_tag    = cpl->cid % ptl_qp->ptl_cm_id->nvme_cpl_queue_size;
+
+	SPDK_PTL_DEBUG("QPN: %d CID decode: raw=%u hw_queue_idx=%u local_tag=%u",
+		       ptl_qp->ptl_cm_id->ptl_qp_num,
+		       (unsigned)cpl->cid, (unsigned)hw_queue_idx, (unsigned)local_tag);
+	return local_tag;
+}
+
 bool
 spdk_rdma_provider_qp_queue_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				     struct ibv_send_wr *first)
 {
 
 	struct ibv_send_wr *last;
+	/*gesalous, new staff*/
+	struct ptl_context *ptl_cnxt;
+	struct ptl_qp *ptl_qp;
+	uint16_t nvme_cid;
+	uint16_t count_parts = 0;
 
 	assert(spdk_rdma_qp);
 	assert(first);
-
-	if (first == NULL || spdk_rdma_qp == NULL) {
-		SPDK_PTL_FATAL("NULL args");
-	}
 	//vanilla: We calculate the stats in flush_send_wrs where we
 	//do also some additional sanity checks.
 	spdk_rdma_qp->stats->send.num_submitted_wrs++;
@@ -650,11 +664,46 @@ spdk_rdma_provider_qp_queue_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 		last = last->next;
 		spdk_rdma_qp->stats->send.num_submitted_wrs++;
 	}
+	/*We seek cases of RDMA_WRITES to the initiator + an nvme_cpl*/
+	ptl_cnxt = ptl_cnxt_get();
+	if (false == ptl_cnxt->is_target) {
+		goto stitch_requests;
+	}
 
-	// SPDK_PTL_DEBUG("NVMe: Enqueueing SEND WRS request as in the VANILLA CASE for "
-	//                "Portals num of enqueued requests: %lu",
-	//                spdk_rdma_qp->stats->send.num_submitted_wrs);
+	ptl_qp = SPDK_CONTAINEROF(spdk_rdma_qp->qp, struct ptl_qp, fake_qp);
+	if (IBV_WR_SEND == first->opcode && first == last) {
+		nvme_cid = spdk_rdma_provider_ptl_extract_CID((void *)last->sg_list[0].addr, ptl_qp);
+		SPDK_PTL_DEBUG("Just a plain nvme cpl id: %u count_parts: %u", nvme_cid, count_parts);
+		PTL_WR_MARK(last);
+		PTL_SET_NVME_CID(last, nvme_cid);
+		PTL_SET_NVME_CID_PARTS_NO(last, count_parts);
+		goto stitch_requests;
+	}
+	if (IBV_WR_RDMA_WRITE != first->opcode) {
+		goto stitch_requests;
+	}
+	/*sanity check*/
+	if (IBV_WR_SEND != last->opcode && last->sg_list[0].length != sizeof(struct spdk_nvme_cpl)) {
+		SPDK_PTL_FATAL("Last wr should have been an nvme cpl in this write chain");
+	}
 
+	nvme_cid = spdk_rdma_provider_ptl_extract_CID((void *)last->sg_list[0].addr, ptl_qp);
+	SPDK_PTL_DEBUG("Detected write chain for nvme_cid: %u", nvme_cid);
+	last = first;
+	while (last->next != NULL) {
+		count_parts += last->num_sge;
+		PTL_WR_MARK(last);
+		PTL_SET_NVME_CID(last, nvme_cid);
+		last = last->next;
+	}
+	/*last is the nvme cpl so we do not count as part*/
+	PTL_WR_MARK(last);
+	PTL_SET_NVME_CID(last, nvme_cid);
+	PTL_SET_NVME_CID_PARTS_NO(last, count_parts);
+	SPDK_PTL_DEBUG("Write chain detected: {nvme_cid: %u parts: %u}", PTL_GET_NVME_CID(last),
+		       PTL_GET_NVME_CID_PARTS_NO(last));
+
+stitch_requests:
 	if (spdk_rdma_qp->send_wrs.first == NULL) {
 		spdk_rdma_qp->send_wrs.first = first;
 		spdk_rdma_qp->send_wrs.last = last;
@@ -786,7 +835,7 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 		memset(&md, 0x00, sizeof(md));
 		md.start = (ptl_addr_t)wr->sg_list[i].addr;
 		md.length = wr->sg_list[i].length;
-		md.options = 0;//PTL_SRV_ME_OPTS;
+		md.options = 0;
 		md.ct_handle = PTL_CT_NONE;
 		md.eq_handle = ptl_cq_get_queue(ptl_qp->send_cq);
 		// SPDK_PTL_DEBUG("Performing an RDMA read. Completion event will be at send_cq: %d",
@@ -799,6 +848,7 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 		msg.target_id.phys.pid = destination.phys.pid;
 		msg.pt_index = ptl_qp->ptl_cm_id->remote_rma_pte;
 		ptl_uuid_set_op_type(&msg.hdr_data, NVMeOF_rma);
+		ptl_uuid_set_nvme_cid(&msg.hdr_data, 1);
 		ptl_uuid_set_cq_id(&msg.hdr_data, ptl_qp->ptl_cm_id->remote_cq_id);
 		msg.remote_offset = remote_addr;
 		msg.user_ptr = rdma_read_meta;
@@ -921,6 +971,8 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 		msg.pt_index = ptl_qp->ptl_cm_id->remote_rma_pte;
 		ptl_uuid_set_op_type(&msg.hdr_data, NVMeOF_rma);
 		ptl_uuid_set_cq_id(&msg.hdr_data, ptl_qp->ptl_cm_id->remote_cq_id);
+		ptl_uuid_set_nvme_cid(&msg.hdr_data, PTL_GET_NVME_CID(wr));
+		rdma_write_meta->nvme_cid = PTL_GET_NVME_CID(wr);
 		msg.remote_offset = remote_addr;
 		msg.user_ptr = rdma_write_meta;
 		msg.length = 0;
@@ -969,16 +1021,12 @@ static inline int spdk_rdma_provider_ptl_decode_cid(uint16_t cid, uint16_t queue
 	return 1;
 }
 
-static inline uint16_t spdk_rdma_provider_ptl_extract_CID(void * args, struct ptl_qp *ptl_qp)
-{
-	struct spdk_nvme_cpl *cpl = args;
-	uint16_t hw_queue_idx = cpl->cid / ptl_qp->ptl_cm_id->nvme_cpl_queue_size;
-	uint16_t local_tag    = cpl->cid % ptl_qp->ptl_cm_id->nvme_cpl_queue_size;
 
-	SPDK_PTL_DEBUG("QPN: %d CID decode: raw=%u hw_queue_idx=%u local_tag=%u",
-		       ptl_qp->ptl_cm_id->ptl_qp_num,
-		       (unsigned)cpl->cid, (unsigned)hw_queue_idx, (unsigned)local_tag);
-	return local_tag;
+static inline void spdk_rdma_provider_ptl_unmark_wr(struct ibv_send_wr *wr)
+{
+	PTL_WR_UNMARK(wr);
+	PTL_SET_NVME_CID(wr, UINT16_MAX);
+	PTL_SET_NVME_CID_PARTS_NO(wr, UINT16_MAX);
 }
 
 int
@@ -998,6 +1046,7 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 	uint64_t local_offset;
 	ptl_md_t md;
 	ptl_msg_t msg;
+	u16 nvme_cid;
 #if !PTL_ENABLE_BIND_PER_OP
 	struct ptl_mem_desc * ptl_mem_desc;
 #endif
@@ -1006,7 +1055,7 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 		return 0;
 	}
 
-	spdk_rdma_provider_ptl_parse_wr_list(spdk_rdma_qp);/*XXX TODO XXX Probably redundant*/
+	// spdk_rdma_provider_ptl_parse_wr_list(spdk_rdma_qp);/*XXX TODO XXX Probably redundant*/
 	SPDK_PTL_DEBUG("send_wrs list start....QPN: %d", ptl_qp->ptl_cm_id->ptl_qp_num);
 	for (struct ibv_send_wr *wr = spdk_rdma_qp->send_wrs.first; wr != NULL; wr = wr->next) {
 
@@ -1017,7 +1066,11 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				ptl_qp->ptl_cm_id->ptl_qp_num,
 				ptl_qp->ptl_cm_id->remote_rma_pte,
 				wr->send_flags & IBV_SEND_SIGNALED ? "YES" : "NO");
+			if (!PTL_WR_IS_MARKED(wr)) {
+				SPDK_PTL_FATAL("RDMA write without a mark!");
+			}
 			spdk_rdma_provider_ptl_rdma_write(ptl_pd, ptl_qp, wr);
+			spdk_rdma_provider_ptl_unmark_wr(wr);
 			continue;
 		}
 
@@ -1120,22 +1173,30 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 			/*<gesalous> non-matching feat*/
 			msg.local_offset = 0;
 			msg.remote_offset = 0;
-			if (ptl_qp->ptl_cm_id->remote_is_a_kernel_initiator) {
-				msg.remote_offset =
-					ptl_qp->ptl_cm_id->remote_nvme_cpl_start_addr +
-					(spdk_rdma_provider_ptl_extract_CID((void*)wr->sg_list[0].addr,
-						ptl_qp) * sizeof(struct spdk_nvme_cpl));
-				SPDK_PTL_DEBUG(
-					"Sending nvme completion. {Initiator QPN: %d, Base IOVA: %lu, cid: %u, remote_offset = "
-					"%lu}",
-					ptl_qp->ptl_cm_id->initiator_qp_num,
-					ptl_qp->ptl_cm_id->remote_nvme_cpl_start_addr,
-					spdk_rdma_provider_ptl_extract_CID((void *)wr->sg_list[0].addr, ptl_qp),
-					msg.remote_offset);
-			}
 			msg.user_ptr = send_meta;
 			msg.length = 0;
-			msg.local_offset = 0;
+			if (ptl_qp->ptl_cm_id->remote_is_a_kernel_initiator) {
+				nvme_cid = spdk_rdma_provider_ptl_extract_CID((void *)wr->sg_list[0].addr, ptl_qp);
+				ptl_uuid_set_nvme_cid(&msg.hdr_data, nvme_cid);
+				// if (nvme_cid != PTL_GET_NVME_CID(wr)) {
+				//   SPDK_PTL_FATAL("What the fuck? nvme_cid = %u stored in wr is %u Is "
+				//                  "it marked? %s",
+				//                  nvme_cid, PTL_GET_NVME_CID(wr),
+				//                  PTL_WR_IS_MARKED(wr) ? "YES" : "NO");
+				// }
+				/*Some paths (probably ping), do not call enqueue_wrs XXX TODO XXX*/
+				ptl_uuid_set_total_parts(&msg.hdr_data, PTL_WR_IS_MARKED(wr) ? PTL_GET_NVME_CID_PARTS_NO(wr) : 0);
+				send_meta->nvme_cid = nvme_cid;
+				msg.remote_offset = ptl_qp->ptl_cm_id->remote_nvme_cpl_start_addr +
+						    (nvme_cid * sizeof(struct spdk_nvme_cpl));
+				SPDK_PTL_DEBUG("Sending nvme completion. {Initiator QPN: %d, Base "
+					       "IOVA: %lu, cid: %u, remote_offset = "
+					       "%lu}",
+					       ptl_qp->ptl_cm_id->initiator_qp_num,
+					       ptl_qp->ptl_cm_id->remote_nvme_cpl_start_addr,
+					       nvme_cid, msg.remote_offset);
+			}
+
 			rc = PtlMsgPutOnce(ptl_cnxt_get_ni_handle(ptl_cnxt_get()),
 					   (const ptl_md_t *)&md,
 					   (const ptl_msg_t *)&msg);
@@ -1144,7 +1205,7 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 			if (rc != PTL_OK) {
 				SPDK_PTL_FATAL("PtlPut failed with rc: %d", rc);
 			}
-
+			spdk_rdma_provider_ptl_unmark_wr(wr);
 		}
 
 	}

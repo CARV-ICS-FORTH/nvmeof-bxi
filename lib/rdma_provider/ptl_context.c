@@ -327,8 +327,9 @@ static struct ptl_context_op_meta *ptl_cnxt_process_ack(ptl_event_t event, struc
 	if (event.ni_fail_type != PTL_NI_OK) {
 		if (send_meta->obj_type == PTL_RDMA_WRITE_OP) {
 			SPDK_PTL_FATAL(
-				"Operation of type PTL_RDMA_WRITE_OP failed with reason: %s faulting address: 0x%016lx",
-				PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE), (unsigned long)send_meta->rdma_write_op.addr);
+				"Operation of type PTL_RDMA_WRITE_OP failed with reason: %s faulting address: 0x%016lx nvme_cid: %u",
+				PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE), (unsigned long)send_meta->rdma_write_op.addr,
+				send_meta->nvme_cid);
 		}
 		SPDK_PTL_FATAL(
 			"Operation of type PTL_SEND_OP failed with reason: %s faulting address: 0x%016lx",

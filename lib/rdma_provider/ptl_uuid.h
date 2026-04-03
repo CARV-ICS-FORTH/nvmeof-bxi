@@ -38,6 +38,14 @@ typedef uint64_t u64;
 #define GENMASK(h, l) \
     (((~0ULL) << (l)) & (~0ULL >> (64 - 1 - (h))))
 
+#define PTL_MARK_MAGIC_KEY 27081983UL
+#define PTL_SET_NVME_CID(X, Y) ((X)->tso.mss = Y)
+#define PTL_GET_NVME_CID(X) ((X)->tso.mss)
+#define PTL_SET_NVME_CID_PARTS_NO(X, Y) ((X)->tso.hdr_sz = Y)
+#define PTL_GET_NVME_CID_PARTS_NO(X) ((X)->tso.hdr_sz)
+#define PTL_WR_MARK(X) ((X)->tso.hdr = (void *)PTL_MARK_MAGIC_KEY)
+#define PTL_WR_UNMARK(X) ((X)->tso.hdr = (void *)0)
+#define PTL_WR_IS_MARKED(X) ((uint64_t)X->tso.hdr == PTL_MARK_MAGIC_KEY)
 
 struct ptl_uuid_nvmeof_cmd {
 	u16 target_qp_num;

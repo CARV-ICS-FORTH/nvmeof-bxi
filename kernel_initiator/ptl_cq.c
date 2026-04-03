@@ -92,8 +92,8 @@ static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq)
 {
 	struct ptl_recv_op *recv_op_meta = NULL;
 	struct ptl_qp *ptl_qp;
-	u64 recv_op_meta_idx;
 	struct ib_wc wc;
+  u16 nvme_cid;
 	/*<gesalous> non-matching feat*/
 	//vanilla case
 	//recv_op = event->user_ptr;
@@ -104,13 +104,15 @@ static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq)
 	}
 	PTL_CHECK(ptl_qp, PTL_QP);
 	PTL_DEBUG("nvme_cpl: got nvme_completion at addr: 0x%llx pte: %d qpn: %d", event->start, event->pt_index, ptl_qp->qpn);
-
-	recv_op_meta_idx = (event->start - ptl_qp->ptl_id->nvme_cpl_start) / sizeof(struct nvme_completion);
-	if (recv_op_meta_idx >= ptl_qp->recv_op_meta_size) {
-		PTL_FATAL("Wrong recv_op_meta_idx: it is: %llu size is: %lu", recv_op_meta_idx, ptl_qp->recv_op_meta_size);
+ 
+  nvme_cid = ptl_uuid_get_nvme_cid(&event->hdr_data);
+	if (nvme_cid >= ptl_qp->recv_op_meta_size) {
+		PTL_FATAL("Wrong recv_op_meta_idx: it is: %u size is: %lu", nvme_cid, ptl_qp->recv_op_meta_size);
 	}
-	recv_op_meta = &ptl_qp->recv_op_meta[recv_op_meta_idx];
-	// PTL_DEBUG("nvme_cpl: recv_op_meta_idx = %llu for qpn: %d",recv_op_meta_idx, ptl_qp->qpn);
+  PTL_CHECK_NVME_CID(event, ptl_qp, nvme_cid);
+  recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
+
+  // PTL_DEBUG("nvme_cpl: recv_op_meta_idx = %llu for qpn: %d",recv_op_meta_idx, ptl_qp->qpn);
 	if (false == recv_op_meta->is_set) {
 		PTL_FATAL("Metadata not set for qpn: %d ? Wrong", ptl_qp->qpn);
 	}
@@ -124,14 +126,32 @@ static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq)
 	wc.src_qp = recv_op_meta->ptl_qp->qpn;
 	wc.wc_flags = IB_WC_WITH_INVALIDATE;
 	wc.ex.invalidate_rkey = PTL_MAGIC_FAKE_MR_KEY;
-
+	/*Question 1: How many parts does this nvme_cpl consists of?*/
+	recv_op_meta->total_parts = ptl_uuid_get_total_parts(&event->hdr_data);
+	if (recv_op_meta->total_parts != recv_op_meta->parts_num_received) {
+		PTL_DEBUG("Out of order nvme cpl. Ok we are going to wait to "
+		          "received the missing parts for nvme cid: %u. {received parts: "
+		          "%u total_parts: %u}",
+		          nvme_cid, recv_op_meta->parts_num_received,
+		          recv_op_meta->total_parts);
+		recv_op_meta->late_wc = wc;
+		recv_op_meta->late_wc_valid = true;
+		return;
+	}
+	PTL_DEBUG("On time wc delivery for nvme cid: %u with total parts: %u", ptl_uuid_get_nvme_cid(&event->hdr_data), recv_op_meta->total_parts);
 	recv_op_meta->is_set = false;
+	recv_op_meta->late_wc_valid = false;
+	recv_op_meta->parts_num_received = 0;
+	recv_op_meta->total_parts = 0;
 	recv_op_meta->wr_cqe->done(&ptl_cq->fake_cq, &wc);
 }
 
 static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq)
 {
+	struct ptl_recv_op *recv_op_meta = NULL;
 	struct ptl_qp *ptl_qp = event->user_ptr;
+	u16 nvme_cid;
+
 	if (NULL == ptl_qp) {
 		PTL_FATAL("NULL context");
 	}
@@ -145,6 +165,19 @@ static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq)
 	PTL_DEBUG("nvme_write: Target performed an RDMA write to me at iova:0x%llx, "
 	          "ignore it is just data from the target pte: %d qpn: %d",
 	          event->start, event->pt_index, ptl_qp->qpn);
+	nvme_cid = ptl_uuid_get_nvme_cid(&event->hdr_data);
+	recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
+	++recv_op_meta->parts_num_received;
+	PTL_DEBUG("[RDMA WRITE interrupt] Got part for {nvme cid: %u parts_num_received: %u total_parts: %u}", nvme_cid, recv_op_meta->parts_num_received, recv_op_meta->total_parts);
+
+	if (recv_op_meta->parts_num_received == recv_op_meta->total_parts) {
+		PTL_DEBUG("Late wc delivery for nvme cid: %u with total parts: %u", nvme_cid, recv_op_meta->total_parts);
+		recv_op_meta->is_set = false;
+		recv_op_meta->late_wc_valid = false;
+		recv_op_meta->parts_num_received = 0;
+		recv_op_meta->total_parts = 0;
+		recv_op_meta->wr_cqe->done(&ptl_cq->fake_cq, &recv_op_meta->late_wc);
+	}
 }
 
 static void ptl_cnxt_process_put(ptl_event_t event, struct ptl_cq *ptl_cq)

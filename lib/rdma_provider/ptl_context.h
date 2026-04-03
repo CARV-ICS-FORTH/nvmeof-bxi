@@ -62,6 +62,7 @@ struct ptl_context_op_meta {
 	ptl_md_t md_desc[PTL_MAX_SG_LIST];
 	ptl_handle_md_t md_handle[PTL_MAX_SG_LIST];
 #endif
+	uint16_t nvme_cid;
 	int cq_id;
 	union {
 		struct ptl_context_send_op send_op;

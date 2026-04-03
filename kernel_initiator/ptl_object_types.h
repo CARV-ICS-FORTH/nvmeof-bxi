@@ -46,6 +46,13 @@
         } \
     } while (0)
 
+#define PTL_CHECK_NVME_CID(event, ptl_qp, nvme_cid) do { \
+    uint16_t calculated_cid = (((u64)event->start - (u64)ptl_qp->ptl_id->nvme_cpl_start) / sizeof(struct nvme_completion)); \
+    if (calculated_cid != (nvme_cid)) { \
+        PTL_FATAL("Corrupted nvme_cid value: %u calculated: %u",nvme_cid,calculated_cid); \
+    } \
+} while (0)
+
 typedef enum ptl_obj_type {
 	PTL_RECV_OP = 100,
 	PTL_SEND_OP,

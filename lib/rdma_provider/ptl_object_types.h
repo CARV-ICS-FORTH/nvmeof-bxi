@@ -1,5 +1,6 @@
 #ifndef PTL_OBJECT_TYPES
 #define PTL_OBJECT_TYPES
+
 typedef enum ptl_obj_type {
 	PTL_RECV_OP = 100,
 	PTL_SEND_OP,

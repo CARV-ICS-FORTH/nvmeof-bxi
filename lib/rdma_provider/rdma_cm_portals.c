@@ -386,7 +386,7 @@ static void rdma_ptl_handle_open_conn(struct ptl_cm_id *listen_id,
 		       ptl_id->conn_param.private_data_len);
 	}
 
-  /*At the target side, someone wants to connect with us*/
+	/*At the target side, someone wants to connect with us*/
 	ptl_id->cm_id_state = PTL_CM_CONNECTING;
 	/*extension staff*/
 	if (conn_open->is_kernel_initiator) {
