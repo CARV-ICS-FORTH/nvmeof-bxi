@@ -9,4 +9,5 @@ struct ptl_pd {
 };
 
 struct ptl_pd *ptl_pd_alloc(struct ib_device *dev, unsigned int flags);
+void ptl_pd_destroy(struct ptl_pd *ptl_pd);
 #endif

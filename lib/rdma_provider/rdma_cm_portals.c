@@ -568,6 +568,7 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 
 	reply_buf->conn_msg.conn_close_reply.status = PTL_OK;
 	reply_buf->conn_msg.conn_close_reply.initiator_qp_num = connection_id->initiator_qp_num;
+	reply_buf->conn_msg.conn_close_reply.target_qp_num = connection_id->target_qp_num;
 	rdma_cm_ptl_send_request(reply_buf);
 }
 

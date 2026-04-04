@@ -134,7 +134,33 @@ EXPORT_SYMBOL_GPL(ib_portals_mr_pool_init);
 
 void ib_portals_mr_pool_destroy(struct ib_qp *qp, struct list_head *list)
 {
-	PTL_FATAL("Sorry! Unimplemented");
+	struct ptl_mr *ptl_mr, *tmp;
+	struct ptl_qp *ptl_qp;
+	unsigned long flags;
+
+	/* Sanity checks */
+	if (!qp || !list) {
+		PTL_WARN("Invalid parameters: qp=%p, list=%p", qp, list);
+		return;
+	}
+
+	ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
+	PTL_CHECK(ptl_qp, PTL_QP);
+
+	/* Lock the MR pool */
+	spin_lock_irqsave(&ptl_qp->ptl_mr_list_lock, flags);
+
+	/* Clean up all entries in the list */
+	list_for_each_entry_safe(ptl_mr, tmp, &ptl_qp->ptl_mr_list, mr_entry) {
+		list_del(&ptl_mr->mr_entry);
+		spin_unlock_irqrestore(&ptl_qp->ptl_mr_list_lock, flags);
+		ptl_mr_destroy(ptl_mr);
+		spin_lock_irqsave(&ptl_qp->ptl_mr_list_lock, flags);
+	}
+
+	spin_unlock_irqrestore(&ptl_qp->ptl_mr_list_lock, flags);
+
+	PTL_DEBUG("Destroyed MR pool for QP %p", qp);
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_mr_pool_destroy);

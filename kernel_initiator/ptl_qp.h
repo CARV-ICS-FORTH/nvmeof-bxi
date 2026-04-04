@@ -19,8 +19,8 @@ struct ptl_qp {
 	/*For each nvme_cpl we keep metadata*/
 	struct ptl_recv_op *recv_op_meta;
 	size_t recv_op_meta_size;
-
 	struct ib_qp fake_qp;
+	atomic_long_t pending_nvme_cmds;
 	int qpn;
 };
 

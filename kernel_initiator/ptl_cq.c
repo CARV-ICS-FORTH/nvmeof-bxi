@@ -276,6 +276,7 @@ static void ptl_cnxt_process_ack(ptl_event_t event, struct ptl_cq *ptl_cq)
 	wc.src_qp = send_op->ptl_qp->qpn;
 	PTL_DEBUG("PTL_EVENT_ACK (send has moved its data to the remote memory). Calling its callback");
 	send_op->wr_cqe->done(&ptl_cq->fake_cq, &wc);
+	atomic_long_fetch_sub(1, &send_op->ptl_qp->pending_nvme_cmds);
 	kfree(send_op);
 }
 
@@ -352,7 +353,7 @@ void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh)
 	ptl_event_t event;
 	int rc;
 
-	if (PTL_CQ != ptl_cq->obj_type) {
+	if (PTL_CQ != ptl_cq->object_type) {
 		PTL_FATAL("Corrupted PTL_CQ");
 		return;
 	}
@@ -413,7 +414,7 @@ struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
 		return ERR_PTR(-ENOMEM);
 	}
 
-	cq->obj_type = PTL_CQ;
+	cq->object_type = PTL_CQ;
 	cq->cq_pool = cq_pool;
 	cq->bxiv3_dev = bxiv3_dev;
 	cq->ptl_cq_id = pte;

@@ -41,18 +41,12 @@ struct ptl_qp *ptl_qp_create(struct ptl_cm_id *ptl_id, struct ptl_pd *ptl_pd,
 
 	if (attr->send_cq) {
 		ptl_qp->send_cq = container_of(attr->send_cq, struct ptl_cq, fake_cq);
-		if (ptl_qp->send_cq->obj_type != PTL_CQ) {
-			PTL_FATAL("Corrupted send cq");
-			goto error;
-		}
+		PTL_CHECK(ptl_qp->send_cq, PTL_CQ);
 	}
 
 	if (attr->recv_cq) {
 		ptl_qp->recv_cq = container_of(attr->recv_cq, struct ptl_cq, fake_cq);
-		if (ptl_qp->recv_cq->obj_type != PTL_CQ) {
-			PTL_FATAL("Corrupted send cq");
-			goto error;
-		}
+		PTL_CHECK(ptl_qp->recv_cq, PTL_CQ);
 	}
 
 	ptl_qp->ptl_id = ptl_id;

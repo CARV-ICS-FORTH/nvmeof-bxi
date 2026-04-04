@@ -6,7 +6,7 @@
 #include <rdma/ib_verbs.h>
 struct ptl_bxiv3_device;
 struct ptl_cq {
-	ptl_obj_type_e obj_type;
+	ptl_obj_type_e object_type;
 	/*Backpointer of where this ptl_cq belongs to */
 	struct ptl_cq_pool *cq_pool;
 	struct ptl_bxiv3_device *bxiv3_dev;

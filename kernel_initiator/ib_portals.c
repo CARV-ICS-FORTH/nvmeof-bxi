@@ -136,8 +136,9 @@ EXPORT_SYMBOL_GPL(ib_portals_alloc_pd);
 
 void ib_portals_dealloc_pd(struct ib_pd *pd)
 {
-	(void)pd;
-	IB_PORTALS4_UNIMPL("Sorry!");
+	struct ptl_pd *ptl_pd = container_of(pd, struct ptl_pd, fake_pd);
+	PTL_CHECK(ptl_pd, PTL_PD);
+	ptl_pd_destroy(ptl_pd);
 }
 EXPORT_SYMBOL_GPL(ib_portals_dealloc_pd);
 
@@ -185,19 +186,54 @@ EXPORT_SYMBOL_GPL(ib_portals_cq_pool_get);
 
 void ib_portals_cq_pool_put(struct ib_cq *cq, int cqe)
 {
-	(void)cq;
-	(void)cqe;
-	IB_PORTALS4_UNIMPL("Sorry!");
+	struct ptl_cq *ptl_cq = container_of(cq, struct ptl_cq, fake_cq);
+	PTL_CHECK(ptl_cq, PTL_CQ);
+	ptl_cq_pool_put(ptl_cq->cq_pool, ptl_cq);
+	PTL_DEBUG("Returned PTL_CQ (in PTE: %d) to the pool successfully ...", ptl_cq->pte);
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_cq_pool_put);
 
 /* QP */
+
 int ib_portals_destroy_qp(struct ib_qp *qp)
 {
-	(void)qp;
-	IB_PORTALS4_UNIMPL("Sorry!");
-	return -EOPNOTSUPP;
+	struct ptl_qp *ptl_qp;
+	struct ptl_bxiv3_qp_map_entry *entry;
+	ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
+	PTL_CHECK(ptl_qp, PTL_QP);
+	/**
+	 * List of things to destory/clean:
+	 *  1) ptl_id -->later there is an explicit call for it
+	 *  2) ptl_pd --> it's dummy but there are explicit calls to free it ib_portals_dealloc_pd. Do nothing here.
+	 *  3) send_cq, recv_cq: If it belongs to a cq_pool do not touch it. Otherwise, destroy it here
+	 *  4) ptl_mr_list?
+	 *  5) rma_le, rma_leh has been destroyed during drain qp
+	 *  6) recv_op_meta the buffer that accepts the nvme_cpl. Destroy it here.
+	 */
+	if (NULL == ptl_qp->recv_cq->cq_pool) {
+		ptl_cq_destroy(ptl_qp->recv_cq);
+		ptl_bxiv3_dev_free_pte(ptl_qp->ptl_id->bxiv3_dev, ptl_qp->recv_cq->pte);
+	}
+	if (NULL == ptl_qp->send_cq->cq_pool && ptl_qp->recv_cq != ptl_qp->send_cq) {
+		ptl_cq_destroy(ptl_qp->send_cq);
+		ptl_bxiv3_dev_free_pte(ptl_qp->ptl_id->bxiv3_dev, ptl_qp->send_cq->pte);
+	}
+
+	spin_lock(&ptl_qp->ptl_id->bxiv3_dev->qp_map_lock);
+
+	hash_for_each_possible(ptl_qp->ptl_id->bxiv3_dev->qp_map, entry, node, ptl_qp->qpn) {
+		if (entry->key == ptl_qp->qpn) {
+			ptl_qp = entry->ptl_qp;
+			// Remove the entry from the hash table
+			hash_del(&entry->node);
+			break; // Exit immediately once found and removed
+		}
+	}
+	spin_unlock(&ptl_qp->ptl_id->bxiv3_dev->qp_map_lock);
+	kfree(ptl_qp->recv_op_meta);
+	kfree(ptl_qp);
+	return 0;
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_destroy_qp);
@@ -211,7 +247,7 @@ void ib_portals_dma_unmap_single(struct ib_device *ibdev, dma_addr_t addr,
 
 
 	if (!ibdev) {
-		PTL_WARN("Invalid parameter: ibdev is NULL");
+		PTL_FATAL("Invalid parameter: ibdev is NULL");
 		return;
 	}
 
@@ -371,11 +407,12 @@ EXPORT_SYMBOL_GPL(ib_portals_dma_sync_single_for_device);
 static void ib_portals_send_nvmeof_cmd(struct ptl_qp *ptl_qp, struct ib_send_wr *send_wr)
 {
 	struct ptl_send_op *send_op = NULL;
-	ptl_msg_t msg;
-	ptl_md_t md;
+	ptl_msg_t msg = {};
+	ptl_md_t md = {};
 	u64 dma_addr;
 	u32 length;
 	int rc;
+
 	if (send_wr->num_sge > 1) {
 		PTL_FATAL("Cannot handle num_sge > 1 for an nvme command");
 	}
@@ -391,18 +428,18 @@ static void ib_portals_send_nvmeof_cmd(struct ptl_qp *ptl_qp, struct ib_send_wr 
 		send_op->wr_cqe = send_wr->wr_cqe;
 		send_op->ptl_qp = ptl_qp;
 		send_op->wr_id = send_wr->wr_id;
+		atomic_long_fetch_add(1, &send_op->ptl_qp->pending_nvme_cmds);
 	}
 	dma_addr = sge->addr;/*DMA/Physical address*/
 	length = sge->length;/*Length in bytes (usually 64 for capsule)*/
 
-	memset(&md, 0x00, sizeof(md));
 	md.start = dma_addr;
 	md.length = length;
 	md.options = 0;
 	md.eq_handle = ptl_qp->recv_cq->eq;
 	md.ct_handle = PTL_CT_NONE;
 	md.bxi_cq = PTL_BXI3_DEFAULT_CQ;
-	memset(&msg, 0x00, sizeof(msg));
+
 	msg.length = sge->length;
 	msg.ack_req = send_op ? PTL_ACK_REQ : PTL_NO_ACK_REQ;
 	msg.target_id.phys.nid = ptl_qp->ptl_id->remote_nid;
@@ -436,8 +473,6 @@ int ib_portals_post_send(struct ib_qp *qp, struct ib_send_wr *wr,
 	ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
 	PTL_CHECK(ptl_qp, PTL_QP);
 
-
-	PTL_DEBUG("=== ib_portals_post_send called ===");
 
 	/* Iterate through the linked list of work requests */
 	for (curr = wr; curr != NULL; curr = curr->next) {
@@ -763,8 +798,36 @@ EXPORT_SYMBOL_GPL(ib_portals_unregister_client);
 /* Draining */
 void ib_portals_drain_qp(struct ib_qp *qp)
 {
-	(void)qp;
-	IB_PORTALS4_UNIMPL("Sorry!");
+	struct ptl_qp *ptl_qp;
+	int rc;
+	ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
+	PTL_CHECK(ptl_qp, PTL_QP);
+	PTL_DEBUG("Waiting for all pending nvme cmds to complete for "
+	          "ptl_qp {initiator_qp_num: %d, target_qp_num: %d ...}",
+	          ptl_qp->ptl_id->initiator_qp_num,
+	          ptl_qp->ptl_id->target_qp_num);
+	while (atomic_long_read(&ptl_qp->pending_nvme_cmds) != 0) {
+		msleep(1); /*Sleep for 1 millisecond*/
+	}
+	PTL_DEBUG("Waiting for all pending nvme cmds to complete for "
+	          "ptl_qp {initiator_qp_num: %d, target_qp_num: %d}... DONE",
+	          ptl_qp->ptl_id->initiator_qp_num,
+	          ptl_qp->ptl_id->target_qp_num);
+	PTL_DEBUG("Unlinking LE for "
+	          "ptl_qp {initiator_qp_num: %d, target_qp_num: %d}...",
+	          ptl_qp->ptl_id->initiator_qp_num,
+	          ptl_qp->ptl_id->target_qp_num);
+	rc = PtlLEUnlink(ptl_qp->rma_leh);
+	if (PTL_OK != rc) {
+		PTL_FATAL("Failed to unlink receive buffer for ptl_qp: {initiator_qp_num: "
+		          "%d, target_qp_num: %d}. Reason: %s",
+		          ptl_qp->ptl_id->initiator_qp_num, ptl_qp->ptl_id->target_qp_num,
+		          PtlToStr(rc, PTL_STR_ERROR));
+	}
+	PTL_DEBUG("Unlinking LE for "
+	          "ptl_qp {initiator_qp_num: %d, target_qp_num: %d}...DONE. Drain successfull",
+	          ptl_qp->ptl_id->initiator_qp_num,
+	          ptl_qp->ptl_id->target_qp_num);
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_drain_qp);

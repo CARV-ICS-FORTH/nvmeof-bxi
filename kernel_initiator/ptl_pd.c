@@ -17,3 +17,8 @@ struct ptl_pd *ptl_pd_alloc(struct ib_device *dev, unsigned int flags)
 	PTL_DEBUG("Successfully created PTL_PD");
 	return ptl_pd;
 }
+
+void ptl_pd_destroy(struct ptl_pd *ptl_pd)
+{
+	kfree(ptl_pd);
+}

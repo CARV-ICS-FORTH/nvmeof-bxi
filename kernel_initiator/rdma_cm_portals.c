@@ -141,11 +141,44 @@ struct rdma_cm_id *__rdma_cm_portals_create_kernel_id(
 
 EXPORT_SYMBOL_GPL(__rdma_cm_portals_create_kernel_id);
 
+
+
+
+// struct ptl_cm_id {
+//      ptl_obj_type_e object_type;
+//      struct rdma_cm_id fake_cm_id;
+//      spinlock_t state_lock;
+//      struct net *net;
+//      u16 initiator_qp_num;
+//      u16 target_qp_num;
+//      rdma_cm_event_handler event_handler;
+//      void *event_handler_context;
+//      int nid;
+//      int pid;
+//      int remote_nid;
+//      int remote_pid;
+//      int remote_msg_pte;
+//      int remote_rma_pte;
+//      int remote_cq_id;
+//      u64 nvme_cpl_start;
+//      u64 remote_nvme_cpl_start;
+//      size_t nvme_completion_queue_size;
+//      struct ptl_bxiv3_device *bxiv3_dev;
+//      struct ptl_qp *ptl_qp;
+//      ptl_cm_id_e cm_id_state;
+//      struct rdma_conn_param param;
+// };
+
 int rdma_cm_portals_destroy_id(struct rdma_cm_id *id)
 {
-	(void)id;
-	RDMACM_IB_UNIMPL("Sorry");
-	return -EOPNOTSUPP;
+	struct ptl_cm_id *ptl_cm_id = container_of(id, struct ptl_cm_id, fake_cm_id);
+	PTL_CHECK(ptl_cm_id, PTL_CM_ID);
+	/**
+	 * List of things to destory/clean. ptl_qp has already been destroyed that is the standard teardown procedure
+	 */
+	put_net(ptl_cm_id->net);
+	kfree(ptl_cm_id);
+	return 0;
 }
 
 EXPORT_SYMBOL_GPL(rdma_cm_portals_destroy_id);
@@ -351,17 +384,17 @@ EXPORT_SYMBOL_GPL(rdma_cm_portals_connect_locked);
 
 int rdma_cm_portals_disconnect(struct rdma_cm_id *id)
 {
-	PTL_FATAL("Sorry unimplemented XXX TODO XXX");
 	struct ptl_conn_send_buffer *close_req_buf;
 	struct ptl_cm_id *ptl_id = container_of(id, struct ptl_cm_id, fake_cm_id);
 	PTL_CHECK(ptl_id, PTL_CM_ID);
 	unsigned long flags;
 	spin_lock_irqsave(&ptl_id->state_lock, flags);
-	if (ptl_id->cm_id_state != PTL_CM_DISCONNECTING) {
+	if (ptl_id->cm_id_state == PTL_CM_DISCONNECTING) {
 		PTL_DEBUG("ptl_cm_id:{initiator_qp_num: %d target_qp_num: %d} already disconnecting...go on", ptl_id->initiator_qp_num, ptl_id->target_qp_num);
 		spin_unlock_irqrestore(&ptl_id->state_lock, flags);
 		return 0;
 	}
+	ptl_id->cm_id_state = PTL_CM_DISCONNECTING;
 	spin_unlock_irqrestore(&ptl_id->state_lock, flags);
 
 

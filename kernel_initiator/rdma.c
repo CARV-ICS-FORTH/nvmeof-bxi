@@ -6,6 +6,7 @@
 #include "asm-generic/errno.h"
 #include "linux/bxi3/ptl.h"
 #include "linux/container_of.h"
+#include "linux/dma-mapping.h"
 #include "ptl_cq_pool.h"
 // #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <asm/unaligned.h>
@@ -224,11 +225,25 @@ static void nvme_rdma_free_ring(struct ib_device *ibdev,
                                 size_t capsule_size,
                                 enum dma_data_direction dir)
 {
-	int i;
 
-	for (i = 0; i < ib_queue_size; i++) {
-		nvme_rdma_free_qe(ibdev, &ring[i], capsule_size, dir);
-	}
+	/**
+	 * We have changed the driver to perform one big contiguous allocation which
+	 * then subscribes with the iommu. Given this changes we need to alter the
+	 * free ring process as well.
+	 */
+	/**
+	 * int i;
+	* Vanilla implementation follows
+	* for (i = 0; i < ib_queue_size; i++) {
+	 *       nvme_rdma_free_qe(ibdev, &ring[i], capsule_size, dir);
+	 * }
+	**/
+
+	dma_addr_t nvme_cpl_iova = ring[0].dma;
+	struct nvme_completion *nvme_cpl_buf = ring[0].data;
+	ib_portals_dma_unmap_single(ibdev, nvme_cpl_iova, ib_queue_size * sizeof(struct nvme_completion),
+	                            DMA_FROM_DEVICE);
+	kfree(nvme_cpl_buf);
 	kfree(ring);
 }
 
