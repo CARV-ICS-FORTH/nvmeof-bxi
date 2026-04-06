@@ -21,11 +21,17 @@
     BUG();                                                                      \
   } while (0)
 
-#define PTL_DEBUG(fmt, ...)                                                    \
-  do {                                                                         \
+
+#ifdef PTL_RELEASE
+#define PTL_DEBUG(fmt, ...) do { } while (0)
+#else
+#define PTL_DEBUG(fmt, ...)                    \
+  do {                    \
     pr_warn("[%s:%s:%d]PTL_DEBUG " fmt "\n", __FILE__, __func__, __LINE__,     \
-            ##__VA_ARGS__);                                                    \
+            ##__VA_ARGS__);                    \
   } while (0)
+#endif
+
 
 #define PTL_INFO(fmt, ...)                                                     \
   do {                                                                         \
