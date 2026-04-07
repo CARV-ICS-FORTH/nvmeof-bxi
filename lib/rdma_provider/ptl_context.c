@@ -59,18 +59,6 @@ static uint64_t ptl_cnxt_calculate_crc64(const void *data, size_t length)
 
 static inline void ptl_cnxt_destroy_op_meta(struct ptl_context_op_meta *op_meta)
 {
-#if PTL_ENABLE_BIND_PER_OP
-	if (op_meta->obj_type == PTL_RECV_OP) {
-		goto destroy;
-	}
-	for (uint32_t i = 0; i < PTL_MAX_SG_LIST; i++) {
-		if (NULL == op_meta->md_handle[i].handle) {
-			break;
-		}
-		PtlMDRelease(op_meta->md_handle[i]);
-	}
-destroy:
-#endif
 	free(op_meta);
 }
 

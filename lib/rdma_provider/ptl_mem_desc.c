@@ -104,7 +104,7 @@ struct ptl_mem_desc *ptl_mem_desc_create_local(void *vaddr, size_t size, bool bi
 #else
 	(void)ret;
 	mem_desc->local.local_w_mem_desc.eq_handle =  PTL_EQ_NONE;
-	SPDK_PTL_DEBUG("Refusing to bind in the NON-matching case");
+	SPDK_PTL_DEBUG("Not bind in the NON-matching case, PtlMsgPutOnce will do the job");
 	mem_desc->is_bind = false;
 #endif
 	return mem_desc;

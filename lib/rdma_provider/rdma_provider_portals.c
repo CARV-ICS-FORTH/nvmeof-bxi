@@ -103,13 +103,12 @@ spdk_rdma_provider_srq_create(struct spdk_rdma_provider_srq_init_attr *init_attr
 	struct ptl_context * ptl_context;
 	struct spdk_portals_provider_srq *portals_srq;
 	struct spdk_rdma_provider_srq * fake_rdma_srq;
-	int rc;
 
 	ptl_context = ptl_cnxt_get_from_ibvpd(init_attr->pd);
 
 	portals_srq = calloc(1UL, sizeof(*portals_srq));
 	if (!portals_srq) {
-		SPDK_PTL_FATAL("Can't allocate memory for SRQ handle\n");
+		SPDK_PTL_FATAL("Can't allocate memory for SRQ handle");
 	}
 	portals_srq->magic_number = SPDK_PTL_PROVIDER_SRQ_MAGIC_NUMBER;
 	portals_srq->ptl_context = ptl_context;
@@ -788,19 +787,6 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 	remote_addr = wr->wr.rdma.remote_addr;
 
 	for (int i = 0; i < wr->num_sge; i++) {
-#if PTL_ENABLE_BIND_PER_OP
-		rdma_read_meta->md_desc[i].start = (ptl_addr_t)wr->sg_list[i].addr;
-		rdma_read_meta->md_desc[i].options = 0;
-		rdma_read_meta->md_desc[i].length = wr->sg_list[i].length;
-		rdma_read_meta->md_desc[i].eq_handle = ptl_cq_get_static_event_queue();
-		int rc = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), &rdma_read_meta->md_desc[i],
-				   &rdma_read_meta->md_handle[i]);
-		if (PTL_OK != rc) {
-			SPDK_PTL_FATAL("Failed to registed src buffer with code: %d", rc);
-		}
-		md_start = rdma_read_meta->md_desc[i].start;
-		md_handle = rdma_read_meta->md_handle[i];
-#else
 		struct ptl_mem_desc * ptl_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr,
 						     wr->sg_list[i].length,
 						     false);
@@ -809,7 +795,6 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd, struct ptl_q
 		}
 		md_start = ptl_mem_desc->local.local_w_mem_desc.start;
 		md_handle = ptl_mem_desc->local.local_w_mem_handle;
-#endif
 
 		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 		// SPDK_PTL_DEBUG(
@@ -914,20 +899,6 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 	rdma_write_meta->rdma_write_op.addr = (void *)remote_addr;
 
 	for (int i = 0; i < wr->num_sge; i++) {
-#if PTL_ENABLE_BIND_PER_OP
-		rdma_write_meta->md_desc[i].start = (ptl_addr_t)wr->sg_list[i].addr;
-		rdma_write_meta->md_desc[i].options = 0;
-		rdma_write_meta->md_desc[i].length = wr->sg_list[i].length;
-		rdma_write_meta->md_desc[i].eq_handle = ptl_cq_get_static_event_queue();
-		rc = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), &rdma_write_meta->md_desc[i],
-			       &rdma_write_meta->md_handle[i]);
-		if (PTL_OK != rc) {
-			SPDK_PTL_FATAL("Failed to registed src buffer with code: %d", rc);
-		}
-		md_start = rdma_write_meta->md_desc[i].start;
-		md_handle = rdma_write_meta->md_handle[i];
-		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
-#else
 		ptl_mem_desc =
 			ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr,
 					wr->sg_list[i].length, false);
@@ -937,7 +908,6 @@ static void spdk_rdma_provider_ptl_rdma_write(struct ptl_pd *ptl_pd, struct ptl_
 		md_start = ptl_mem_desc->local.local_w_mem_desc.start;
 		md_handle = ptl_mem_desc->local.local_w_mem_handle;
 
-#endif
 		local_offset = wr->sg_list[i].addr - (uint64_t)md_start;
 
 		SPDK_PTL_DEBUG("send_wrs: Performing an RDMA write (sg[%d] out of %d) to node "
@@ -1047,9 +1017,7 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 	ptl_md_t md;
 	ptl_msg_t msg;
 	u16 nvme_cid;
-#if !PTL_ENABLE_BIND_PER_OP
 	struct ptl_mem_desc * ptl_mem_desc;
-#endif
 
 	if (spdk_unlikely(NULL == spdk_rdma_qp->send_wrs.first)) {
 		return 0;
@@ -1097,19 +1065,6 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 
 		for (int i = 0; i < wr->num_sge; i++) {
 
-#if PTL_ENABLE_BIND_PER_OP
-			send_meta->md_desc[i].start = (ptl_addr_t)wr->sg_list[i].addr;
-			send_meta->md_desc[i].options = 0;
-			send_meta->md_desc[i].length = wr->sg_list[i].length;
-			send_meta->md_desc[i].eq_handle = ptl_cq_get_static_event_queue();
-			int rc = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_cnxt_get()), &send_meta->md_desc[i],
-					   &send_meta->md_handle[i]);
-			if (PTL_OK != rc) {
-				SPDK_PTL_FATAL("Failed to registed src buffer with code: %d", rc);
-			}
-			md_start = send_meta->md_desc[i].start;
-			md_handle = send_meta->md_handle[i];
-#else
 			ptl_mem_desc = ptl_pd->ops.get(ptl_pd->mem_desc_map, wr->sg_list[i].addr, wr->sg_list[i].length,
 						       false);
 			if (NULL == ptl_mem_desc) {
@@ -1117,7 +1072,6 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 			}
 			md_start = ptl_mem_desc->local.local_w_mem_desc.start;
 			md_handle = ptl_mem_desc->local.local_w_mem_handle;
-#endif
 
 
 			SPDK_PTL_DEBUG("OK: \n%d", wr->sg_list[i].length == 64 ?
@@ -1179,7 +1133,7 @@ spdk_rdma_provider_qp_flush_send_wrs(struct spdk_rdma_provider_qp *spdk_rdma_qp,
 				nvme_cid = spdk_rdma_provider_ptl_extract_CID((void *)wr->sg_list[0].addr, ptl_qp);
 				ptl_uuid_set_nvme_cid(&msg.hdr_data, nvme_cid);
 				// if (nvme_cid != PTL_GET_NVME_CID(wr)) {
-				//   SPDK_PTL_FATAL("What the fuck? nvme_cid = %u stored in wr is %u Is "
+				//   SPDK_PTL_FATAL("Corrupted CID? nvme_cid = %u stored in wr is %u Is "
 				//                  "it marked? %s",
 				//                  nvme_cid, PTL_GET_NVME_CID(wr),
 				//                  PTL_WR_IS_MARKED(wr) ? "YES" : "NO");

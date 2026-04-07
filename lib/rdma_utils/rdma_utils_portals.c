@@ -10,20 +10,17 @@
 #include "../rdma_provider/ptl_mem_desc.h"
 #include "../rdma_provider/ptl_pd.h"
 #include "../rdma_provider/ptl_rte_hash_map.h"
-#include "../rdma_provider/ptl_uuid.h"
 #include "spdk/file.h"
 #include "spdk/likely.h"
 #include "spdk/log.h"
 #include "spdk/net.h"
 #include "spdk/string.h"
-#include "spdk/util.h"
 #include "spdk_internal/assert.h"
 #include "spdk_internal/rdma_utils.h"
 #include <portals4.h>
 #include <rdma/rdma_cma.h>
 #include <rdma/rdma_verbs.h>
 #include <rte_hash.h>
-#include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 
