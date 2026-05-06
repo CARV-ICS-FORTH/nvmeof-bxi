@@ -1,0 +1,210 @@
+# SPDK + DPDK (Portals4/BXI) Docker-First Build and Run Tutorial
+
+This workflow builds SPDK **inside Docker** (faster and cleaner than building directly in the VM), then runs target + initiator commands for Portals4.
+
+## Environment model
+
+- Host VM runs Docker.
+- Source/data live on an NFS share (use your own path).
+- Container performs SPDK build steps.
+
+## Variables used in this guide
+
+- `<NFS_HOST_PATH>`: host-side NFS mount (example: `/path/to/nfs/share`)
+- `<NFS_CONTAINER_PATH>`: container mount point (example: `/path/to/nfs/share`)
+- `<SPDK_DIR>`: SPDK source dir inside container (example: `/path/to/nfs/share/spdk`)
+
+## Warning
+
+- Be sure to always mount the NFS share at the same path inside the container/VM (create it in case it doesn't exist). Otherwise, the build may fail due to mismatched file paths.
+
+
+## 1. Install required software
+
+On Rocky/RHEL-like systems:
+
+```bash
+sudo dnf install -y CUnit
+```
+
+If Meson later reports missing `elftools`:
+
+```bash
+pip3 install --user pyelftools
+```
+
+## 2. Build and start the Docker build environment
+
+Build image:
+
+```bash
+docker build -t spdk-build .
+```
+
+Run container with NFS mounted and host UID:GID mapping:
+
+```bash
+docker run -it -u "$(id -u):$(id -g)" -v <NFS_HOST_PATH>:<NFS_CONTAINER_PATH> my-app-name /bin/bash
+```
+
+## 3. Build SPDK inside Docker
+
+Enter source tree:
+
+```bash
+cd <SPDK_DIR>
+```
+
+Initialize DPDK submodule:
+
+```bash
+git -c safe.directory="*" submodule update --init
+```
+
+Pre-build DPDK (required before SPDK `make`):
+
+```bash
+cd <SPDK_DIR>/dpdk
+meson setup build -Denable_libs=hash,eal,kvargs,log,ring,mempool,mbuf -Denable_drivers="" -Ddisable_drivers=net/gve
+ninja -C build
+cd <SPDK_DIR>
+```
+
+Configure SPDK for Portals4 and point it to the built DPDK:
+
+```bash
+./configure --with-rdma=portals --with-dpdk=<SPDK_DIR>/dpdk/build
+```
+
+Build:
+
+```bash
+make
+```
+
+## 4. Set huge pages
+
+On the machine where SPDK target runs:
+
+```bash
+sh -c 'echo 512 > /proc/sys/vm/nr_hugepages'
+```
+
+## 5. Connect to the VM on shuttle6/7
+
+Use this flow to discover and access the VM IP from inside the containerized environment.
+
+On `shuttle6` or `shuttle7`:
+
+```bash
+sudo docker exec -it rocky9-libvirt /bin/bash
+cd /opt/qemu-bxi3-image/
+./show_ips.sh
+```
+
+Then connect from the host shell:
+
+```bash
+ssh carv@<VM_IP>
+```
+
+Login password:
+
+```text
+carvcarv
+```
+
+After login, verify the expected tools/devices:
+
+```bash
+bxinic
+nvidia-smi
+```
+
+Both commands should work.
+
+## 6. Target workflow
+
+Start target:
+
+```bash
+ROLE=target PORTALS_PID=10 ./build/bin/nvmf_tgt -m 0x1 2>&1 | tee target.log
+```
+
+Create target ramdisk:
+
+```bash
+./gesalous_create_target_ramdisk.sh 192.168.2.8 1
+```
+
+Stop target:
+
+```bash
+pkill -9 -f nvmf_tgt; disown -a
+```
+
+## 7. Initiator workflow (Linux kernel side)
+
+To validate/align NVMe host interfaces (`nvme.h`, `fabrics.h`, `rdma.c`), unpack matching kernel sources.
+
+Download exact Rocky source RPM:
+
+```bash
+wget https://download.rockylinux.org/vault/rocky/9.6/devel/source/tree/Packages/k/kernel-5.14.0-570.39.1.el9_6.src.rpm
+```
+
+Install source RPM (example local path):
+
+```bash
+rpm -ivh /path/to/kernel_src/kernel-5.14.0-570.39.1.el9_6.src.rpm
+```
+
+Unpack kernel source:
+
+```bash
+cd ~/rpmbuild/BUILD
+tar xf ~/rpmbuild/SOURCES/linux-5.14.0-570.39.1.el9_6.tar.xz
+```
+
+Build Linux initiator module:
+
+```bash
+make \
+  NVME_HOST_DIR=/root/rpmbuild/BUILD/linux-5.14.0-570.39.1.el9_6/drivers/nvme/host/ \
+  KBUILD_EXTRA_SYMBOLS=/usr/src/bxi3-portals/Module.symvers \
+  EXTRA_CFLAGS="-DPTL_RELEASE"
+```
+
+Load modules:
+
+```bash
+modprobe nvme_core
+modprobe nvme
+modprobe nvme_fabrics
+modprobe nvme_rdma
+insmod bxiv3_initiator.ko
+```
+
+Connect to SPDK target:
+
+```bash
+sudo nvme connect -t portals4 -a 192.168.2.8 -s 10 -n nqn.2016-06.io.spdk:cnode1
+```
+
+## Quick troubleshooting
+
+### `mk/config.mk not found`
+
+DPDK submodule did not initialize. Run:
+
+```bash
+git -c safe.directory="*" submodule update --init
+```
+
+### `missing python module: elftools`
+
+Run:
+
+```bash
+pip3 install --user pyelftools
+```
