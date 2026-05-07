@@ -128,7 +128,7 @@ Both commands should work.
 Start target:
 
 ```bash
-ROLE=target PORTALS_PID=10 ./build/bin/nvmf_tgt -m 0x1 2>&1 | tee target.log
+ROLE=target PORTALS_PID=11 ./build/bin/nvmf_tgt -m 0x1 2>&1 | tee target.log
 ```
 
 Create target ramdisk:
@@ -174,22 +174,20 @@ make \
   KBUILD_EXTRA_SYMBOLS=/usr/src/bxi3-portals/Module.symvers \
   EXTRA_CFLAGS="-DPTL_RELEASE"
 ```
+`Note`: Removing the `EXTRA_FLAGS` option enables debugging symbols.
 
 Load modules:
 
 ```bash
-modprobe nvme_core
-modprobe nvme
-modprobe nvme_fabrics
-modprobe nvme_rdma
-insmod bxiv3_initiator.ko
+sudo modprobe nvme_core; sudo modprobe nvme; sudo modprobe nvme_fabrics; sudo modprobe nvme_rdma; sudo insmod bxiv3_initiator.ko
 ```
 
 Connect to SPDK target:
 
 ```bash
-sudo nvme connect -t portals4 -a 192.168.2.8 -s 10 -n nqn.2016-06.io.spdk:cnode1
+sudo nvme connect -t portals4 -a 192.168.2.<BXINIC-NID> -s 11 -n nqn.2016-06.io.spdk:cnode1
 ```
+`Note:` -s argument = `PORTALS_PID` of `nvmf_tgt` application.
 
 ## Quick troubleshooting
 
@@ -208,3 +206,11 @@ Run:
 ```bash
 pip3 install --user pyelftools
 ```
+
+### Unknown BXINIC-NID
+
+Run: 
+```bash
+sudo dmesg | grep -iE "bxi3|nid"
+```                                      
+And look for entries of this type: `bxi3 bxi0: Manual NID asked 0:1/0`
