@@ -23,6 +23,19 @@ RUN dnf -y update && \
       bear \
     && dnf clean all
 
+# Additional packages required for kernel building
+RUN dnf -y install \
+      bc \
+      bison \
+      flex \
+      dwarves \
+      rpm-build \
+      perl \
+      perl-interpreter \
+      perl-devel \
+      kmod \
+    && dnf clean all
+
 # Build and install CUnit from source
 RUN cd /tmp && \
     wget https://sourceforge.net/projects/cunit/files/CUnit/2.1-3/CUnit-2.1-3.tar.bz2 && \
