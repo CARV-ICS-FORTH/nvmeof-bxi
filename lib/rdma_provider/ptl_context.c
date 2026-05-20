@@ -655,8 +655,9 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
       if (ptl_cq_get_id(ptl_cq) != op_meta->cq_id) {
         SPDK_PTL_FATAL(
             "PtlCQ: Wrong cq_id for the event current ptl_cq id = %d "
-            "event is for: %d. This case is FATAL for the non-matching case",
-            ptl_cq_get_id(ptl_cq), op_meta->cq_id);
+            "event is for: %d. Event type: %d This case is FATAL for the "
+            "non-matching case",
+            ptl_cq_get_id(ptl_cq), op_meta->cq_id, event.type);
       }
       ptl_print_event(op_meta, false);
       ptl_cnxt_destroy_op_meta(op_meta);
@@ -918,10 +919,11 @@ int ptl_cnxt_allocate_pte(struct ptl_context *cnxt) {
   pte = PTL_PT_INDEX;
   goto exit;
 #else
-  if (cnxt->is_target && cnxt->pte_table[PTL_PT_INDEX]) {
-    SPDK_PTL_FATAL(
-        "Role is \"Target\" and PTL_PT_INDEX already taken smells like error");
-  }
+  // if (cnxt->is_target && cnxt->pte_table[PTL_PT_INDEX]) {
+  //   SPDK_PTL_FATAL(
+  //       "Role is \"Target\" and PTL_PT_INDEX already taken smells like
+  //       error");
+  // }
   for (uint32_t i = 0; i < cnxt->pte_table_size; i++) {
     if (cnxt->pte_table[i]) {
       continue;

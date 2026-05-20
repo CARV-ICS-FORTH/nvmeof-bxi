@@ -158,7 +158,7 @@ struct spdk_rdma_provider_srq *spdk_rdma_provider_srq_create(
    * Currently we use PTL_PT_INDEX but we can surely change to allocate_pte
    * and allow multiplse srqs and more than one reactors. XXX TODO XXX
    */
-  int pte = ptl_cnxt_get_pte(ptl_cnxt_get(), PTL_PT_INDEX);
+  int pte = ptl_cnxt_allocate_pte(ptl_cnxt_get());
   if (-1 == pte) {
     SPDK_PTL_FATAL("Failed to get PTL_PT_INDEX PTE");
   }
@@ -350,7 +350,7 @@ int spdk_rdma_provider_srq_flush_recv_wrs(
 
     recv_meta = calloc(1UL, sizeof(*recv_meta));
     recv_meta->obj_type = PTL_RECV_OP;
-    recv_meta->cq_id = PTL_UUID_TARGET_COMPLETION_QUEUE_ID;
+
     for (int i = 0; i < wr->num_sge; i++) {
       recv_meta->recv_op.io_vector[i].iov_base =
           (ptl_addr_t)wr->sg_list[i].addr;
@@ -360,6 +360,7 @@ int spdk_rdma_provider_srq_flush_recv_wrs(
       // recv_meta->recv_op.io_vector[i].iov_len);
     }
 #if PTL_USE_MATCHING
+    recv_meta->cq_id = PTL_UUID_TARGET_COMPLETION_QUEUE_ID;
     ret = spdk_rdma_provider_ptl_register_match_entry(
         recv_meta, PTL_UUID_TARGET_SRQ_MATCH_BITS, wr->num_sge, wr->wr_id,
         ptl_cnxt_get_portal_index(portals_srq->ptl_context), nic);
@@ -369,6 +370,7 @@ int spdk_rdma_provider_srq_flush_recv_wrs(
     if (ptl_srq->obj_type != PTL_SRQ) {
       SPDK_PTL_FATAL("Corrupted PTL_SRQ");
     }
+    recv_meta->cq_id = ptl_srq->ptl_cq->core_cq->cq_id;
     ret = spdk_rdma_provider_ptl_register_list_entry(
         recv_meta, wr->num_sge, wr->wr_id, ptl_srq->ptl_cq->core_cq->pte, nic);
 #endif
@@ -800,6 +802,7 @@ static void spdk_rdma_provider_ptl_rdma_read(struct ptl_pd *ptl_pd,
   rdma_read_meta->signal_app = wr->send_flags & IBV_SEND_SIGNALED;
   rdma_read_meta->rdma_read_op.qp_num = ptl_qp->ptl_cm_id->ptl_qp_num;
   rdma_read_meta->rdma_read_op.total_parts = wr->num_sge;
+  rdma_read_meta->cq_id = ptl_qp->recv_cq->core_cq->cq_id;
   remote_addr = wr->wr.rdma.remote_addr;
 
   for (int i = 0; i < wr->num_sge; i++) {
