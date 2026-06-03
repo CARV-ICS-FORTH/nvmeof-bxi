@@ -46,6 +46,13 @@ RUN cd /tmp && \
     make && make install && \
     cd / && rm -rf /tmp/CUnit-*
 
+# Tools for RPM-based kernel builds
+RUN dnf -y install \
+      rpmdevtools \
+      mock \
+    && dnf clean all
+
+
 # Python tooling for SPDK
 # Added 'scan-build' to provide the 'intercept-build' command
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
