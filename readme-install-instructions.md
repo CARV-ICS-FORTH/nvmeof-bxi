@@ -134,8 +134,10 @@ ROLE=target PORTALS_PID=11 ./build/bin/nvmf_tgt -m 0x1 2>&1 | tee target.log
 Create target ramdisk:
 
 ```bash
-./gesalous_create_target_ramdisk.sh 192.168.2.8 1
+./gesalous_create_target_ramdisk.sh BXI.NIC.IP.BXINIC-NID 1
 ```
+Note: for the `BXI.NIC.IP`, you need to run `ip a` and grab the first 3 out of 4 digits. For example, from `192.168.123.40` you get
+`192.168.123` (for the `BXINIC-NID` see below). 
 
 Stop target:
 
@@ -145,32 +147,11 @@ pkill -9 -f nvmf_tgt; disown -a
 
 ## 7. Initiator workflow (Linux kernel side)
 
-To validate/align NVMe host interfaces (`nvme.h`, `fabrics.h`, `rdma.c`), unpack matching kernel sources.
-
-Download exact Rocky source RPM:
+Build Linux initiator module (kernel sources needed, refer to `Quick troubleshooting` if missing):
 
 ```bash
-wget https://download.rockylinux.org/vault/rocky/9.6/devel/source/tree/Packages/k/kernel-5.14.0-570.39.1.el9_6.src.rpm
-```
-
-Install source RPM (example local path):
-
-```bash
-rpm -ivh /path/to/kernel_src/kernel-5.14.0-570.39.1.el9_6.src.rpm
-```
-
-Unpack kernel source:
-
-```bash
-cd ~/rpmbuild/BUILD
-tar xf ~/rpmbuild/SOURCES/linux-5.14.0-570.39.1.el9_6.tar.xz
-```
-
-Build Linux initiator module:
-
-```bash
-make \
-  NVME_HOST_DIR=/root/rpmbuild/BUILD/linux-5.14.0-570.39.1.el9_6/drivers/nvme/host/ \
+  cd spdk/kernel_initiator; 
+  make NVME_HOST_DIR=/path/to/sources/BUILD/linux-5.14.0-570.39.1.el9_6/drivers/nvme/host/ \
   KBUILD_EXTRA_SYMBOLS=/usr/src/bxi3-portals/Module.symvers \
   EXTRA_CFLAGS="-DPTL_RELEASE"
 ```
@@ -181,11 +162,17 @@ Load modules:
 ```bash
 sudo modprobe nvme_core; sudo modprobe nvme; sudo modprobe nvme_fabrics; sudo modprobe nvme_rdma; sudo insmod bxiv3_initiator.ko
 ```
+Find BXINIC-NID
+
+```bash
+sudo dmesg | grep -iE "bxi3|nid"
+```                                      
+And look for entries of this type: `bxi3 bxi0: Manual NID asked 0:1/0`, of which `1` is the NID of bxi0 NIC
 
 Connect to SPDK target:
 
 ```bash
-sudo nvme connect -t portals4 -a 192.168.2.<BXINIC-NID> -s 11 -n nqn.2016-06.io.spdk:cnode1
+sudo nvme connect -t portals4 -a BXI.NIC.IP.<BXINIC-NID> -s 11 -n nqn.2016-06.io.spdk:cnode1
 ```
 `Note:` -s argument = `PORTALS_PID` of `nvmf_tgt` application.
 
@@ -207,10 +194,28 @@ Run:
 pip3 install --user pyelftools
 ```
 
-### Unknown BXINIC-NID
+### `Missing kernel sources`
 
-Run: 
+To validate/align NVMe host interfaces (`nvme.h`, `fabrics.h`, `rdma.c`), unpack matching kernel sources.
+
+Download exact Rocky source RPM:
+
 ```bash
-sudo dmesg | grep -iE "bxi3|nid"
-```                                      
-And look for entries of this type: `bxi3 bxi0: Manual NID asked 0:1/0`
+wget https://download.rockylinux.org/vault/rocky/9.6/devel/source/tree/Packages/k/kernel-5.14.0-570.39.1.el9_6.src.rpm
+```
+
+Install source RPM (example local path):
+
+```bash
+rpm -ivh /path/to/kernel_src/kernel-5.14.0-570.39.1.el9_6.src.rpm
+```
+
+Unpack kernel source:
+
+```bash
+cd ~/rpmbuild/BUILD
+tar xf ~/rpmbuild/SOURCES/linux-5.14.0-570.39.1.el9_6.tar.xz
+
+NVME_HOST_DIR=/path/to/sources/BUILD/linux-5.14.0-570.39.1.el9_6/drivers/nvme/host/
+
+
