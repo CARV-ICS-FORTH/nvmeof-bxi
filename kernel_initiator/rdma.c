@@ -58,21 +58,55 @@
 #define NVME_RDMA_METADATA_SGL_SIZE                                            \
   (sizeof(struct scatterlist) * NVME_INLINE_METADATA_SG_CNT)
 #ifdef GDS_SUPPORT
-// --- GDS DIRECT SYMBOL EXPORTS ---
-extern int nvfs_dma_map_sg_attrs(struct device *device,
-                                 struct scatterlist *sglist, int nents,
-                                 enum dma_data_direction dma_dir,
-                                 unsigned long attrs);
+#include "nvfs_glue.h"
+#include <linux/cpumask.h>
+#include <linux/delay.h>
+#include <linux/percpu.h>
 
-extern int nvfs_dma_unmap_sg(struct device *device, struct scatterlist *sglist,
-                             int nents, enum dma_data_direction dma_dir);
+// --- GPU Direct Storage: nvidia-fs registration slot ---
+// nvidia-fs probes and calls nvme_rdma_v1_register_nvfs_dma_ops() at its own
+// init, handing us its DMA op table. We keep it behind a per-CPU refcount so
+// unregister() can drain in-flight GPU I/O before dropping the table.
 
-extern bool nvfs_is_gpu_page(struct page *page);
+struct nvfs_dma_rw_ops *nvfs_ops;
+static atomic_t nvfs_shutdown = ATOMIC_INIT(1);
+static DEFINE_PER_CPU(long, nvfs_n_ops);
 
-extern int nvfs_blk_rq_map_sg(struct request_queue *q, struct request *req,
-                              struct scatterlist *sglist);
+bool nvfs_get_ops(void) {
+  if (nvfs_ops && !atomic_read(&nvfs_shutdown)) {
+    this_cpu_inc(nvfs_n_ops);
+    return true;
+  }
+  return false;
+}
 
-// ---------------------------------
+void nvfs_put_ops(void) { this_cpu_dec(nvfs_n_ops); }
+
+static long nvfs_count_ops(void) {
+  long sum = 0;
+  int cpu;
+  for_each_possible_cpu(cpu) sum += per_cpu(nvfs_n_ops, cpu);
+  return sum;
+}
+
+int nvme_rdma_v1_register_nvfs_dma_ops(struct nvfs_dma_rw_ops *ops) {
+  if (!(ops->ft_bmap & NVFS_FT_IS_GPU_PAGE) ||
+      !(ops->ft_bmap & NVFS_FT_PREP_SGLIST) ||
+      !(ops->ft_bmap & NVFS_FT_MAP_SGLIST))
+    return -EOPNOTSUPP; // reject; nvidia-fs will not call unregister
+  nvfs_ops = ops;
+  atomic_set(&nvfs_shutdown, 0);
+  return 0;
+}
+EXPORT_SYMBOL(nvme_rdma_v1_register_nvfs_dma_ops);
+
+void nvme_rdma_v1_unregister_nvfs_dma_ops(void) {
+  atomic_set(&nvfs_shutdown, 1); // block new getters
+  while (nvfs_count_ops())       // wait for in-flight GPU I/O to drain
+    msleep(10);
+  nvfs_ops = NULL;
+}
+EXPORT_SYMBOL(nvme_rdma_v1_unregister_nvfs_dma_ops);
 #endif
 struct nvme_rdma_device {
   struct ib_device *dev;
@@ -1397,9 +1431,10 @@ static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev,
             container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
         actual_dev = PtlGetDriverDev(bxiv3_dev->nicia_handle);
       }
-      nvfs_dma_unmap_sg(actual_dev, req->data_sgl.sg_table.sgl,
-                        req->data_sgl.nents, rq_dma_dir(rq));
+      nvfs_ops->nvfs_dma_unmap_sg(actual_dev, req->data_sgl.sg_table.sgl,
+                                  req->data_sgl.nents, rq_dma_dir(rq));
       req->is_gds_mapped = false;
+      nvfs_put_ops();
     } else
 #endif
       ib_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
@@ -1421,9 +1456,10 @@ static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev,
           container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
       actual_dev = PtlGetDriverDev(bxiv3_dev->nicia_handle);
     }
-    nvfs_dma_unmap_sg(actual_dev, req->data_sgl.sg_table.sgl,
-                      req->data_sgl.nents, rq_dma_dir(rq));
+    nvfs_ops->nvfs_dma_unmap_sg(actual_dev, req->data_sgl.sg_table.sgl,
+                                req->data_sgl.nents, rq_dma_dir(rq));
     req->is_gds_mapped = false;
+    nvfs_put_ops();
   } else
 #endif
     ib_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
@@ -1687,46 +1723,51 @@ static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,
   struct req_iterator iter;
   struct bio_vec bvec;
   struct page *first_page = NULL;
-
-  rq_for_each_segment(bvec, rq, iter) {
-    first_page = bvec.bv_page;
-    break; // we only need to check the first page
-  }
-
-  int is_gpu;
-  if (first_page) {
-    is_gpu = nvfs_is_gpu_page(first_page);
-    if (is_gpu)
-      pr_alert("BXI DEBUG: Intercepted GPU Page pointer "
-               "nvfs_is_gpu_page() returned: %d\n",
-               is_gpu);
-  }
-
   req->is_gds_mapped = false;
 
-  if (is_gpu) {
-    // we build the scatterlist using nvfs builder
-    req->data_sgl.nents =
-        nvfs_blk_rq_map_sg(rq->q, rq, req->data_sgl.sg_table.sgl);
-    req->is_gds_mapped = true;
-
-    pr_alert("\n======================================================\n");
-    pr_alert("BXI : GPU MEMORY INTERCEPTED SUCCESSFULLY!\n");
-    pr_alert("BXI : 64KB SGL Built. Ready for P2P DMA.\n");
-    pr_alert("======================================================\n\n");
-
-    struct device *actual_dev = ibdev->dev.parent;
-    if (actual_dev == NULL) {
-      struct ptl_bxiv3_device *bxiv3_dev =
-          container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
-      actual_dev = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+  // Only touch nvidia-fs if it is registered. For a GPU-mapped request the
+  // ref taken here is held until unmap (released by nvfs_put_ops() there).
+  if (nvfs_get_ops()) {
+    rq_for_each_segment(bvec, rq, iter) {
+      first_page = bvec.bv_page;
+      break; // we only need to check the first page
     }
-    // we pass the struct dev of the nic as per nvfs constraint
-    pr_alert("BXI DEBUG: ibdev parent is %p\n", ibdev->dev.parent);
-    *count = nvfs_dma_map_sg_attrs(actual_dev, req->data_sgl.sg_table.sgl,
-                                   req->data_sgl.nents, rq_dma_dir(rq), 0);
 
-  } else
+    int is_gpu = 0;
+    if (first_page) {
+      is_gpu = nvfs_ops->nvfs_is_gpu_page(first_page);
+      if (is_gpu)
+        pr_alert("BXI DEBUG: Intercepted GPU Page pointer "
+                 "nvfs_is_gpu_page() returned: %d\n",
+                 is_gpu);
+    }
+
+    if (is_gpu) {
+      // we build the scatterlist using nvfs builder
+      req->data_sgl.nents =
+          nvfs_ops->nvfs_blk_rq_map_sg(rq->q, rq, req->data_sgl.sg_table.sgl);
+      req->is_gds_mapped = true; // ref stays held until unmap
+
+      pr_alert("\n======================================================\n");
+      pr_alert("BXI : GPU MEMORY INTERCEPTED SUCCESSFULLY!\n");
+      pr_alert("BXI : 64KB SGL Built. Ready for P2P DMA.\n");
+      pr_alert("======================================================\n\n");
+
+      struct device *actual_dev = ibdev->dev.parent;
+      if (actual_dev == NULL) {
+        struct ptl_bxiv3_device *bxiv3_dev =
+            container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+        actual_dev = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+      }
+      // we pass the struct dev of the nic as per nvfs constraint
+      pr_alert("BXI DEBUG: ibdev parent is %p\n", ibdev->dev.parent);
+      *count = nvfs_ops->nvfs_dma_map_sg_attrs(
+          actual_dev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
+          rq_dma_dir(rq), 0);
+    } else
+      nvfs_put_ops(); // not a gpu page -> release ref, use cpu path
+  }
+  if (!req->is_gds_mapped)
 #endif
   { // default behaviour
     req->data_sgl.nents = blk_rq_map_sg(rq->q, rq, req->data_sgl.sg_table.sgl);
@@ -1769,9 +1810,10 @@ out_unmap_sg:
 #ifdef GDS_SUPPORT
   // check whether the request is actually a GDS req.
   if (req->is_gds_mapped) {
-    nvfs_dma_unmap_sg(ibdev->dev.parent, req->data_sgl.sg_table.sgl,
-                      req->data_sgl.nents, rq_dma_dir(rq));
+    nvfs_ops->nvfs_dma_unmap_sg(ibdev->dev.parent, req->data_sgl.sg_table.sgl,
+                                req->data_sgl.nents, rq_dma_dir(rq));
     req->is_gds_mapped = false;
+    nvfs_put_ops();
   } else // default behaviour
 #endif
     ib_portals_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl,
