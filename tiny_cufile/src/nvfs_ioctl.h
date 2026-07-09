@@ -10,6 +10,7 @@
 #define NVFS_IOCTL_MAP _IOW(NVFS_MAGIC, 3, int)
 #define NVFS_IOCTL_WRITE _IOW(NVFS_MAGIC, 4, int)
 #define NVFS_IOCTL_READ _IOW(NVFS_MAGIC, 2, int)
+#define NVFS_IOCTL_BATCH_IO _IOW(NVFS_MAGIC, 8, int)
 #endif
 
 typedef struct nvfs_ioctl_map_s {
@@ -43,14 +44,28 @@ typedef struct nvfs_ioctl_ioargs {
   uint8_t hipri : 1;
   uint8_t allowreads : 1;
   uint8_t use_rkeys : 1;
-  uint8_t optype : 3; // 1 for WRITE, 0 for READ
+  uint8_t optype : 3; /* 1 for WRITE, 0 for READ */
   uint8_t reserved : 1;
   uint8_t padding[3];
 } __attribute__((packed, aligned(8))) nvfs_ioctl_ioargs_t;
 
+typedef struct nvfs_ioctl_batch_ioargs {
+  uint64_t ctx_id;
+  uint64_t nents;
+  nvfs_ioctl_ioargs_t *io_entries;
+} __attribute__((packed, aligned(8))) nvfs_ioctl_batch_ioargs_t;
+
 union nvfs_ioctl_param_u {
   nvfs_ioctl_map_t map_args;
   nvfs_ioctl_ioargs_t ioargs;
+  nvfs_ioctl_batch_ioargs_t batch_ioargs;
 } __attribute__((packed, aligned(8)));
 
-#endif // NVFS_IOCTL_H
+struct nvfs_ioctl_metapage {
+  volatile uint64_t end_fence_val;
+  volatile uint64_t result;
+  volatile uint32_t state;
+  uint8_t _padding[12];
+};
+
+#endif /* NVFS_IOCTL_H */

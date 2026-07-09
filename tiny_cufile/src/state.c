@@ -1,5 +1,6 @@
 #include "state.h"
 #include "log.h"
+#include "nvfs_ioctl.h"
 #include "uthash.h"
 #include <bits/pthreadtypes.h>
 #include <pthread.h>
@@ -7,7 +8,9 @@
 #include <stdlib.h>
 
 static int verify_buf(const void *devPtr, size_t length, void *shadow_buf,
-                      volatile uint64_t *fence_page, uint64_t pdevinfo) {
+                      volatile struct nvfs_ioctl_metapage *fence_page,
+                      uint64_t pdevinfo) {
+  (void)pdevinfo;
   if (!devPtr || length == 0 || !shadow_buf || !fence_page)
     return 0;
   return 1;
@@ -26,7 +29,7 @@ int state_cleanup(void) {
   tcufile_buf_t *current, *tmp;
   pthread_rwlock_wrlock(&lock);
 
-  // Safely iterate and free the entire hash table
+  /* Safely iterate and free the entire hash table */
   HASH_ITER(hh, table, current, tmp) {
     HASH_DEL(table, current);
     free(current->chunks);

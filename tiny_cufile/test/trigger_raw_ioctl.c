@@ -50,7 +50,7 @@ typedef struct nvfs_ioctl_ioargs {
   uint8_t hipri : 1;
   uint8_t allowreads : 1;
   uint8_t use_rkeys : 1;
-  uint8_t optype : 3; // 1 for WRITE, 0 for READ
+  uint8_t optype : 3; /* 1 for WRITE, 0 for READ */
   uint8_t reserved : 1;
   uint8_t padding[3];
 } __attribute__((packed, aligned(8))) nvfs_ioctl_ioargs_t;
@@ -60,32 +60,32 @@ union nvfs_ioctl_param_u {
   nvfs_ioctl_ioargs_t ioargs;
 } __attribute__((packed, aligned(8)));
 
-#define BUF_SIZE (1024 * 1024) // 1MB test payload
+#define BUF_SIZE (1024 * 1024) /* 1MB test payload */
 
 int main() {
   int nvfs_fd, nvme_fd;
   void *d_buf;
   void *shadow_buf;
   volatile uint64_t *
-      fence_page; // Marked volatile so the CPU actually polls memory, not cache
+      fence_page; /* Marked volatile so the CPU actually polls memory, not cache */
   union nvfs_ioctl_param_u param;
   struct stat st;
   char pciBusId[20];
   unsigned int dom, b, d, f;
 
-  // Host buffers for data generation and verification
+  /* Host buffers for data generation and verification */
   unsigned char *h_payload = malloc(BUF_SIZE);
   unsigned char *h_verify = malloc(BUF_SIZE);
 
-  // Fill host payload with a known repeating pattern (0x65)
+  /* Fill host payload with a known repeating pattern (0x65) */
   memset(h_payload, 0x66, BUF_SIZE);
   memset(h_verify, 0x00, BUF_SIZE);
 
   nvfs_fd = open("/dev/nvidia-fs0", O_RDWR);
-  // opening a file on the nvme0n1
+  /* opening a file on the nvme0n1 */
   nvme_fd = open("/mnt/nvme_test/gds_file.dat", O_RDWR | O_DIRECT);
 
-  // stat block device to get correct major/minor
+  /* stat block device to get correct major/minor */
   struct stat bdev_st;
   stat("/dev/nvme0n1", &bdev_st);
 
@@ -96,27 +96,27 @@ int main() {
 
   fstat(nvme_fd, &st);
 
-  // 1. Allocate VRAM and Inject the Pattern
+  /* 1. Allocate VRAM and Inject the Pattern */
   cudaMalloc(&d_buf, BUF_SIZE);
   if (cudaMemcpy(d_buf, h_payload, BUF_SIZE, cudaMemcpyHostToDevice) !=
       cudaSuccess)
     goto cleanup;
   printf("[+] Injected pattern into 1MB GPU VRAM at %p\n", d_buf);
 
-  // 2. Allocate Native Shadow Buffer & Synchronization Fence
+  /* 2. Allocate Native Shadow Buffer & Synchronization Fence */
   shadow_buf =
       mmap(NULL, BUF_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, nvfs_fd, 0);
   cudaMallocHost((void **)&fence_page, 4096);
   memset((void *)fence_page, 0, 4096);
-  *fence_page = 0; // Initialize mailbox
+  *fence_page = 0; /* Initialize mailbox */
 
   cudaDeviceGetPCIBusId(pciBusId, sizeof(pciBusId), 0);
   sscanf(pciBusId, "%x:%x:%x.%x", &dom, &b, &d, &f);
   uint64_t pdevinfo = ((uint64_t)dom << 32) | (b << 8) | (d << 3) | f;
 
-  // ==========================================
-  // STAGE 1: MAP THE MEMORY
-  // ==========================================
+  /* ========================================== */
+  /* STAGE 1: MAP THE MEMORY */
+  /* ========================================== */
   memset(&param, 0, sizeof(param));
   param.map_args.size = BUF_SIZE;
   param.map_args.pdevinfo = pdevinfo;
@@ -132,24 +132,24 @@ int main() {
   }
   printf("[+] STAGE 1 SUCCESS! Memory registered.\n");
 
-  // ==========================================
-  // STAGE 2: THE WRITE CYCLE
-  // ==========================================
+  /* ========================================== */
+  /* STAGE 2: THE WRITE CYCLE */
+  /* ========================================== */
   memset(&param, 0, sizeof(param));
   param.ioargs.cpuvaddr = (uint64_t)shadow_buf;
-  param.ioargs.offset = 0; // Writing to block 0
+  param.ioargs.offset = 0; /* Writing to block 0 */
   param.ioargs.size = BUF_SIZE;
   param.ioargs.fd = nvme_fd;
   param.ioargs.end_fence_value =
-      1; // Tell kernel to write '1' when write is done
+      1; /* Tell kernel to write '1' when write is done */
 
-  // Setup file args using the block device's major/minor numbers
-  // This is required when operating on a file inside the block device
+  /* Setup file args using the block device's major/minor numbers */
+  /* This is required when operating on a file inside the block device */
   param.ioargs.file_args.inum = st.st_ino;
   param.ioargs.file_args.majdev = major(bdev_st.st_rdev);
   param.ioargs.file_args.mindev = minor(bdev_st.st_rdev);
 
-  param.ioargs.optype = 1; // 1 = WRITE
+  param.ioargs.optype = 1; /* 1 = WRITE */
   param.ioargs.sync = 1;
 
   printf("[+] Firing STAGE 2: NVFS_IOCTL_WRITE...\n");
@@ -163,30 +163,30 @@ int main() {
     printf("[+] STAGE 2 SUCCESS! NVMe Write Physically Complete.\n");
   }
 
-  // Optional: Asynchronous Hardware Spin-Wait
-  // If sync=0, you would poll *fence_page for the end_fence_value here.
-  // We are using sync=1, so the ioctl blocks until complete.
+  /* Optional: Asynchronous Hardware Spin-Wait */
+  /* If sync=0, you would poll *fence_page for the end_fence_value here. */
+  /* We are using sync=1, so the ioctl blocks until complete. */
 
-  // ==========================================
-  // STAGE 3: THE SABOTAGE (CLEAR VRAM)
-  // ==========================================
+  /* ========================================== */
+  /* STAGE 3: THE SABOTAGE (CLEAR VRAM) */
+  /* ========================================== */
   if (cudaMemset(d_buf, 0x00, BUF_SIZE) != cudaSuccess)
     goto cleanup;
   printf("[+] SABOTAGE: GPU VRAM wiped to 0x00 to prove read accuracy.\n");
 
-  // ==========================================
-  // STAGE 4: THE READ CYCLE
-  // ==========================================
-  *fence_page = 0; // Reset the mailbox
+  /* ========================================== */
+  /* STAGE 4: THE READ CYCLE */
+  /* ========================================== */
+  *fence_page = 0; /* Reset the mailbox */
 
-  // Note: If IOCTL 5 throws an "Invalid argument" error, change NVFS_IOCTL_READ
-  // back to _IOW(NVFS_MAGIC, 4, int) at the top of the file. Some versions of
-  // nvidia-fs use IOCTL 4 as a universal "DO_IO" command and rely solely on
-  // `optype` to determine direction.
+  /* Note: If IOCTL 5 throws an "Invalid argument" error, change NVFS_IOCTL_READ */
+  /* back to _IOW(NVFS_MAGIC, 4, int) at the top of the file. Some versions of */
+  /* nvidia-fs use IOCTL 4 as a universal "DO_IO" command and rely solely on */
+  /* `optype` to determine direction. */
 
-  param.ioargs.optype = 0; // 0 = READ
+  param.ioargs.optype = 0; /* 0 = READ */
   param.ioargs.end_fence_value =
-      2; // Tell kernel to write '2' when read is done
+      2; /* Tell kernel to write '2' when read is done */
 
   printf("[+] Firing STAGE 4: NVFS_IOCTL_READ...\n");
   if (ioctl(nvfs_fd, NVFS_IOCTL_READ, &param) < 0) {
@@ -194,13 +194,13 @@ int main() {
     return -1;
   }
 
-  // Optional: Asynchronous Hardware Spin-Wait
-  // If sync=0, you would poll *fence_page here.
+  /* Optional: Asynchronous Hardware Spin-Wait */
+  /* If sync=0, you would poll *fence_page here. */
   printf("[+] STAGE 4 SUCCESS! NVMe Read Physically Complete.\n");
 
-  // ==========================================
-  // STAGE 5: DATA VERIFICATION
-  // ==========================================
+  /* ========================================== */
+  /* STAGE 5: DATA VERIFICATION */
+  /* ========================================== */
   if (cudaMemcpy(h_verify, d_buf, BUF_SIZE, cudaMemcpyDeviceToHost) !=
       cudaSuccess)
     goto cleanup;
@@ -216,7 +216,7 @@ int main() {
   }
 
 cleanup:
-  // Cleanup
+  /* Cleanup */
   cudaFreeHost((void *)fence_page);
   munmap(shadow_buf, BUF_SIZE);
   close(nvme_fd);
