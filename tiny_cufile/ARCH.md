@@ -36,33 +36,47 @@ only.
 
 ### 1.3 Buffer registration & chunking (`tiny_cu_buf_register`)
 
-The NVMe and `nvidia-fs` paths cap a single mapping / DMA request at
-`max_chunk_gpu`. This limit is probed at init by `os_probe_nvfs_chunk_limit`
-(the largest `mmap` size the driver accepts, from a descending candidate list,
-falling back to a conservative value). Larger buffers are split into
-`max_chunk_gpu`-sized chunks. For each chunk the library:
+The `nvidia-fs` path caps a single mapping / DMA request at `max_chunk_gpu`, and
+larger buffers are split into `max_chunk_gpu`-sized chunks. The chunk size is
+resolved once at init by `resolve_max_chunk_gpu`: it defaults to
+`TCU_DEFAULT_MAX_CHUNK_MB` (2 MiB, overridable at build time with
+`-DTCU_DEFAULT_MAX_CHUNK_MB=N`), can be overridden at runtime by the
+`TINY_CU_MAX_CHUNK_MB` environment variable (in MiB), is clamped to the largest
+`mmap` the driver accepts (probed by `os_probe_nvfs_chunk_limit`), and is
+GPU-page aligned. Smaller chunks create **more `nvidia-fs` mgroups** per
+registered buffer, which lets concurrent I/O to different offsets of that buffer
+run in parallel; the 2 MiB default favors concurrency (see §4). For each chunk
+the library:
 
 1. `mmap()`s a CPU shadow buffer against `g_nvfs_fd`.
-2. Allocates a 4 KB page-locked host page (`cudaMallocHost`) as the completion
-   **fence** (`fence_page`, a `struct nvfs_ioctl_metapage`). Being pinned, its
-   address is device-accessible through unified addressing, so a GPU stream can
-   poll it over PCIe.
+2. Allocates a 4 KiB page-locked host page as the completion **fence**
+   (`fence_page`, a `struct nvfs_ioctl_metapage`) via `posix_memalign` +
+   `cudaHostRegister`. It must be exactly 4 KiB-aligned — the driver rejects an
+   unaligned `end_fence` with `end_fence address not aligned` — and pinned so a
+   GPU stream can poll it over PCIe through unified addressing.
 3. Resolves the GPU's PCI address to a `pdevinfo` word
    (`os_get_gpu_pdevinfo`).
 4. Fires `NVFS_IOCTL_MAP`. The driver pins the GPU pages
    (`nvidia_p2p_get_pages`), associates them with the shadow buffer, and wires
    the fence page for completion signalling.
 
-The per-chunk records (`tcufile_chunk_t`: shadow buffer, fence page, length)
-are stored in the registry keyed by the base device pointer. `cuFileBufRegister`
-maps to this.
+The per-chunk records (`tcufile_chunk_t`: shadow buffer, fence page, length, and
+a per-chunk `io_lock`) are stored in the registry keyed by the base device
+pointer. `cuFileBufRegister` maps to this.
 
 ### 1.4 Synchronous I/O (`tiny_cu_read` / `tiny_cu_write`)
 
-Used by `cuFileRead` / `cuFileWrite`. The request is sliced along the same
-16 MB chunk boundaries. Per slice the library computes the chunk index and
-in-chunk offset, fills `nvfs_ioctl_ioargs` (shadow address, file offset, size,
-inode, maj/min), sets `sync = 1`, and issues `NVFS_IOCTL_READ` / `WRITE`. The
+Used by `cuFileRead` / `cuFileWrite`. The request is sliced along the
+`max_chunk_gpu` chunk boundaries; each slice is additionally capped so it never
+crosses a 64 KiB GPU-page boundary (`tcu_max_io_at`), because `nvfs_io_init`
+rejects an I/O whose GPU `va_offset` is not GPU-page aligned unless it fits in
+the remainder of that page. Per slice the library fills `nvfs_ioctl_ioargs`:
+`cpuvaddr` is the chunk's shadow-buffer **base** — not base + offset, which
+`nvidia-fs` rejects as a shadow-buffer address mismatch — and the intra-chunk
+offset goes in `file_args.devptroff` (plus file offset, size, inode, maj/min).
+It sets `sync = 1` and issues `NVFS_IOCTL_READ` / `WRITE` while holding the
+chunk's `io_lock` around the fence reset + `ioctl`, so concurrent same-chunk I/O
+is serialized (`nvidia-fs` allows only one in-flight I/O per mgroup; see §4). The
 `ioctl` blocks until the DMA completes; the loop advances until all bytes are
 transferred and returns the byte count (or a negative error).
 
@@ -71,13 +85,12 @@ transferred and returns the byte count (or a negative error).
 ## 2. Asynchronous I/O (hardware-polling)
 
 Used by `cuFileReadAsync` / `cuFileWriteAsync`
-(`tiny_cu_read_async` / `tiny_cu_write_async`). This is the default and only
-async implementation. It orders storage I/O against a CUDA stream using a
-completion fence that the GPU waits on directly, rather than blocking a CPU
-thread on the result.
+(`tiny_cu_read_async` / `tiny_cu_write_async`). This is the default async implementation. 
+It orders storage I/O against a CUDA stream using a completion fence that the GPU waits on 
+directly, rather than blocking a CPU thread on the result.
 
-The request is sliced into the same 16 MB chunks. For each chunk, three items
-are enqueued on the stream, in order:
+The request is sliced into the same `max_chunk_gpu` chunks. For each chunk,
+three items are enqueued on the stream, in order:
 
 1. **Submit** — a host callback (`cudaLaunchHostFunc` → `submit_ioctl_callback`)
    issues `NVFS_IOCTL_{READ,WRITE}` with `sync = 0`. Each chunk gets a unique,
@@ -149,6 +162,34 @@ through `tiny_cufile`. The mapping is:
 
 ## 4. Known limitations
 
+- **One in-flight I/O per chunk (mgroup).** `nvidia-fs` embeds a single I/O
+  context (`nvfsio`) in each mapping group, so it rejects a second concurrent
+  `NVFS_IOCTL_{READ,WRITE}` against the same chunk with `-EBUSY` (-16). The
+  **synchronous** path serializes this with a per-chunk mutex (`io_lock`), which
+  is correct but means concurrent same-chunk requests (e.g. LMCache issuing
+  several overlapping stores) run one at a time.
+- **The async path is unsafe for concurrent same-chunk I/O.** It does *not* take
+  `io_lock`, and two async ops on one chunk share that chunk's single
+  (MAP-time-bound) fence page while waiting on it with an exact-match
+  `cuStreamWaitValue64`. The shared `end_fence_val` gets overwritten between the
+  moment it holds a waiter's target ticket and the moment that waiter's GPU poll
+  observes it, so a waiter misses its value and **deadlocks** — on top of the
+  `-EBUSY` from the mgroup. Async is therefore only safe when concurrent ops
+  target *distinct* chunks (small registration chunks make that the common case;
+  see §1.3). The fix is to serialize submissions per mgroup (defer-don't-block,
+  completion-driven), which also composes with the future submit thread pool.
+- **Throughput depends on the underlying transport, not the cufile layer.** On a
+  real local NVMe (regular file on ext4/xfs, IOMMU in passthrough) the
+  synchronous path reaches ~2.3 GB/s on a single mgroup and ~4 GB/s at 16
+  threads with the 2 MiB default chunk size — on par with or ahead of NVIDIA's
+  `libcufile` on the same workload. Registration granularity is the scaling
+  factor: more, smaller mgroups → more concurrent I/O (§1.3). Correctness on that
+  system was independently validated — AddressSanitizer/UBSan clean (no leaks),
+  ThreadSanitizer race-clean, and a multi-threaded stress test with per-slice
+  data verification. Over the project's BXI portals4 NVMe-oF link to a remote
+  ramdisk the *same* code measures only ~0.6 MB/s, but that reflects the
+  (currently software-emulated) transport, not `tiny_cufile`; it is
+  expected to scale with real BXI hardware, with no code changes.
 - **Submit is synchronous and serialized** (§2.2). No submit thread pool yet, so
   async throughput is bounded by per-chunk setup on the callback thread.
 - **O_DIRECT alignment.** The direct path requires block-aligned (typically

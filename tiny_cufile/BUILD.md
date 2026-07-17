@@ -52,43 +52,74 @@ library works.
 From this directory:
 
 ```
-make
+make            # release build (optimized): the two libraries
+make tests      # additionally build the test/bench harnesses
 ```
 
-Outputs:
+`make` (release) produces:
 - `libtiny_cufile.so` — the library (includes the `cuFile*` shim symbols).
 - `ldp_libcufile.so` — the same objects packaged for `LD_PRELOAD` interception.
-- `simple_write`, `simple_async`, `verify_v2`, `verify_v2_err` — test/example
-  binaries, linked against `libtiny_cufile.so` with `-rpath=.`.
 
-The async path links **both** CUDA libraries: `-lcudart` (runtime) and
-`-lcuda` (driver API, for `cuStreamWaitValue64`). A missing `-lcuda` shows up as
-an unresolved `cuStreamWaitValue64` at link time.
+`make tests` also builds the harnesses in `test/` (`simple_sync`,
+`simple_async`, `stress_threads`, `bench_write`), each linked against
+`libtiny_cufile.so` with an `$ORIGIN` rpath so they run from any directory. Build
+one by name with e.g. `make stress_threads`.
 
-## 3. Build options
+The libraries link **both** CUDA libraries: `-lcudart` (runtime) and `-lcuda`
+(driver API, for `cuStreamWaitValue64`). A missing `-lcuda` shows up as an
+unresolved `cuStreamWaitValue64` at link time.
 
-- **Debug logging** — off by default. Enable the `TCU_DEBUG` / `TCU_INFO`
-  tracing:
-  ```
-  make DEBUG=1
-  ```
-- **Non-standard CUDA location** — override the toolkit prefix:
-  ```
-  make CUDA_HOME=/opt/cuda
-  ```
-- **Clean**:
-  ```
-  make clean
-  ```
+## 3. Build profiles and options
+
+### Profiles
+
+Objects are cached per-profile under `build/<profile>/`, so switching profiles
+does not trigger a full rebuild. The `debug`/`asan`/`tsan` targets build the
+libraries **and** the harnesses in that profile.
+
+| command      | flags                          | use                                          |
+| ------------ | ------------------------------ | -------------------------------------------- |
+| `make`       | `-O2 -g -DNDEBUG`              | release (default); benchmarking              |
+| `make debug` | `-O0 -g3 -DTINY_CU_DEBUG`      | gdb; enables `TCU_DEBUG`/`TCU_INFO` tracing  |
+| `make asan`  | + AddressSanitizer + UBSan     | host memory / undefined-behavior bugs        |
+| `make tsan`  | + ThreadSanitizer              | data races (validates the per-chunk `io_lock`) |
+
+> **Sanitizers vs CUDA.** ASan and TSan reserve large fixed regions of the
+> process address space and collide with the CUDA runtime's mappings by default;
+> each needs a workaround to run a CUDA process:
+> - **ASan** — otherwise fails at `cudaMalloc`. Free up the shadow gap:
+>   ```
+>   sudo ASAN_OPTIONS=protect_shadow_gap=0:replace_intrin=0 \
+>        ./stress_threads /mnt/nvme_test/gds_stress.dat 16 16 200
+>   ```
+> - **TSan** — may fail intermittently with "unexpected memory mapping" (an ASLR
+>   interaction). Disable randomization with `setarch -R`:
+>   ```
+>   sudo setarch -R ./stress_threads /mnt/nvme_test/gds_stress.dat 16 16 200
+>   ```
+>
+> For GPU-side checking use NVIDIA's `compute-sanitizer` instead.
+
+### Options (override on the command line)
+
+- `STRICT=1` — add `-Wconversion -Wsign-conversion -Wcast-qual -Werror` (CI / cleanup).
+- `CUDA_HOME=/opt/cuda` — non-standard CUDA toolkit prefix.
+- `CUDA_ARCH=x86_64-linux` — toolkit target triple; locates `targets/<arch>/lib`,
+  where `libcufile` lives for the `*_real` twins (§4).
+- `CC=clang` — override the compiler (defaults to `gcc`).
+- `EXTRA_CFLAGS=-DTCU_DEFAULT_MAX_CHUNK_MB=4` — append extra defines, e.g. to bake
+  a different default registration chunk size (§4.1).
+- `make clean` — remove `build/` and all outputs.
+- `make help` — list targets.
 
 ---
 
 ## 4. Running the tests
 
-All test binaries use `-rpath=.`, so run them from this directory (or set
-`LD_LIBRARY_PATH=.`). They need `/dev/nvidia-fs0`, a GPU, and an `O_DIRECT`
-target file. Each accepts `-h`/`--help` and takes its important parameters on
-the command line.
+The harnesses are linked with an `$ORIGIN` rpath, so they find
+`libtiny_cufile.so` beside them and run from any directory. They need
+`/dev/nvidia-fs0`, a GPU, and an `O_DIRECT` target file. Each accepts
+`-h`/`--help`.
 
 - **`simple_sync [path] [size_MB]`** — synchronous round-trip verifier
   (`cuFileWrite`/`cuFileRead`): write a known pattern GPU→disk, wipe the buffer,
@@ -108,6 +139,48 @@ the command line.
   ```
   ./simple_async --error /mnt/nvme_test/gds_async.dat
   ```
+- **`stress_threads [path] [size_MB] [threads] [iters] [mode]`** — multi-threaded
+  concurrency stressor. Threads hit disjoint sub-ranges of the same chunk (with
+  data verification) to contend on one mgroup and exercise the per-chunk
+  `io_lock`. `mode` is `sync` (default) or `async`. Exit `0` = clean, `2` =
+  failure:
+  ```
+  ./stress_threads /mnt/nvme_test/gds_stress.dat 16 16 200 sync
+  ```
+- **`bench_write [size_MB] [iters] [path]`** — single-thread sync
+  latency/throughput A/B harness (min/median/mean/p99 + GB/s):
+  ```
+  ./bench_write 32 200 /mnt/nvme_test/gds_test.dat
+  ```
+
+### A/B against the real libcufile
+
+Any harness has a `*_real` twin that links the genuine NVIDIA `libcufile`
+instead of tiny_cufile, for side-by-side comparison of the identical workload:
+
+```
+make stress_threads_real
+./stress_threads_real /mnt/nvme_test/gds_stress.dat 16 16 200
+```
+
+`libcufile` lives under `$CUDA_HOME/targets/<arch>/lib`; set `CUDA_ARCH` if the
+default `x86_64-linux` is wrong for your toolkit.
+
+### 4.1 Registration chunk size (`TINY_CU_MAX_CHUNK_MB`)
+
+`tiny_cu_buf_register` splits a registered buffer into `max_chunk_gpu`-sized
+chunks, one `nvidia-fs` mgroup each. The driver allows only one in-flight I/O per
+mgroup, so **smaller chunks = more mgroups = more concurrent same-buffer I/O**.
+The size defaults to 2 MiB and can be changed at runtime (in MiB); it is clamped
+to the largest mapping the driver accepts:
+
+```
+TINY_CU_MAX_CHUNK_MB=4 ./stress_threads /mnt/nvme_test/gds_stress.dat 16 16 200
+```
+
+Under `sudo`, pass it as an explicit assignment (`sudo TINY_CU_MAX_CHUNK_MB=4
+./…`) since sudo scrubs the environment. Bake a different default into a build
+with `make EXTRA_CFLAGS=-DTCU_DEFAULT_MAX_CHUNK_MB=4`.
 
 ---
 
