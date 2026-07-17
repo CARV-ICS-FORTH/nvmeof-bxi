@@ -2,6 +2,7 @@
 #define STATE_H
 
 #include "uthash.h"
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 struct nvfs_ioctl_metapage;
@@ -9,6 +10,8 @@ typedef struct {
   void *shadow_buf;
   volatile struct nvfs_ioctl_metapage *fence_page;
   size_t length;
+  // void *fence_alloc;
+  pthread_mutex_t io_lock;
 } tcufile_chunk_t;
 
 /* A struct to hold everything we know about a registered GPU buffer */

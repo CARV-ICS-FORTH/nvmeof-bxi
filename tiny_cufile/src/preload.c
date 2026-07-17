@@ -1,13 +1,51 @@
 #include "../cufile.h"
 #include "../include/tiny_cufile.h"
+#include <pthread.h>
 #include <stddef.h>
+
+/* The real libcufile initializes itself lazily on the first API call, and
+ * some consumers rely on that (e.g. LMCache's CuFileMemoryAllocator calls
+ * cuFileBufRegister before cuFileDriverOpen). We mirror that behavior: the
+ * registration entry points ensure the driver is up before proceeding.
+ * tiny_cu_init() is refcounted, so the single extra reference taken here is
+ * only released at process teardown -- same lifetime the real library gives
+ * its implicit initialization. */
+static pthread_mutex_t g_lazy_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_lazy_inited;
+
+static CUfileError_t ensure_driver(void) {
+  CUfileError_t status;
+  status.err = CU_FILE_SUCCESS;
+  status.cu_err = CUDA_SUCCESS;
+
+  pthread_mutex_lock(&g_lazy_lock);
+  if (!g_lazy_inited) {
+    status = tiny_cu_init();
+    if (!IS_CUFILE_ERR(status.err))
+      g_lazy_inited = 1;
+  }
+  pthread_mutex_unlock(&g_lazy_lock);
+  return status;
+}
 
 CUfileError_t cuFileDriverOpen(void) { return tiny_cu_init(); }
 
+/* cufile.h renames cuFileDriverClose to cuFileDriverClose_v2 via a macro,
+ * so this definition actually exports the _v2 symbol (matching apps compiled
+ * against the header). */
+CUfileError_t cuFileDriverClose(void) { return tiny_cu_cleanup(); }
+
+/* The real libcufile exports BOTH names; dlsym-based consumers (e.g. Python
+ * ctypes bindings) look up the unversioned one, so export it too. */
+#undef cuFileDriverClose
 CUfileError_t cuFileDriverClose(void) { return tiny_cu_cleanup(); }
 
 CUfileError_t cuFileHandleRegister(CUfileHandle_t *fh, CUfileDescr_t *descr) {
   tcufile_descr_t t_descr;
+
+  CUfileError_t status = ensure_driver();
+  if (IS_CUFILE_ERR(status.err))
+    return status;
 
   /* We only support Linux FDs in our implementation */
   if (descr->type == CU_FILE_HANDLE_TYPE_OPAQUE_FD) {
@@ -20,7 +58,7 @@ CUfileError_t cuFileHandleRegister(CUfileHandle_t *fh, CUfileDescr_t *descr) {
   }
 
   tcufile_handle_t t_fh;
-  CUfileError_t status = tiny_cu_file_register(&t_fh, &t_descr);
+  status = tiny_cu_file_register(&t_fh, &t_descr);
   if (!IS_CUFILE_ERR(status.err)) {
     *fh = (CUfileHandle_t)t_fh;
   }
@@ -34,6 +72,11 @@ void cuFileHandleDeregister(CUfileHandle_t fh) {
 CUfileError_t cuFileBufRegister(const void *bufPtr_base, size_t length,
                                 int flags) {
   (void)flags; /* Ignore flags for now since we only support local NVMe */
+
+  CUfileError_t status = ensure_driver();
+  if (IS_CUFILE_ERR(status.err))
+    return status;
+
   return tiny_cu_buf_register(bufPtr_base, length);
 }
 
