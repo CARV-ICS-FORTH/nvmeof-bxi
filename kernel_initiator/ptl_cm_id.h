@@ -127,10 +127,7 @@ void ptl_cm_id_destroy(struct ptl_cm_id *id);
  * Called by ptl_cq.c's connection-reply dispatch as well as internally. */
 int ptl_cm_id_set_state(struct ptl_cm_id *id, ptl_cm_id_e new_state);
 
-/*addr  */
-int ptl_cm_id_resolve_addr(struct ptl_cm_id *id,
-		     const struct sockaddr *src_addr,
-		     const struct sockaddr *dst_addr,
-		     unsigned long timeout_ms);
+int ptl_cm_id_resolve_addr(struct ptl_cm_id *id,const struct sockaddr *src_addr,const struct sockaddr *dst_addr,unsigned long timeout_ms);
 
+int ptl_cm_send_close_reply(struct ptl_cm_id *id);
 #endif

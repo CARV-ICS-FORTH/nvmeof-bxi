@@ -304,6 +304,41 @@ int ptl_cm_disconnect(struct ptl_cm_id *id)
 	return 0;
 }
 
+/* Sends a CLOSE_CONNECTION_REPLY to the peer that initiated the close.
+ * Runs in process context, from ptl_close_work_fn (ptl_cq.c): the handler
+ * that triggers it holds ptl_cq->drain_lock and ptl_cm_send_request() maps
+ * DMA, so it must NOT be called from the EQ callback directly. */
+int ptl_cm_send_close_reply(struct ptl_cm_id *id)
+{
+      struct ptl_conn_send_buffer *reply_buf;
+      int rc;
+
+      reply_buf = kzalloc(sizeof(*reply_buf), GFP_ATOMIC);
+      if (!reply_buf)
+              return -ENOMEM;
+
+      reply_buf->object_type = PTL_CONN_SEND_BUFFER;
+      reply_buf->conn_msg.msg_header.version  = PTL_SPDK_PROTOCOL_VERSION;
+      reply_buf->conn_msg.msg_header.msg_type = PTL_CLOSE_CONNECTION_REPLY;
+      reply_buf->conn_msg.msg_header.total_msg_size = sizeof(reply_buf->conn_msg);
+      /* self identification */
+      reply_buf->conn_msg.msg_header.peer_info.src.nid = id->self_peer.phys.nid;
+      reply_buf->conn_msg.msg_header.peer_info.src.pid = id->self_peer.phys.pid;
+      reply_buf->conn_msg.msg_header.peer_info.src.pte = PTL_CP_SERVER_PTE;
+      /* destination */
+      reply_buf->conn_msg.msg_header.peer_info.dest.nid = id->remote_peer.phys.nid;
+      reply_buf->conn_msg.msg_header.peer_info.dest.pid = id->remote_peer.phys.pid;
+      reply_buf->conn_msg.msg_header.peer_info.dest.pte = PTL_CP_SERVER_PTE;
+      /* body */
+      reply_buf->conn_msg.conn_close_reply.initiator_qp_num = id->initiator_qp_num;
+      reply_buf->conn_msg.conn_close_reply.target_qp_num    = id->target_qp_num;
+      reply_buf->conn_msg.conn_close_reply.status = PTL_OK;
+
+      rc = ptl_cm_send_request(reply_buf, id);
+      if (rc)
+              kfree(reply_buf);
+      return rc;
+}
 /* Helpers mirrored from rdma_cm_portals */
 
 

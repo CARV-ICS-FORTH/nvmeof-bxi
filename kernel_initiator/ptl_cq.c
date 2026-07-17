@@ -91,6 +91,68 @@ static void ptl_handle_close_connection_reply(ptl_event_t *event,
             msg->conn_close_reply.target_qp_num);
   PTL_DEBUG("</PTL_CLOSE_CONNECTION_REPLY>");
 }
+/* new addition 
+ * Target-initiated close (PtlPut op_type PTL_CLOSE_CONNECTION == 5). The old
+ * dispatcher hit PTL_FATAL here and the disconnect hung. We must ack with a
+ * CLOSE_CONNECTION_REPLY and raise DISCONNECTED so nvme tears down.
+ * The reply send (ptl_cm_send_close_reply -> ptl_cm_send_request: DMA map +
+ * PtlPut) may sleep, but this runs under the CQ drain_lock, so we DEFER the
+ * reply + event to process context via a work item.
+ * Requires: int ptl_cm_send_close_reply(struct ptl_cm_id *id);  (rdma_cm_portals.c)
+ */
+struct ptl_close_work {                                    
+  struct work_struct work;                                 
+  struct ptl_cm_id  *id;                                   
+};                                                         
+
+static void ptl_close_work_fn(struct work_struct *w) {     
+  struct ptl_close_work *cw =                              
+      container_of(w, struct ptl_close_work, work);        
+  struct ptl_cm_event cm_event = {0};                      
+  int rc = ptl_cm_send_close_reply(cw->id);                
+  if (rc)                                                  
+    PTL_WARN("CLOSE_CONNECTION_REPLY send failed rc=%d", rc);
+  cm_event.event  = PTL_CM_EVENT_DISCONNECTED;             
+  cm_event.status = 0;                                     
+  if (cw->id->event_handler)                              
+    cw->id->event_handler(cw->id, &cm_event);              
+  kfree(cw);                                               
+}                                                          
+/*also new */
+static void ptl_handle_close_connection(ptl_event_t *event,  
+                                        struct ptl_cq *ptl_cq) { 
+  struct ptl_conn_recv_buffer *recv_buffer = event->user_ptr;  
+  struct ptl_conn_msg *msg = recv_buffer->conn_msg;            
+  struct ptl_bxiv3_qp_map_entry *entry;                        
+  struct ptl_qp *ptl_qp = NULL;                                
+  struct ptl_close_work *cw;                                   
+  int qpn = msg->conn_close.initiator_qp_num; 
+
+  PTL_DEBUG("<PTL_CLOSE_CONNECTION> init_qp=%d tgt_qp=%d",     
+            msg->conn_close.initiator_qp_num,                  
+            msg->conn_close.target_qp_num);                    
+
+  spin_lock(&ptl_cq->bxiv3_dev->qp_map_lock);                  
+  hash_for_each_possible(ptl_cq->bxiv3_dev->qp_map, entry, node, qpn) { 
+    if (entry->key == qpn) { ptl_qp = entry->ptl_qp; break; } 
+  }                                                            
+  spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);               
+  if (NULL == ptl_qp) {                                       
+    PTL_WARN("Target-initiated close for unknown qpn %d, ignoring", qpn); 
+    return;                                                    
+  }                                                            
+
+  if (ptl_qp->ptl_id->cm_id_state != PTL_CM_DISCONNECTING &&   
+      ptl_qp->ptl_id->cm_id_state != PTL_CM_DISCONNECTED)      
+    ptl_cm_id_set_state(ptl_qp->ptl_id, PTL_CM_DISCONNECTING);    
+
+  cw = kzalloc(sizeof(*cw), GFP_ATOMIC);                      
+  if (!cw) { PTL_WARN("close_work OOM for qpn %d", qpn); return; } 
+  cw->id = ptl_qp->ptl_id;                                     
+  INIT_WORK(&cw->work, ptl_close_work_fn);                     
+  schedule_work(&cw->work); /* reply + DISCONNECTED off the drain_lock */ 
+}                                                             
+
 
 static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   struct ptl_recv_op *recv_op_meta = NULL;
