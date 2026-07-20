@@ -13,6 +13,7 @@
 #include <asm-generic/errno-base.h>
 #include <linux/err.h>
 #include <linux/hashtable.h>
+#include <linux/workqueue.h>   //new addition (defer close reply; poll fallback)
 #include <nvme.h>
 #include <portals4.h>
 #include <portals4_bxiext.h>
@@ -33,7 +34,7 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event,
   struct ptl_conn_msg *msg = recv_buffer->conn_msg;
   struct ptl_bxiv3_qp_map_entry *entry;
   struct ptl_qp *ptl_qp = NULL;
-
+  
   int qpn;
 
   qpn = msg->conn_open_reply.initiator_qp_num;
@@ -91,7 +92,8 @@ static void ptl_handle_close_connection_reply(ptl_event_t *event,
             msg->conn_close_reply.target_qp_num);
   PTL_DEBUG("</PTL_CLOSE_CONNECTION_REPLY>");
 }
-/* new addition 
+
+/* new addition ---------------------------------------------------------------
  * Target-initiated close (PtlPut op_type PTL_CLOSE_CONNECTION == 5). The old
  * dispatcher hit PTL_FATAL here and the disconnect hung. We must ack with a
  * CLOSE_CONNECTION_REPLY and raise DISCONNECTED so nvme tears down.
@@ -99,60 +101,59 @@ static void ptl_handle_close_connection_reply(ptl_event_t *event,
  * PtlPut) may sleep, but this runs under the CQ drain_lock, so we DEFER the
  * reply + event to process context via a work item.
  * Requires: int ptl_cm_send_close_reply(struct ptl_cm_id *id);  (rdma_cm_portals.c)
- */
-struct ptl_close_work {                                    
-  struct work_struct work;                                 
-  struct ptl_cm_id  *id;                                   
-};                                                         
+ * -------------------------------------------------------------------------- */
+struct ptl_close_work {                                    //new addition
+  struct work_struct work;                                 //new addition
+  struct ptl_cm_id  *id;                                   //new addition
+};                                                         //new addition
 
-static void ptl_close_work_fn(struct work_struct *w) {     
-  struct ptl_close_work *cw =                              
-      container_of(w, struct ptl_close_work, work);        
-  struct ptl_cm_event cm_event = {0};                      
-  int rc = ptl_cm_send_close_reply(cw->id);                
-  if (rc)                                                  
-    PTL_WARN("CLOSE_CONNECTION_REPLY send failed rc=%d", rc);
-  cm_event.event  = PTL_CM_EVENT_DISCONNECTED;             
-  cm_event.status = 0;                                     
-  if (cw->id->event_handler)                              
-    cw->id->event_handler(cw->id, &cm_event);              
-  kfree(cw);                                               
-}                                                          
-/*also new */
-static void ptl_handle_close_connection(ptl_event_t *event,  
-                                        struct ptl_cq *ptl_cq) { 
-  struct ptl_conn_recv_buffer *recv_buffer = event->user_ptr;  
-  struct ptl_conn_msg *msg = recv_buffer->conn_msg;            
-  struct ptl_bxiv3_qp_map_entry *entry;                        
-  struct ptl_qp *ptl_qp = NULL;                                
-  struct ptl_close_work *cw;                                   
-  int qpn = msg->conn_close.initiator_qp_num; 
+static void ptl_close_work_fn(struct work_struct *w) {     //new addition
+  struct ptl_close_work *cw =                              //new addition
+      container_of(w, struct ptl_close_work, work);        //new addition
+  struct ptl_cm_event cm_event = {0};                      //new addition
+  int rc = ptl_cm_send_close_reply(cw->id);                //new addition
+  if (rc)                                                  //new addition
+    PTL_WARN("CLOSE_CONNECTION_REPLY send failed rc=%d", rc); //new addition
+  cm_event.event  = PTL_CM_EVENT_DISCONNECTED;             //new addition
+  cm_event.status = 0;                                     //new addition
+  if (cw->id->event_handler)                               //new addition
+    cw->id->event_handler(cw->id, &cm_event);              //new addition
+  kfree(cw);                                               //new addition
+}                                                          //new addition
 
-  PTL_DEBUG("<PTL_CLOSE_CONNECTION> init_qp=%d tgt_qp=%d",     
-            msg->conn_close.initiator_qp_num,                  
-            msg->conn_close.target_qp_num);                    
+static void ptl_handle_close_connection(ptl_event_t *event,   //new addition
+                                        struct ptl_cq *ptl_cq) { //new addition
+  struct ptl_conn_recv_buffer *recv_buffer = event->user_ptr;  //new addition
+  struct ptl_conn_msg *msg = recv_buffer->conn_msg;            //new addition
+  struct ptl_bxiv3_qp_map_entry *entry;                        //new addition
+  struct ptl_qp *ptl_qp = NULL;                                //new addition
+  struct ptl_close_work *cw;                                   //new addition
+  int qpn = msg->conn_close.initiator_qp_num; /* we are initiator */ //new addition
 
-  spin_lock(&ptl_cq->bxiv3_dev->qp_map_lock);                  
-  hash_for_each_possible(ptl_cq->bxiv3_dev->qp_map, entry, node, qpn) { 
-    if (entry->key == qpn) { ptl_qp = entry->ptl_qp; break; } 
-  }                                                            
-  spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);               
-  if (NULL == ptl_qp) {                                       
-    PTL_WARN("Target-initiated close for unknown qpn %d, ignoring", qpn); 
-    return;                                                    
-  }                                                            
+  PTL_DEBUG("<PTL_CLOSE_CONNECTION> init_qp=%d tgt_qp=%d",     //new addition
+            msg->conn_close.initiator_qp_num,                  //new addition
+            msg->conn_close.target_qp_num);                    //new addition
 
-  if (ptl_qp->ptl_id->cm_id_state != PTL_CM_DISCONNECTING &&   
-      ptl_qp->ptl_id->cm_id_state != PTL_CM_DISCONNECTED)      
-    ptl_cm_id_set_state(ptl_qp->ptl_id, PTL_CM_DISCONNECTING);    
+  spin_lock(&ptl_cq->bxiv3_dev->qp_map_lock);                  //new addition
+  hash_for_each_possible(ptl_cq->bxiv3_dev->qp_map, entry, node, qpn) { //new addition
+    if (entry->key == qpn) { ptl_qp = entry->ptl_qp; break; } //new addition
+  }                                                            //new addition
+  spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);                //new addition
+  if (NULL == ptl_qp) {                                        //new addition
+    PTL_WARN("Target-initiated close for unknown qpn %d, ignoring", qpn); //new addition
+    return;                                                    //new addition
+  }                                                            //new addition
 
-  cw = kzalloc(sizeof(*cw), GFP_ATOMIC);                      
-  if (!cw) { PTL_WARN("close_work OOM for qpn %d", qpn); return; } 
-  cw->id = ptl_qp->ptl_id;                                     
-  INIT_WORK(&cw->work, ptl_close_work_fn);                     
-  schedule_work(&cw->work); /* reply + DISCONNECTED off the drain_lock */ 
-}                                                             
+  if (ptl_qp->ptl_id->cm_id_state != PTL_CM_DISCONNECTING &&   //new addition
+      ptl_qp->ptl_id->cm_id_state != PTL_CM_DISCONNECTED)      //new addition
+    ptl_cm_id_set_state(ptl_qp->ptl_id, PTL_CM_DISCONNECTING);    //new addition
 
+  cw = kzalloc(sizeof(*cw), GFP_ATOMIC);                       //new addition
+  if (!cw) { PTL_WARN("close_work OOM for qpn %d", qpn); return; } //new addition
+  cw->id = ptl_qp->ptl_id;                                     //new addition
+  INIT_WORK(&cw->work, ptl_close_work_fn);                     //new addition
+  schedule_work(&cw->work); /* reply + DISCONNECTED off the drain_lock */ //new addition
+}                                                              //new addition
 
 static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   struct ptl_recv_op *recv_op_meta = NULL;
@@ -266,6 +267,8 @@ static void ptl_cnxt_process_put(ptl_event_t event, struct ptl_cq *ptl_cq) {
     ptl_handle_open_connection_reply(&event, ptl_cq);
   } else if (PTL_CLOSE_CONNECTION_REPLY == op_type) {
     ptl_handle_close_connection_reply(&event, ptl_cq);
+  } else if (PTL_CLOSE_CONNECTION == op_type) {     //new addition
+    ptl_handle_close_connection(&event, ptl_cq);    //new addition
   } else if (NVMeOF_cmd == op_type) {
     PTL_FATAL("Got an NVMeOF_cmd. I am the initiator hello?");
   } else {
@@ -382,7 +385,14 @@ static void ptl_cnxt_process_auto_unlink(ptl_event_t event,
     PTL_FATAL("PtlLEAppend failed with reason: %s",
               PtlToStr(rc, PTL_STR_ERROR));
   }
-  kfree(recv_buffer);
+  /* new addition: the kfree(recv_buffer) that used to be here was a
+   * use-after-free. PtlLEAppend above re-links this same buffer into the
+   * priority list with recv_buffer as the LE user_ptr, so the NIC still owns
+   * it. Freeing it here means the next event on that LE carries a dangling
+   * user_ptr, gets re-appended, and is kfree()d a second time ->
+   * "kernel BUG at mm/slub.c:530" (BUG_ON(object == fp), double free).
+   * The buffer is owned by the connection and freed at connection teardown. */
+  /* kfree(recv_buffer);  <-- REMOVED (double free / UAF) */   //new addition
 }
 
 static void ptl_cnxt_process_auto_free(ptl_event_t event,
@@ -409,20 +419,23 @@ static process_event handler[16] = {
     ptl_cnxt_process_auto_unlink,  ptl_cnxt_process_auto_free,
     ptl_cnxt_process_search,       ptl_cnxt_process_link};
 
-void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh) {
-  struct ptl_cq *ptl_cq = arg;
-  ptl_event_t event;
-  int rc;
+#define PTL_CQ_POLL_MS 250   //new addition (EQ poll fallback interval)
 
-  if (PTL_CQ != ptl_cq->object_type) {
-    PTL_FATAL("Corrupted PTL_CQ");
-    return;
-  }
-
-  for (;;) {
-    rc = PtlEQGet(eqh, &event);
+/* new addition ---------------------------------------------------------------
+ * Shared drain used by BOTH the interrupt callback and the poll fallback.
+ * spin_trylock keeps the two from racing the recv_op_meta reassembly state:
+ * whoever holds drain_lock drains everything; the other bails and retries next
+ * interrupt / next poll tick. NOTE: handlers run under this spinlock, so they
+ * must not sleep - the target-initiated close defers its send to a work item.
+ * -------------------------------------------------------------------------- */
+static void ptl_eq_drain(struct ptl_cq *ptl_cq) {          //new addition
+  ptl_event_t event;                                       //new addition
+  int rc;                                                  //new addition
+  if (!spin_trylock(&ptl_cq->drain_lock))                  //new addition
+    return; /* another context already draining this EQ */ //new addition
+  for (;;) {                                               //new addition
+    rc = PtlEQGet(ptl_cq->eq, &event); /* was eqh; poller has no eqh */ //new addition
     if (rc == PTL_OK) {
-
       PTL_DEBUG(
           "Event: iface_id:%d EV:%d(%s) PTE:%d match_bits=0x%llx "
           "initiator:{nid:%d,pid:%d,pt_index: %d} ni_fail:%d(%s) fc_err:%d",
@@ -456,7 +469,29 @@ void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh) {
       break;
     }
   }
+  spin_unlock(&ptl_cq->drain_lock);                        //new addition
+}                                                          //new addition
+
+void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh) {     /* interrupt path */
+  struct ptl_cq *ptl_cq = arg;
+  (void)eqh;                                               //new addition (drain uses ptl_cq->eq)
+  if (PTL_CQ != ptl_cq->object_type) {
+    PTL_FATAL("Corrupted PTL_CQ");
+    return;
+  }
+  ptl_eq_drain(ptl_cq);                                    //new addition (was the inline loop)
 }
+
+/* new addition: timer fallback for the shared-interrupt/coalescing problem.
+ * A lone admin completion (keep-alive / reconnect Connect) can sit undrained at
+ * idle; poll every EQ so admin always makes progress even with no IO traffic. */
+static void ptl_cq_poll_work(struct work_struct *w) {      //new addition
+  struct ptl_cq *ptl_cq =                                  //new addition
+      container_of(to_delayed_work(w), struct ptl_cq, poll_work); //new addition
+  ptl_eq_drain(ptl_cq);                                    //new addition
+  schedule_delayed_work(&ptl_cq->poll_work,                //new addition
+                        msecs_to_jiffies(PTL_CQ_POLL_MS));  //new addition
+}                                                          //new addition
 
 struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
                              struct ptl_bxiv3_device *bxiv3_dev, int nr_cqes,
@@ -504,6 +539,12 @@ struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
   PTL_DEBUG("Enabled for iface_id: %d PTE: %u and created cq with %d number of "
             "entries",
             bxiv3_dev->iface_id, cq->pte, nr_cqes);
+  /* new addition: arm the poll fallback so admin completions drain even when
+   * the shared NIC interrupt does not fire at idle. */
+  spin_lock_init(&cq->drain_lock);                              //new addition
+  INIT_DELAYED_WORK(&cq->poll_work, ptl_cq_poll_work);          //new addition
+  schedule_delayed_work(&cq->poll_work,                         //new addition
+                        msecs_to_jiffies(PTL_CQ_POLL_MS));       //new addition
   return cq;
 free_cq:
   rc = PtlEQFree(cq->eq);
@@ -523,6 +564,10 @@ ptl_pt_index_t ptl_cq_destroy(struct ptl_cq *ptl_cq) {
     return -1;
   }
   pte = ptl_cq->pte;
+
+  /* new addition: stop the poll fallback before tearing down the EQ/PTE, so no
+   * poll runs against a freed event queue. sync = wait for any in-flight poll. */
+  cancel_delayed_work_sync(&ptl_cq->poll_work);   //new addition
 
   /* Free the portal table entry */
   rc = PtlPTFree(ptl_cq->bxiv3_dev->nicia_handle, ptl_cq->pte);

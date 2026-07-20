@@ -1,6 +1,8 @@
 #ifndef PTL_CQ_H
 #define PTL_CQ_H
 #include "ptl_object_types.h"
+#include <linux/spinlock.h>
+#include <linux/workqueue.h>
 #include <portals4.h>
 #include <portals4_bxiext.h>
 #include <rdma/ib_verbs.h>
@@ -20,6 +22,12 @@ struct ptl_cq {
 	struct list_head head;
 	struct ib_cq fake_cq;
 	enum ib_poll_context poll_ctx;
+	/* The NIC interrupt is shared and coalesces, so a lone admin completion
+	 * (keep-alive, reconnect Connect capsule) can sit undrained at idle.
+	 * poll_work drains this EQ on a timer as a fallback; drain_lock
+	 * serializes the interrupt path against the poller. */
+	struct delayed_work poll_work;
+	spinlock_t drain_lock;
 };
 
 /**
