@@ -390,14 +390,6 @@ int ptl_bxiv3_dev_destroy(struct ptl_bxiv3_device *bxiv3_dev) {
              "goes on",
              rc);
   }
-  /* Finalize the NI handle */
-  rc = PtlNIFini(bxiv3_dev->nicia_handle);
-  if (PTL_OK != rc) {
-    PTL_WARN("Failed to shut down nicia handle of iface id: %d with code: %d",
-             bxiv3_dev->iface_id, rc);
-    goto error;
-  }
-
   /* Destroy the pool */
   rc = ptl_cq_pool_destroy(bxiv3_dev->ptl_cq_pool);
   if (rc) {
@@ -430,6 +422,19 @@ int ptl_bxiv3_dev_destroy(struct ptl_bxiv3_device *bxiv3_dev) {
     kfree(e);
   }
   spin_unlock(&bxiv3_dev->qp_map_lock);
+
+  /* Finalize the NI LAST. PtlNIFini() tears down the NI's internal state,
+   * including the portal table that PtlPTFree()/PtlEQFree() write to. Running it
+   * before ptl_cq_pool_destroy()/ptl_cq_destroy() left every later Portals call
+   * operating on a freed NI - a use-after-free that oopsed inside PtlPTFree
+   * ("supervisor write to a not-present page") on every rmmod. Warn instead of
+   * goto error: at this point everything else is already torn down. */
+  rc = PtlNIFini(bxiv3_dev->nicia_handle);
+  if (PTL_OK != rc) {
+    PTL_WARN("Failed to shut down nicia handle of iface id: %d with code: %d",
+             bxiv3_dev->iface_id, rc);
+  }
+
   kfree(bxiv3_dev);
   return 0;
 error:

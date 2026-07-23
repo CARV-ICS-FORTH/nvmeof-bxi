@@ -316,8 +316,17 @@ static void nvme_rdma_qp_event(struct ib_event *event, void *context) {
 static int nvme_rdma_wait_for_cm(struct nvme_rdma_queue *queue) {
   int ret;
 
-  ret = wait_for_completion_interruptible(&queue->cm_done);
-  if (ret) {
+  /* Timeout restored to match upstream drivers/nvme/host/rdma.c. Without it a
+   * missing PTL_OPEN_CONNECTION_REPLY (e.g. target down) parks nvme connect
+   * forever in S state holding nvmf_dev_mutex, wedging every later connect.
+   * Return convention differs from the plain interruptible wait: >0 jiffies on
+   * success, 0 on timeout, <0 on signal. */
+  ret = wait_for_completion_interruptible_timeout(
+      &queue->cm_done, msecs_to_jiffies(NVME_RDMA_CM_TIMEOUT_MS) + 1);
+  if (ret == 0) {
+    return -ETIMEDOUT;
+  }
+  if (ret < 0) {
     return ret;
   }
   WARN_ON_ONCE(queue->cm_error > 0);
@@ -744,8 +753,13 @@ static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl, int idx,
   return 0;
 
 out_destroy_cm_id:
-  ptl_cm_id_destroy(queue->cm_id);
+  /* Order matters: nvme_rdma_destroy_queue_ib() reaches the cm_id through
+   * qp->ptl_id and type-checks it (PTL_CHECK at ib_portals.c:189), so it must
+   * run BEFORE the cm_id is freed. The reverse order is a use-after-free that
+   * BUGs the box. Same ordering as nvme_rdma_free_queue(). Safe when no QP was
+   * built: destroy_queue_ib() early-returns unless NVME_RDMA_Q_TR_READY is set. */
   nvme_rdma_destroy_queue_ib(queue);
+  ptl_cm_id_destroy(queue->cm_id);
 out_destroy_mutex:
   mutex_destroy(&queue->queue_lock);
   return ret;

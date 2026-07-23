@@ -796,8 +796,16 @@ void ib_portals_unregister_client(struct ib_client *client) {
   list_for_each_entry_safe(client_entry, tmp, &ib_portals_client_list, node) {
     if (client_entry->client == client) {
       if (client_entry->client->remove) {
-        IB_PORTALS4_UNIMPL(
-            "Sorry! I don't know how to call the remove callback");
+        /* Not fatal. This shim keeps no per-device client_data, so the
+         * remove(dev, client_data) callback cannot be reconstructed - which is
+         * exactly what the comment above says. Skipping it is safe here:
+         * nvme_rdma_cleanup_module() calls this function and then deletes every
+         * controller itself, so the cleanup still happens.
+         * This used to be IB_PORTALS4_UNIMPL(), which ends in BUG() - making
+         * every single rmmod panic the machine. */
+        IB_PORTALS4_WARN(
+            "skipping remove callback for client '%s' (no per-device tracking)",
+            client->name);
       }
       list_del(&client_entry->node);
       kfree(client_entry);

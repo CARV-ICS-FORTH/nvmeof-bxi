@@ -55,10 +55,21 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event,
   }
 
   if (NULL == ptl_qp) {
-    PTL_FATAL("No matching ptl_qp found in open_connection_reply for qp "
-              "{initator_qp_num: %d, target_qp_num: %d}",
-              msg->conn_open_reply.initiator_qp_num,
-              msg->conn_open_reply.target_qp_num);
+    /* Not fatal, and note the lock: the old code called PTL_FATAL() here, which
+     * BUG()s, while still holding qp_map_lock.
+     *
+     * A reply with no matching QP is an ordinary race, not corruption. Since
+     * nvme_rdma_wait_for_cm() gained its timeout, the initiator gives up after
+     * NVME_RDMA_CM_TIMEOUT_MS and tears the queue down; a reply that arrives
+     * after that point legitimately finds nothing in the map. Panicking on it
+     * turns a slow target into a dead initiator. Drop the stale reply instead -
+     * the connect attempt has already failed and will be retried. */
+    spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);
+    PTL_WARN("Stale open_connection_reply for qp {initiator_qp_num: %d, "
+             "target_qp_num: %d} - connection already torn down, dropping",
+             msg->conn_open_reply.initiator_qp_num,
+             msg->conn_open_reply.target_qp_num);
+    return;
   }
 
   ptl_qp->ptl_id->remote_msg_pte = msg->conn_open_reply.msg_pte;
