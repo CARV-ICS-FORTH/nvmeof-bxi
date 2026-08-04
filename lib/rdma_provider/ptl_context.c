@@ -826,8 +826,16 @@ struct ptl_context *ptl_cnxt_get(void) {
   // desired.max_waw_ordered_size = 0;
   // desired.max_war_ordered_size = 0;
   // desired.max_volatile_size = 60;
-  desired.features =
-      PTL_BXI3_DEBUG | PTL_BXI3_SERVICE; // XXX TODO XXX check again
+  /* PTL_BXI3_DEBUG deliberately NOT set (this is the "XXX TODO XXX check again").
+   * It sets ni->debug, which makes PtlMDRelease() allocate a response buffer and
+   * block inside ptlbxi_send_command() on an untimed spin - portals/cq.c:308,
+   * "while (raw_cmd_resp->rsp.valid == 0) cpu_relax();" - waiting for the NIC.
+   * Once the NIC stops answering (it starts logging fail_type=8), the CP server
+   * thread hangs there forever in rdma_run_ptl_cp_server(), never returns to
+   * PtlEQWait(), and the target silently stops accepting every subsequent
+   * connection until it is restarted.
+   * With the flag clear, the MD release is fire-and-forget and cannot block. */
+  desired.features = PTL_BXI3_SERVICE;
   // desired.bxi_max_cqs = 1;
   // desired.bxi_compute_line = 0;
   // desired.cq_mode = 0;

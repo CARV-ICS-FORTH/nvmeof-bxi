@@ -60,6 +60,18 @@
     } \
 } while(0)
 
+/* Serializes Portals calls that push commands onto the BXI NIC command queue.
+ * ptlbxi_send_command() is not thread-safe for a given command queue. The SPDK
+ * reactor thread reaches it via rdma_disconnect() -> rdma_cm_ptl_send_request()
+ * (PtlMDBind/PtlPut) when a keep-alive timeout evicts a host, while the CP
+ * server thread reaches it via PtlMDRelease()/PtlLEAppend() in
+ * rdma_run_ptl_cp_server(). Concurrent use wedged the queue: the CP server
+ * thread hung inside PtlMDRelease() forever .
+ *
+ * Do NOT hold this across PtlEQWait(): that call blocks, and holding the lock
+ * there would deadlock any thread trying to send. */
+static pthread_mutex_t ptl_cmd_queue_lock = PTHREAD_MUTEX_INITIALIZER;
+
 volatile int is_target;
 
 
@@ -196,8 +208,10 @@ static bool rdma_ptl_conn_map_remove(struct ptl_cm_id *ptl_id)
 		goto exit;
 	}
 	ret = false;
-	SPDK_PTL_FATAL("[%s] CP server: Did not find connection with qp num: %d",
-		       ptl_control_plane_server.role, ptl_id->ptl_qp_num);
+	/* Not fatal: the close handler already released the slot, so a later
+  	* rdma_destroy_id() on the same connection finds nothing. Harmless. */
+  	SPDK_PTL_WARN("[%s] CP server: Did not find connection with qp num: %d",
+          ptl_control_plane_server.role, ptl_id->ptl_qp_num);
 exit:
 	PTL_CP_SERVER_UNLOCK(&conn_map.conn_map_lock);
 	return ret;
@@ -291,8 +305,10 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 	md.eq_handle = ptl_control_plane_server.eq_handle;
 	md.ct_handle = PTL_CT_NONE;
 
+	PTL_CP_SERVER_LOCK(&ptl_cmd_queue_lock);
 	rc = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_cnxt), &md, &send_buffer->md_handle);
 	if (rc != PTL_OK) {
+		PTL_CP_SERVER_UNLOCK(&ptl_cmd_queue_lock);
 		SPDK_PTL_FATAL("PtlMDBind failed with code: %d\n", rc);
 	}
 
@@ -311,6 +327,8 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 		    0, /* remote offset */
 		    send_buffer, /* user ptr */
 		    hdr_data);
+
+	PTL_CP_SERVER_UNLOCK(&ptl_cmd_queue_lock);
 
 	if (rc != PTL_OK) {
 		SPDK_PTL_FATAL("PtlPut failed with code: %d\n", rc);
@@ -569,6 +587,13 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 	reply_buf->conn_msg.conn_close_reply.status = PTL_OK;
 	reply_buf->conn_msg.conn_close_reply.initiator_qp_num = connection_id->initiator_qp_num;
 	reply_buf->conn_msg.conn_close_reply.target_qp_num = connection_id->target_qp_num;
+	
+	/* Release the conn_map slot here: SPDK never reaches rdma_destroy_id() on
+   	* this path, so without it every close leaked one of the
+   	* RDMA_PTL_MAX_CONNECTIONS entries and the target aborted with "No room
+   	* for new connections" after 128/5 ~= 25 migrations. Must come after the
+   	* last read of connection_id above. */
+	rdma_ptl_conn_map_remove(connection_id);
 	rdma_cm_ptl_send_request(reply_buf);
 }
 
@@ -667,6 +692,7 @@ static void *rdma_run_ptl_cp_server(void *args)
 		if (event.type == PTL_EVENT_AUTO_UNLINK) {
 			SPDK_PTL_DEBUG("[%s] CP server: Got an autounlink event Re-register buffer...",
 				       ptl_control_plane_server.role);
+			PTL_CP_SERVER_LOCK(&ptl_cmd_queue_lock);
 #if PTL_USE_MATCHING
 			memset(&match_entry, 0, sizeof(match_entry));
 			match_entry.ignore_bits = 0;//RDMA_PTL_IGNORE;
@@ -701,6 +727,7 @@ static void *rdma_run_ptl_cp_server(void *args)
 					 PTL_CP_SERVER_PTE, &list_entry, PTL_PRIORITY_LIST,
 					 event.user_ptr, event.user_ptr);
 #endif
+			PTL_CP_SERVER_UNLOCK(&ptl_cmd_queue_lock);
 			if (rc != PTL_OK) {
 				SPDK_PTL_FATAL(
 					"Re-registering recv buffer failed in control plane server with code: %d\n",
@@ -719,7 +746,9 @@ static void *rdma_run_ptl_cp_server(void *args)
 		     send_buffer->conn_msg.msg_header.msg_type == PTL_CLOSE_CONNECTION)) {
 			SPDK_PTL_DEBUG("[%s] CP server: Send operation of msg with type: %s arrived, do the cleanup...",
 				       ptl_control_plane_server.role, ptl_msg_types[send_buffer->conn_msg.msg_header.msg_type]);
+			PTL_CP_SERVER_LOCK(&ptl_cmd_queue_lock);
 			PtlMDRelease(send_buffer->md_handle);
+			PTL_CP_SERVER_UNLOCK(&ptl_cmd_queue_lock);
 			free(send_buffer);
 			continue;
 		}
