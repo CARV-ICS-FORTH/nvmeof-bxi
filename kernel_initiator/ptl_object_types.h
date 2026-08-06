@@ -1,6 +1,7 @@
 #ifndef PTL_OBJECT_TYPES_H
 #define PTL_OBJECT_TYPES_H 1
 #include <linux/delay.h>
+#include <linux/ratelimit.h>
 #define PTL_VERSION 1
 
 #define PTL_MAGIC_FAKE_MR_KEY 0x12345678
@@ -12,13 +13,29 @@
 // #define PTL_RMA_ME_OPTS (PTL_ME_OP_PUT | PTL_ME_OP_GET | PTL_ME_EVENT_LINK_DISABLE | PTL_ME_EVENT_UNLINK_DISABLE | PTL_ME_EVENT_COMM_DISABLE)
 #define PTL_RMA_LE_OPTS (PTL_LE_OP_PUT | PTL_LE_OP_GET | PTL_LE_EVENT_LINK_DISABLE | PTL_LE_EVENT_UNLINK_DISABLE)
 
-/* Fatal error: log, delay a bit so it reaches logs, then BUG */
+/* Fatal error: log, delay a bit so it reaches logs, then BUG.
+ * The delay must NOT sleep: most PTL_FATAL sites run from ptl_eq_drain(), which
+ * holds drain_lock inside a threaded IRQ. msleep() there triggers
+ * "BUG: scheduling while atomic" before the intended BUG(), which is what the
+ * 2026-08-05 09:59 and 10:07 panics show. mdelay() busy-waits instead, and
+ * kdump captures the ring buffer anyway. */
 #define PTL_FATAL(fmt, ...)                                                     \
   do {                                                                          \
     pr_err("[%s:%s:%d]PTL_FATAL " fmt "\n", __FILE__, __func__, __LINE__,       \
            ##__VA_ARGS__);                                                      \
-    msleep(1000); /* sleep 1 second to avoid losing the log */                  \
+    mdelay(20); /* non-sleeping: safe under drain_lock */                       \
     BUG();                                                                      \
+  } while (0)
+
+/* Rate-limited warning, for wire-driven conditions that must never be fatal.
+ * Reuses the PTL_FATAL_RATELIMIT_* constants already defined above. */
+#define PTL_WARN_RL(fmt, ...)                                                   \
+  do {                                                                          \
+    static DEFINE_RATELIMIT_STATE(_ptl_rs, PTL_FATAL_RATELIMIT_PERIOD,          \
+                                  PTL_FATAL_RATELIMIT_BURST);                   \
+    if (__ratelimit(&_ptl_rs))                                                  \
+      pr_warn("[%s:%s:%d]PTL_WARN " fmt "\n", __FILE__, __func__, __LINE__,     \
+              ##__VA_ARGS__);                                                   \
   } while (0)
 
 

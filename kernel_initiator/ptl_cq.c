@@ -165,6 +165,37 @@ static void ptl_handle_close_connection(ptl_event_t *event,
   schedule_work(&cw->work); /* reply + DISCONNECTED off the drain_lock */ 
 }                                                             
 
+/* new addition: fail one completion instead of the whole machine.
+ * A cid that does not match the buffer it landed in is untrusted, so the only
+ * safe move is to error out that command and let NVMe retry / reset. Dropping
+ * silently would stall until the 30s command timeout, so deliver an errored wc
+ * when the slot is still usable. */
+static void ptl_fail_nvme_cpl(struct ptl_cq *ptl_cq, struct ptl_qp *ptl_qp,
+                              u16 nvme_cid) {
+  struct ptl_recv_op *recv_op_meta;
+  struct ib_wc wc;
+
+  if (nvme_cid >= ptl_qp->recv_op_meta_size)
+    return; /* cannot index safely; command will time out and reconnect */
+  recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
+  if (false == recv_op_meta->is_set || NULL == recv_op_meta->wr_cqe)
+    return; /* nothing outstanding in this slot, nothing to complete */
+
+  memset(&wc, 0, sizeof(wc));
+  wc.status = IB_WC_GENERAL_ERR;
+  wc.opcode = IB_WC_RECV;
+  wc.wr_id = recv_op_meta->wr_id;
+  wc.wr_cqe = recv_op_meta->wr_cqe;
+  wc.qp = &recv_op_meta->ptl_qp->fake_qp;
+  wc.src_qp = recv_op_meta->ptl_qp->qpn;
+
+  recv_op_meta->is_set = false;
+  recv_op_meta->late_wc_valid = false;
+  recv_op_meta->parts_num_received = 0;
+  recv_op_meta->total_parts = 0;
+  recv_op_meta->wr_cqe->done(&ptl_cq->fake_cq, &wc);
+}
+
 static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   struct ptl_recv_op *recv_op_meta = NULL;
   struct ptl_qp *ptl_qp;
@@ -175,25 +206,53 @@ static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   // recv_op = event->user_ptr;
 
   ptl_qp = event->user_ptr;
-  if (ptl_qp == NULL) {
-    PTL_FATAL("Null context? cannot happen!");
+  /* new addition: event->user_ptr is wire-derived. A stale event arriving after
+   * a reconnect can carry a pointer to a ptl_qp that was freed and reused, so
+   * neither NULL nor a bad object_type proves memory corruption - it proves the
+   * event belongs to a dead generation. Drop it rather than BUG().
+   * 2026-08-05: the :190 cid panic was fixed and the identical failure class
+   * immediately reappeared here at :214 ("Corrupted type").
+   * ponytail: still dereferences a possibly-dangling pointer to read
+   * object_type, exactly as PTL_CHECK did. Closing that needs a qp handle table
+   * instead of a raw pointer in user_ptr; this only stops the reboot. */
+  if (NULL == ptl_qp || PTL_QP != ptl_qp->object_type) {
+    PTL_WARN_RL("nvme_cpl with stale/invalid qp context %p, dropping event",
+                ptl_qp);
+    return;
   }
-  PTL_CHECK(ptl_qp, PTL_QP);
   PTL_DEBUG("nvme_cpl: got nvme_completion at addr: 0x%llx pte: %d qpn: %d",
             event->start, event->pt_index, ptl_qp->qpn);
 
   nvme_cid = ptl_uuid_get_nvme_cid(&event->hdr_data);
+  /* new addition: everything below is derived from the wire, so none of it may
+   * BUG(). A remote peer (or a stale event arriving after a reconnect) must not
+   * be able to reboot this host  */
   if (nvme_cid >= ptl_qp->recv_op_meta_size) {
-    PTL_FATAL("Wrong recv_op_meta_idx: it is: %u size is: %lu", nvme_cid,
-              ptl_qp->recv_op_meta_size);
+    PTL_WARN_RL("Wrong recv_op_meta_idx: it is: %u size is: %lu qpn: %d, "
+                "dropping event",
+                nvme_cid, ptl_qp->recv_op_meta_size, ptl_qp->qpn);
+    return;
   }
-  PTL_CHECK_NVME_CID(event, ptl_qp, nvme_cid);
+  {
+    u16 calculated_cid =
+        (u16)(((u64)event->start - (u64)ptl_qp->ptl_id->nvme_cpl_start) /
+              sizeof(struct nvme_completion));
+    if (calculated_cid != nvme_cid) {
+      PTL_WARN_RL("Corrupted nvme_cid value: %u calculated: %u qpn: %d, "
+                  "failing this completion",
+                  nvme_cid, calculated_cid, ptl_qp->qpn);
+      ptl_fail_nvme_cpl(ptl_cq, ptl_qp, nvme_cid);
+      return;
+    }
+  }
   recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
 
   // PTL_DEBUG("nvme_cpl: recv_op_meta_idx = %llu for qpn: %d",recv_op_meta_idx,
   // ptl_qp->qpn);
   if (false == recv_op_meta->is_set) {
-    PTL_FATAL("Metadata not set for qpn: %d ? Wrong", ptl_qp->qpn);
+    PTL_WARN_RL("Metadata not set for qpn: %d nvme_cid: %u, dropping event",
+                ptl_qp->qpn, nvme_cid);
+    return;
   }
   wc.status =
       event->ni_fail_type == PTL_NI_OK ? IB_WC_SUCCESS : IB_WC_LOC_PROT_ERR;
@@ -230,15 +289,19 @@ static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   struct ptl_recv_op *recv_op_meta = NULL;
   struct ptl_qp *ptl_qp = event->user_ptr;
   u16 nvme_cid;
+  
 
-  if (NULL == ptl_qp) {
-    PTL_FATAL("NULL context");
+  /* new addition: same wire-derived context as ptl_handle_nvme_cpl - a stale
+   * post-reconnect event must not be able to BUG() the host. See :214. */
+  if (NULL == ptl_qp || PTL_QP != ptl_qp->object_type) {
+    PTL_WARN_RL("rdma_write with stale/invalid qp context %p, dropping event",
+                ptl_qp);
+    return;
   }
-  PTL_CHECK(ptl_qp, PTL_QP);
 
   // sanity check
   if (event->rlength == sizeof(struct nvme_completion)) {
-    PTL_FATAL("This should not happen!");
+    PTL_WARN_RL("rdma_write sized like an nvme_completion, dropping event");
     return;
   }
 
@@ -248,6 +311,13 @@ static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq) {
             "%d queue size: %d",
             event->start, event->pt_index, ptl_qp->qpn, nvme_cid,
             ptl_qp->recv_op_meta_size);
+  /* new addition: nvme_cid is a wire value and this path had no bounds check at
+   * all - an out-of-range cid indexed recv_op_meta[] straight out of bounds. */
+  if (nvme_cid >= ptl_qp->recv_op_meta_size) {
+    PTL_WARN_RL("rdma_write cid %u out of range (size %lu) qpn: %d, dropping",
+                nvme_cid, ptl_qp->recv_op_meta_size, ptl_qp->qpn);
+    return;
+  }
   recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
   ++recv_op_meta->parts_num_received;
   PTL_DEBUG("[RDMA WRITE interrupt] Got part for {nvme cid: %u "
