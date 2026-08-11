@@ -818,10 +818,14 @@ void ib_portals_unregister_client(struct ib_client *client) {
 
 EXPORT_SYMBOL_GPL(ib_portals_unregister_client);
 
+/* Bounded retry budget for PtlLEUnlink() returning PTL_IN_USE, in 1 ms steps. */
+#define PTL_LE_UNLINK_MAX_RETRIES 100
+
 /* Draining */
 void ib_portals_drain_qp(struct ib_qp *qp) {
   struct ptl_qp *ptl_qp;
   int rc;
+  int retries;
   ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
   PTL_CHECK(ptl_qp, PTL_QP);
   PTL_DEBUG("Waiting for all pending nvme cmds to complete for "
@@ -836,12 +840,33 @@ void ib_portals_drain_qp(struct ib_qp *qp) {
   PTL_DEBUG("Unlinking LE for "
             "ptl_qp {initiator_qp_num: %d, target_qp_num: %d}...",
             ptl_qp->ptl_id->initiator_qp_num, ptl_qp->ptl_id->target_qp_num);
-  rc = PtlLEUnlink(ptl_qp->rma_leh);
+  /* PTL_IN_USE means the NIC is still touching this LE - a message landed in it
+   * while we were tearing the QP down. It is transient: retry briefly before
+   * giving up. Anything left after the budget is logged, never fatal.
+   *
+   * This used to be PTL_FATAL(), which ends in BUG() and panicked the host on
+   * every unlucky teardown . A remote-driven teardown race is not an assertion violation:
+   * the drain is best-effort and the caller proceeds to free the QP either way.
+   *
+   * Sleeping here is safe - the pending_nvme_cmds loop above already msleep()s,
+   * so this path is established as sleepable. */
+  for (retries = 0; retries < PTL_LE_UNLINK_MAX_RETRIES; retries++) {
+    rc = PtlLEUnlink(ptl_qp->rma_leh);
+    if (PTL_IN_USE != rc)
+      break;
+    msleep(1); /*Sleep for 1 millisecond*/
+  }
   if (PTL_OK != rc) {
-    PTL_FATAL("Failed to unlink receive buffer for ptl_qp: {initiator_qp_num: "
-              "%d, target_qp_num: %d}. Reason: %s",
-              ptl_qp->ptl_id->initiator_qp_num, ptl_qp->ptl_id->target_qp_num,
-              PtlToStr(rc, PTL_STR_ERROR));
+    PTL_WARN_RL("Failed to unlink receive buffer for ptl_qp: {initiator_qp_num: "
+                "%d, target_qp_num: %d} after %d retries. Reason: %s. "
+                "Continuing teardown.",
+                ptl_qp->ptl_id->initiator_qp_num, ptl_qp->ptl_id->target_qp_num,
+                retries, PtlToStr(rc, PTL_STR_ERROR));
+  } else if (retries > 0) {
+    PTL_WARN_RL("Unlinked receive buffer for ptl_qp: {initiator_qp_num: %d, "
+                "target_qp_num: %d} after %d PTL_IN_USE retries",
+                ptl_qp->ptl_id->initiator_qp_num, ptl_qp->ptl_id->target_qp_num,
+                retries);
   }
   PTL_DEBUG("Unlinking LE for "
             "ptl_qp {initiator_qp_num: %d, target_qp_num: %d}...DONE. Drain "
