@@ -66,7 +66,10 @@
  * (PtlMDBind/PtlPut) when a keep-alive timeout evicts a host, while the CP
  * server thread reaches it via PtlMDRelease()/PtlLEAppend() in
  * rdma_run_ptl_cp_server(). Concurrent use wedged the queue: the CP server
- * thread hung inside PtlMDRelease() forever .
+ * thread hung inside PtlMDRelease() forever - confirmed by gdb, stuck in
+ * ptlbxi_send_command() at portals/cq.c:308 - so it never returned to
+ * PtlEQWait() and the target went deaf to every later connection until it was
+ * restarted.
  *
  * Do NOT hold this across PtlEQWait(): that call blocks, and holding the lock
  * there would deadlock any thread trying to send. */
@@ -530,27 +533,39 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 	struct ptl_cm_id * connection_id;
 	struct rdma_ptl_send_buffer *reply_buf;
 
+	/* Everything below is wire-derived: a stale or foreign close message must not
+	 * be able to terminate the target. SPDK_PTL_FATAL ends in _exit(). A close we
+	 * cannot act on is a no-op, so log it and return.
+	 * a close for qp_num 10 - belonging to a connection from
+	 * before the target restarted - killed a freshly booted nvmf_tgt whose map
+	 * only held qp_num 1. Restart-before-connect makes that sequence routine. */
 	if (ptl_control_plane_server.protocol_version != request->msg_header.version) {
-		SPDK_PTL_FATAL("[%s], PROTOCOL versions mismatch client uses: %lu %s: %lu",
-			       ptl_control_plane_server.role, request->msg_header.version, ptl_control_plane_server.role,
-			       ptl_control_plane_server.protocol_version);
+		SPDK_PTL_WARN("[%s], PROTOCOL versions mismatch client uses: %lu %s: %lu - ignoring close",
+			      ptl_control_plane_server.role, request->msg_header.version, ptl_control_plane_server.role,
+			      ptl_control_plane_server.protocol_version);
+		return;
 	}
 
 	int initiator_qp_num = conn_close->initiator_qp_num;
 	if (initiator_qp_num == 0) {
-		SPDK_PTL_FATAL("initiator qp num == 0: Nida does not assign 0 qp numbers!");
+		SPDK_PTL_WARN("initiator qp num == 0 in close message - ignoring");
+		return;
 	}
 
 	int target_qp_num = conn_close->target_qp_num;
 	if (target_qp_num == 0) {
-		SPDK_PTL_FATAL("target qp num == 0: Nida does not assign 0 qp numbers!");
+		SPDK_PTL_WARN("target qp num == 0 in close message - ignoring");
+		return;
 	}
 
 
 	connection_id = rdma_ptl_conn_map_find_from_qp_num(is_target ? target_qp_num : initiator_qp_num);
 	if (NULL == connection_id) {
-		SPDK_PTL_FATAL("Could not find in connection map queue pair with number: %d",
-			       is_target ? target_qp_num : initiator_qp_num);
+		/* Unknown qp: almost always a close for a connection that predates this
+		 * process (target restart) or that we already tore down. Nothing to do. */
+		SPDK_PTL_WARN("Could not find in connection map queue pair with number: %d - ignoring stale close",
+			      is_target ? target_qp_num : initiator_qp_num);
+		return;
 	}
 
 	// SPDK_PTL_DEBUG("PTL_ID: found ptl_id: %p (or fake_cm_id: %p) with context: %p", connection_id,
@@ -767,12 +782,23 @@ static void *rdma_run_ptl_cp_server(void *args)
 
 		struct ptl_conn_msg *msg = event.start;
 		/*Who is it?*/
+		/* A malformed control message must not kill the target. SPDK_PTL_FATAL
+		 * ends in _exit(), each time with event.rlength = 124
+		 * - the correct size - while the received header read total_msg_size = 0.
+		 * Skip the message and go back to PtlEQWait(); the peer retries its
+		 * connect (60 attempts), so dropping one bad message is recoverable
+		 * whereas exiting is not.
+		 * Note the old message printed send_buffer->conn_msg.msg_header.msg_type,
+		 * i.e. the SEND buffer, not the message that failed the check - which is
+		 * why both crashes reported nonsense types (0x1ed79100, 0x79579100). */
 		if (event.rlength != msg->msg_header.total_msg_size) {
-			SPDK_PTL_FATAL("[%s] CP server: Wrong size received "
-				       "got: %lu should have been: %lu for message type: %d",
-				       ptl_control_plane_server.role,
-				       event.rlength,
-				       msg->msg_header.total_msg_size, send_buffer->conn_msg.msg_header.msg_type);
+			SPDK_PTL_WARN("[%s] CP server: Wrong size received "
+				      "got: %lu should have been: %lu for message type: %d - "
+				      "dropping this control message",
+				      ptl_control_plane_server.role,
+				      event.rlength,
+				      msg->msg_header.total_msg_size, msg->msg_header.msg_type);
+			continue;
 		}
 
 
