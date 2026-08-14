@@ -646,7 +646,13 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 
   while (events_processed < num_entries) {
     ret = PtlEQGet(ptl_cq_get_queue(ptl_cq), &event);
-    if (ret == PTL_OK) {
+    /* PTL_EQ_DROPPED delivers a valid event and reports that earlier ones were
+     * lost (bxi3-portals eq.c:589). Breaking on it discarded this event too. */
+    if (ret == PTL_OK || ret == PTL_EQ_DROPPED) {
+      if (ret == PTL_EQ_DROPPED) {
+        SPDK_PTL_WARN("EQ overflow on cq %d: events were dropped BEFORE this "
+                      "one - processing it and continuing", ptl_cq_get_id(ptl_cq));
+      }
       op_meta = handler[event.type](event, &wc[events_processed], ptl_cq);
       if (NULL == op_meta) {
         continue;
@@ -666,9 +672,6 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 
     } else if (ret == PTL_EQ_EMPTY) {
       // SPDK_PTL_DEBUG("No events ok COOL");
-      break;
-    } else if (ret == PTL_EQ_DROPPED) {
-      SPDK_PTL_DEBUG("Ok queue overflow break");
       break;
     } else {
       SPDK_PTL_FATAL("PtlEQGet failed with error code %d", ret);

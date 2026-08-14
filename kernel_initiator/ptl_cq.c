@@ -507,7 +507,13 @@ static void ptl_eq_drain(struct ptl_cq *ptl_cq) {
     return; /* another context already draining this EQ */ 
   for (;;) {                                               
     rc = PtlEQGet(ptl_cq->eq, &event); /* was eqh; poller has no eqh */ 
-    if (rc == PTL_OK) {
+    /* PTL_EQ_DROPPED carries a VALID event*/
+    if (rc == PTL_OK || rc == PTL_EQ_DROPPED) {
+      if (rc == PTL_EQ_DROPPED) {
+        PTL_WARN_RL("EQ overflow: events were dropped BEFORE this one on "
+                    "iface_id:%d - processing this event and continuing",
+                    ptl_cq->bxiv3_dev->iface_id);
+      }
       PTL_DEBUG(
           "Event: iface_id:%d EV:%d(%s) PTE:%d match_bits=0x%llx "
           "initiator:{nid:%d,pid:%d,pt_index: %d} ni_fail:%d(%s) fc_err:%d",
@@ -532,9 +538,6 @@ static void ptl_eq_drain(struct ptl_cq *ptl_cq) {
       handler[event.type](event, ptl_cq);
       continue;
     } else if (rc == PTL_EQ_EMPTY) {
-      break;
-    } else if (rc == PTL_EQ_DROPPED) {
-      PTL_DEBUG("EQ dropped events (overflow)");
       break;
     } else {
       PTL_FATAL("PtlEQGet unhandled code %d", rc);
