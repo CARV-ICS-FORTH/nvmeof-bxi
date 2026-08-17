@@ -1,112 +1,143 @@
-#ifndef PTL_CM_ID_H
-#define PTL_CM_ID_H
-// #include "ptl_connection.h"
-// #include "ptl_context.h"
-// #include "ptl_cq.h"
-// #include "ptl_log.h"
-// #include "ptl_pd.h"
-// #include "ptl_qp.h"
-#include "ptl_object_types.h"
+
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef _PTL_CM_ID_H
+#define _PTL_CM_ID_H
+
+#include <linux/spinlock.h>
+#include <linux/socket.h>      /* struct sockaddr, sockaddr_storage */
 #include <linux/types.h>
-#include <rdma/rdma_cm.h>
-typedef enum {
-	PTL_CM_DISCONNECTING = 0,
-	PTL_CM_DISCONNECTED,
+
+#include <portals4.h>
+#include <portals4_bxiext.h>
+
+#define PTL_INITIATOR_DEPTH 32
+
+enum ptl_cm_event_type {
+	PTL_CM_EVENT_ADDR_RESOLVED = 0,
+	PTL_CM_EVENT_ROUTE_RESOLVED,
+	PTL_CM_EVENT_CONNECT_REQUEST,
+	PTL_CM_EVENT_ESTABLISHED,
+	PTL_CM_EVENT_DISCONNECTED,
+	PTL_CM_EVENT_REJECTED,
+	PTL_CM_EVENT_ADDR_ERROR,
+	PTL_CM_EVENT_ROUTE_ERROR,
+	PTL_CM_EVENT_CONNECT_ERROR,
+	PTL_CM_EVENT_DEVICE_REMOVAL,
+	PTL_CM_EVENT_TIMEWAIT_EXIT,
+	PTL_CM_EVENT_UNREACHABLE,
+	PTL_CM_EVENT_ADDR_CHANGE,
+};
+
+enum ptl_cm_state {
+	PTL_CM_IDLE = 0,
+	PTL_CM_ADDR_RESOLVING,
+	PTL_CM_ADDR_RESOLVED,
+	PTL_CM_ROUTE_RESOLVING,
+	PTL_CM_ROUTE_RESOLVED,
 	PTL_CM_CONNECTING,
-	PTL_CM_CONNECTED,
-	PTL_CM_UNCONNECTED,
-	PTL_CM_GUARD
-} ptl_cm_id_e;
+	PTL_CM_ESTABLISHED,
+	PTL_CM_DISCONNECTING,
+	PTL_CM_DISCONNECTED,
+	PTL_CM_ERROR,
+	
+};
+
+
+struct ptl_cm_id;
+
+struct ptl_cm_event {
+	enum ptl_cm_event_type event;
+	int status;
+	const void *private_data;
+	u8 private_data_len;
+};
+
+/*
+ * Connection parameters.
+ 
+ * LAYOUT WARNING: the existing wire protocol embeds this struct BY VALUE
+ * inside conn_msg.conn_open.To stay
+ * byte-compatible with the deployed SPDK target, this struct mirrors
+ * struct rdma_conn_param field-for-field, in order. Do not reorder or
+ * resize fields. ptl_connection.h's conn_msg definition must have its
+ * conn_param member re-typed from rdma_conn_param to this struct, 
+ * identical layout => identical bytes on the wire.
+ */
+struct ptl_cm_conn_param {
+	const void *private_data;
+	u8  private_data_len;
+	u8  responder_resources;
+	u8  initiator_depth;
+	u8  flow_control;
+	u8  retry_count;
+	u8  rnr_retry_count;
+	u8  srq;
+	u32 qp_num;
+};
+
+typedef int (*ptl_cm_handler)(struct ptl_cm_id *cm_id,
+			      struct ptl_cm_event *event);
 
 struct ptl_cm_id {
-	ptl_obj_type_e object_type;
-	struct rdma_cm_id fake_cm_id;
-	spinlock_t state_lock;
-	struct net *net;
-	u16 initiator_qp_num;
-	u16 target_qp_num;
-	rdma_cm_event_handler event_handler;
-	void *event_handler_context;
+	/* user context + callback */
+	void           *context;
+	ptl_cm_handler  event_handler;
+
+	/* refcounted at create (get_net) / destroy (put_net) */
+	struct net     *net;
+
+	/* device — bound in ptl_resolve_addr(); kref_get taken there.
+	 * NULL until then; ptl_connect_locked() requires it. */
+	struct ptl_bxiv3_device *bxiv3_dev;
+
+	/* local identity, cached from bxiv3_dev->proc_id at bind time */
 	int nid;
 	int pid;
-	int remote_nid;
-	int remote_pid;
+
+	/* peer identity (nid = last IP byte << 7, pid = port) */
+	ptl_process_t   peer;
+
+	/* source address copied into conn_open.src_addr at connect */
+	struct sockaddr_storage src_addr;
+
+	/* connection identity on the wire protocol */
+	u16 initiator_qp_num;
+	u16 target_qp_num;
+
+	/* target-side resources from the open-connection reply */
 	int remote_msg_pte;
 	int remote_rma_pte;
 	int remote_cq_id;
-	u64 nvme_cpl_start;
-	u64 remote_nvme_cpl_start;
+
+	/* NVMe completion queue bookkeeping — PTL_CHECK_NVME_CID reads
+	 * ptl_qp->ptl_id->nvme_cpl_start, so these live here. Filled by
+	 * ptl_connect_locked_with_ptl_params(). */
+	u64    nvme_cpl_start;
+	u64    remote_nvme_cpl_start;
 	size_t nvme_completion_queue_size;
-	struct ptl_bxiv3_device *bxiv3_dev;
-	struct ptl_qp *ptl_qp;
-	ptl_cm_id_e cm_id_state;
-	struct rdma_conn_param param;
+
+	/* owned copy of the connect params 
+	 *freed in ptl_destroy_id) */
+	struct ptl_cm_conn_param param;
+
+	/* associated QP */
+	struct ptl_qp  *qp;
+
+	/* implementation private */
+	void           *provider_data;
+
+	/* state machine */
+	enum ptl_cm_state state;
+	spinlock_t         lock;
 };
 
-struct ptl_cm_id *ptl_cm_id_create(struct net *net,
-                                   rdma_cm_event_handler event_handler,
-                                   void *context, enum rdma_ucm_port_space ps,
-                                   enum ib_qp_type qp_type, const char *caller);
+/* Lifecycle */
+struct ptl_cm_id *ptl_create_id(struct net *net, ptl_cm_handler handler,
+				void *context);
+void ptl_destroy_id(struct ptl_cm_id *id);
 
-int ptl_cm_id_resolve_addr(struct ptl_cm_id *ptl_cm_id,
-                           struct sockaddr *src_addr,
-                           const struct sockaddr *dst_addr,
-                           unsigned long timeout_ms);
+/* State transitions are validated; returns -EINVAL on illegal moves.
+ * Called by ptl_cq.c's connection-reply dispatch as well as internally. */
+int ptl_cm_set_state(struct ptl_cm_id *id, enum ptl_cm_state new_state);
 
-// void ptl_cm_id_set_recv_cq(struct ptl_cm_id *ptl_id, struct ptl_cq *recv_cq);
-
-// void ptl_cm_id_set_send_cq(struct ptl_cm_id *ptl_id, struct ptl_cq *send_cq);
-
-// struct ptl_cm_id *ptl_cm_id_create(struct rdma_cm_ptl_event_channel *
-// event_channel, void *context);
-
-// static inline struct ptl_cm_id *ptl_cm_id_get(struct rdma_cm_id *id)
-// {
-//      struct ptl_cm_id *ptl_id =
-//              container_of(id, struct ptl_cm_id, fake_cm_id);
-//      if (PTL_CM_ID != ptl_id->object_type) {
-//              SPDK_PTL_FATAL("Corrupted PTL ID");
-//      }
-//      return ptl_id;
-// }
-// struct rdma_cm_event *ptl_cm_id_create_event(struct ptl_cm_id *ptl_id, struct
-// ptl_cm_id *listen_id,
-//              enum rdma_cm_event_type event_type);
-
-// void ptl_cm_id_add_event(struct ptl_cm_id *ptl_id,
-//                       struct rdma_cm_event *event);
-
-// // static inline struct sockaddr *
-// // rdma_cm_ptl_id_get_src_addr(struct ptl_cm_id *ptl_id)
-// // {
-// //   return &ptl_id->src_addr;
-// // }
-
-// void ptl_cm_id_set_fake_data(struct ptl_cm_id *ptl_id, const void
-// *fake_data);
-
-// static inline void ptl_cm_id_set_ptl_qp(struct ptl_cm_id *ptl_id, struct
-// ptl_qp *ptl_qp)
-// {
-//      if (ptl_id->ptl_qp) {
-//              PTL_FATAL("PTL QP already set");
-//     return;
-//      }
-//      ptl_id->ptl_qp = ptl_qp;
-//      ptl_id->fake_cm_id.qp = ptl_qp_get_ibv_qp(ptl_qp);
-// }
-
-// static inline void ptl_cm_id_set_ptl_pd(struct ptl_cm_id *ptl_id, struct
-// ptl_pd *ptl_pd)
-// {
-//      if (ptl_id->ptl_pd) {
-//              PTL_FATAL("PTL PD already set");
-//      }
-//      ptl_id->ptl_pd = ptl_pd;
-//      ptl_id->fake_cm_id.pd = ptl_pd_get_ibv_pd(ptl_pd);
-//      /*set also context as in the verbs case*/
-//      ptl_id->ptl_context = ptl_pd_get_cnxt(ptl_pd);
-//      ptl_id->fake_cm_id.context =
-//      ptl_cnxt_get_ibv_context(ptl_pd_get_cnxt(ptl_pd));
-// }
 #endif

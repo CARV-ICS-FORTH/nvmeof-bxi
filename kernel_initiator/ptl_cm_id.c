@@ -1,108 +1,158 @@
 #include "ptl_cm_id.h"
-#include "linux/cpumask.h"
-#include "linux/gfp_types.h"
-#include "linux/kref.h"
-#include "linux/slab.h"
-#include "ptl_bxiv3_dev_map.h"
-#include "ptl_bxiv3_device.h"
-#include "ptl_object_types.h"
-#include <linux/string.h>
+#include <linux/slab.h>
+#include <linux/err.h>
+#include <net/net_namespace.h>
+#include <linux/printk.h>
 
-extern struct ptl_bxiv3_dev_map bxiv3_dev_map;
-static unsigned long next_nicia_num = 0;
-struct ptl_cm_id *ptl_cm_id_create(struct net *net,
-                                   rdma_cm_event_handler event_handler,
-                                   void *context, enum rdma_ucm_port_space ps,
-                                   enum ib_qp_type qp_type,
-                                   const char *caller)
+/* State machine */
+int ptl_cm_set_state(struct ptl_cm_id *id, enum ptl_cm_state new_state)
 {
-	struct ptl_cm_id *ptl_cm_id;
-	(void)qp_type;
-	if (RDMA_PS_TCP != ps) {
-		PTL_FATAL("Sorry only RDMA_PS_TCP supported");
-		return ERR_PTR(-EOPNOTSUPP);
-	}
-	ptl_cm_id = kzalloc(sizeof(*ptl_cm_id), GFP_KERNEL);
-	if (!ptl_cm_id) {
-		return ERR_PTR(-ENOMEM);
-	}
-	ptl_cm_id->object_type = PTL_CM_ID;
-	ptl_cm_id->net = get_net(net);
-	ptl_cm_id->event_handler = event_handler;
-	ptl_cm_id->event_handler_context = context;
+	unsigned long flags;
 
-	/*Wiring staff of the og rdma_cm_id for the bottom layer of the driver to work */
-	kref_get(&bxiv3_dev_map.bxiv3_dev[next_nicia_num]->count);
-	ptl_cm_id->fake_cm_id.device =
-	        &bxiv3_dev_map.bxiv3_dev[next_nicia_num]->fake_ib_dev;
+	spin_lock_irqsave(&id->lock, flags);
 
-	ptl_cm_id->fake_cm_id.context = context;
-	ptl_cm_id->fake_cm_id.event_handler = event_handler;/*Just in case*/
-	spin_lock_init(&ptl_cm_id->state_lock);
+	if (id->state == new_state)
+		goto out;
 
+	switch (id->state) {
 
-	//  ptl_cm_id->fake_cm_id.device =
-	//     kzalloc(sizeof(*ptl_cm_id->fake_cm_id.device), GFP_KERNEL);
-	// strlcpy(ptl_cm_id->fake_cm_id.device->name, "BXIv3",
-	//    IB_DEVICE_NAME_MAX);
-	// ptl_cm_id->fake_cm_id.device->attrs.device_cap_flags =
-	//     IB_DEVICE_MEM_MGT_EXTENSIONS;
-	// ptl_cm_id->fake_cm_id.device->attrs.max_send_sge =
-	//     PTL_RDMA_MAX_INLINE_SEGMENTS;
-	// ptl_cm_id->fake_cm_id.device->num_comp_vectors = num_online_cpus();
-	ptl_cm_id->nid = -1;
-	ptl_cm_id->pid = -1;
-	PTL_DEBUG("Created a new ptl cm id from called: %s", caller);
-	return ptl_cm_id;
-}
+	case PTL_CM_IDLE:
+		if (new_state == PTL_CM_ADDR_RESOLVING ||
+		    new_state == PTL_CM_CONNECTING ||
+		    new_state == PTL_CM_ERROR)
+			break;
+		goto invalid;
 
-int ptl_cm_id_resolve_addr(struct ptl_cm_id *ptl_cm_id,
-                           struct sockaddr *src_addr,
-                           const struct sockaddr *dst_addr,
-                           unsigned long timeout_ms)
-{
+	case PTL_CM_ADDR_RESOLVING:
+		if (new_state == PTL_CM_ADDR_RESOLVED ||
+		    new_state == PTL_CM_ERROR)
+			break;
+		goto invalid;
 
-	struct sockaddr_in *addr_in;
-	struct sockaddr_in6 *addr_in6;
-	if (!ptl_cm_id || !dst_addr) {
-		return -EINVAL;
-	}
+	case PTL_CM_ADDR_RESOLVED:
+		if (new_state == PTL_CM_ROUTE_RESOLVING ||
+		    new_state == PTL_CM_CONNECTING ||
+		    new_state == PTL_CM_ERROR)
+			break;
+		goto invalid;
 
-	switch (dst_addr->sa_family) {
-	case AF_INET: {
-		addr_in = (struct sockaddr_in *)dst_addr;
+	case PTL_CM_ROUTE_RESOLVING:
+		if (new_state == PTL_CM_ROUTE_RESOLVED ||
+		    new_state == PTL_CM_ERROR)
+			break;
+		goto invalid;
 
-		/* Last byte of IPv4 address */
-		ptl_cm_id->remote_nid = ((unsigned char *)&addr_in->sin_addr.s_addr)[3];
+	case PTL_CM_ROUTE_RESOLVED:
+		if (new_state == PTL_CM_CONNECTING ||
+		    new_state == PTL_CM_ERROR)
+			break;
+		goto invalid;
 
-		/* Port number (convert from network to host byte order) */
-		ptl_cm_id->remote_pid = ntohs(addr_in->sin_port);
-		break;
-	}
-	case AF_INET6: {
-		addr_in6 = (struct sockaddr_in6 *)dst_addr;
+	case PTL_CM_CONNECTING:
+		if (new_state == PTL_CM_ESTABLISHED ||
+		    new_state == PTL_CM_ERROR)
+			break;
+		goto invalid;
 
-		/* Last byte of IPv6 address */
-		ptl_cm_id->remote_nid = addr_in6->sin6_addr.s6_addr[15];
+	case PTL_CM_ESTABLISHED:
+		if (new_state == PTL_CM_DISCONNECTING ||
+		    new_state == PTL_CM_ERROR)
+			break;
+		goto invalid;
 
-		/* Port number (convert from network to host byte order) */
-		ptl_cm_id->remote_pid = ntohs(addr_in6->sin6_port);
-		break;
-	}
+	case PTL_CM_DISCONNECTING:
+		if (new_state == PTL_CM_DISCONNECTED ||
+		    new_state == PTL_CM_ERROR)
+			break;
+		goto invalid;
+
+	case PTL_CM_DISCONNECTED:
+		if (new_state == PTL_CM_ERROR)
+			break;
+		goto invalid;
+
+	case PTL_CM_ERROR:
+		if (new_state == PTL_CM_IDLE)
+			break;
+		goto invalid;
+
 	default:
-		return -EAFNOSUPPORT;
+		goto invalid;
 	}
-	ptl_cm_id->remote_nid = ptl_cm_id->remote_nid << 7;
 
-	ptl_cm_id->bxiv3_dev = bxiv3_dev_map.bxiv3_dev[0];
-	ptl_cm_id->nid = ptl_cm_id->bxiv3_dev->proc_id.phys.nid;
-	ptl_cm_id->pid = ptl_cm_id->bxiv3_dev->proc_id.phys.pid;
-	PTL_DEBUG("Resolved Target address: {nid:%d,pid:%d} initiator is "
-	          "{nid:%d, pid:%d}",
-	          ptl_cm_id->remote_nid, ptl_cm_id->remote_pid, ptl_cm_id->nid,
-	          ptl_cm_id->pid);
-	PTL_DEBUG("Statically assign ptl_cm_id to BXIv3-1 XXX TODO XXX: spread it dynamically Ok: %s",
-	          "yes");
+	pr_debug("ptl_cm: state %d -> %d\n", id->state, new_state);
+	id->state = new_state;
+
+out:
+	spin_unlock_irqrestore(&id->lock, flags);
 	return 0;
+
+invalid:
+	pr_err("ptl_cm: invalid state transition %d -> %d\n",
+	       id->state, new_state);
+	spin_unlock_irqrestore(&id->lock, flags);
+	return -EINVAL;
 }
 
+/* Lifecycle */
+
+
+struct ptl_cm_id *ptl_create_id(struct net *net, ptl_cm_handler handler,
+				void *context)
+{
+	struct ptl_cm_id *id;
+
+	if (!handler)
+		return ERR_PTR(-EINVAL);
+
+	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	if (!id)
+		return ERR_PTR(-ENOMEM);
+
+	id->net           = get_net(net);
+	id->event_handler = handler;
+	id->context       = context;
+
+	/* device is bound later in ptl_resolve_addr(); local identity */
+	id->bxiv3_dev = NULL;
+	id->nid       = -1;
+	id->pid       = -1;
+	id->qp        = NULL;
+
+	id->state = PTL_CM_IDLE;
+	spin_lock_init(&id->lock);
+
+	pr_debug("ptl_cm: created id %p\n", id);
+	return id;
+}
+
+void ptl_destroy_id(struct ptl_cm_id *id)
+{
+	unsigned long flags;
+
+	if (!id)
+		return;
+
+	/* stop further operations; every state may transition to ERROR */
+	ptl_cm_set_state(id, PTL_CM_ERROR);
+
+	spin_lock_irqsave(&id->lock, flags);
+	id->event_handler = NULL;
+	spin_unlock_irqrestore(&id->lock, flags);
+
+	kfree((void *)id->param.private_data);
+	id->param.private_data = NULL;
+
+	/*
+	 * TODO: create-path takes kref_get(&bxiv3_dev->count) at bind
+	 * time; the matching kref_put belongs here. The old code never
+	 * put the ref (device leak). Identify the device release
+	 * function and add:
+	 *     kref_put(&id->bxiv3_dev->count, <release_fn>);
+	 */
+
+	put_net(id->net);
+
+	pr_debug("ptl_cm: destroyed id %p\n", id);
+	kfree(id);
+}

@@ -10,7 +10,6 @@
 #include "ptl_object_types.h"
 #include "ptl_recv_op.h"
 #include "ptl_uuid.h"
-#include "rdma/rdma_cm.h"
 #include <asm-generic/errno-base.h>
 #include <linux/err.h>
 #include <linux/hashtable.h>
@@ -29,13 +28,13 @@ static void ptl_cnxt_process_get_overflow(ptl_event_t event,
 
 static void ptl_handle_open_connection_reply(ptl_event_t *event,
                                              struct ptl_cq *ptl_cq) {
-  struct rdma_cm_event *cm_event = NULL;
+  struct ptl_cm_event cm_event = {0};
   struct ptl_conn_recv_buffer *recv_buffer = event->user_ptr;
   struct ptl_conn_msg *msg = recv_buffer->conn_msg;
   struct ptl_bxiv3_qp_map_entry *entry;
   struct ptl_qp *ptl_qp = NULL;
+  struct ptl_cm_id *id;
   int qpn;
-  cm_event = kzalloc(sizeof(*cm_event), GFP_KERNEL);
 
   qpn = msg->conn_open_reply.initiator_qp_num;
   PTL_DEBUG("<PTL_OPEN_CONNECTION_REPLY> rlength: %llu mlength: %llu",
@@ -58,24 +57,23 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event,
               msg->conn_open_reply.target_qp_num);
   }
 
-  ptl_qp->ptl_id->remote_msg_pte = msg->conn_open_reply.msg_pte;
-  ptl_qp->ptl_id->remote_rma_pte = msg->conn_open_reply.rma_pte;
-  ptl_qp->ptl_id->remote_cq_id = msg->conn_open_reply.cq_id;
-  ptl_qp->ptl_id->initiator_qp_num = msg->conn_open_reply.initiator_qp_num;
-  ptl_qp->ptl_id->target_qp_num = msg->conn_open_reply.target_qp_num;
-  ptl_qp->ptl_id->remote_cq_id = msg->conn_open_reply.cq_id;
+  id= ptl_qp->ptl_id;
+	id->remote_msg_pte = msg->conn_open_reply.msg_pte;
+	id->remote_rma_pte = msg->conn_open_reply.rma_pte;
+	id->remote_cq_id = msg->conn_open_reply.cq_id;
+	id->initiator_qp_num = msg->conn_open_reply.initiator_qp_num;
+	id->target_qp_num = msg->conn_open_reply.target_qp_num;
 
   spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);
-  if (NULL == ptl_qp) {
-    PTL_WARN("QPN: %d not found!, is Target ok in its health?", qpn);
-    cm_event->event = RDMA_CM_EVENT_CONNECT_ERROR;
-    cm_event->status = -ENETUNREACH;
-  } else {
-    cm_event->event = RDMA_CM_EVENT_ESTABLISHED;
-  }
-
-  ptl_qp->ptl_id->event_handler(&ptl_qp->ptl_id->fake_cm_id, cm_event);
-  PTL_DEBUG("</PTL_OPEN_CONNECTION_REPLY> QPN: %d FOUND", qpn);
+	if(ptl_cm_set_state(id,PTL_CM_ESTABLISHED)){
+		PTL_WARN("QPN: %d reply arrived in unexpected CM state %d",
+			 qpn, id->state);
+		return;
+	}
+	cm_event.event=PTL_CM_EVENT_ESTABLISHED;
+	cm_event.status=0;
+	if (id->event_handler) id->event_handler(id, &cm_event);
+	PTL_DEBUG("</PTL_OPEN_CONNECTION_REPLY> QPN: %d FOUND", qpn);
 }
 
 static void ptl_handle_close_connection_reply(ptl_event_t *event,
@@ -367,13 +365,18 @@ void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh) {
           (unsigned long long)event.match_bits, event.initiator.phys.nid,
           event.initiator.phys.pid, event.pt_index, event.ni_fail_type,
           PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE), event.fc_err);
-      if (event.type > sizeof(handler) / sizeof(handler[0])) {
+      if (event.type >= sizeof(handler) / sizeof(handler[0])) {
         PTL_FATAL("Cannot handle event of type: %d", event.type);
       }
-      if (event.ni_fail_type != PTL_OK) {
-        PTL_FATAL("Oops error: reason %s",
-                  PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE));
-      }
+      if (event.ni_fail_type != PTL_NI_OK) {
+    pr_warn_ratelimited(
+        "[%s:%s:%d] PTL: ni_fail %d(%s) on event %d(%s) from {nid:%d,pid:%d}, "
+        "delivering errored completion\n",
+        __FILE__, __func__, __LINE__,
+        event.ni_fail_type, PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE),
+        event.type, PtlToStr(event.type, PTL_STR_EVENT),
+        event.initiator.phys.nid, event.initiator.phys.pid);
+}
       handler[event.type](event, ptl_cq);
       continue;
     } else if (rc == PTL_EQ_EMPTY) {
