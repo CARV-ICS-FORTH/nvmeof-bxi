@@ -60,19 +60,10 @@
     } \
 } while(0)
 
-/* Serializes Portals calls that push commands onto the BXI NIC command queue.
- * ptlbxi_send_command() is not thread-safe for a given command queue. The SPDK
- * reactor thread reaches it via rdma_disconnect() -> rdma_cm_ptl_send_request()
- * (PtlMDBind/PtlPut) when a keep-alive timeout evicts a host, while the CP
- * server thread reaches it via PtlMDRelease()/PtlLEAppend() in
- * rdma_run_ptl_cp_server(). Concurrent use wedged the queue: the CP server
- * thread hung inside PtlMDRelease() forever - confirmed by gdb, stuck in
- * ptlbxi_send_command() at portals/cq.c:308 - so it never returned to
- * PtlEQWait() and the target went deaf to every later connection until it was
- * restarted.
- *
- * Do NOT hold this across PtlEQWait(): that call blocks, and holding the lock
- * there would deadlock any thread trying to send. */
+/* Serializes the Portals calls that push commands onto the BXI NIC command queue,
+ * which ptlbxi_send_command() does not make thread-safe: the SPDK reactor reaches
+ * it via rdma_disconnect() while the CP server thread reaches it via
+ * PtlMDRelease()/PtlLEAppend(). Do NOT hold it across PtlEQWait(). */
 static pthread_mutex_t ptl_cmd_queue_lock = PTHREAD_MUTEX_INITIALIZER;
 
 volatile int is_target;
@@ -533,12 +524,9 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 	struct ptl_cm_id * connection_id;
 	struct rdma_ptl_send_buffer *reply_buf;
 
-	/* Everything below is wire-derived: a stale or foreign close message must not
-	 * be able to terminate the target. SPDK_PTL_FATAL ends in _exit(). A close we
-	 * cannot act on is a no-op, so log it and return.
-	 * a close for qp_num 10 - belonging to a connection from
-	 * before the target restarted - killed a freshly booted nvmf_tgt whose map
-	 * only held qp_num 1. Restart-before-connect makes that sequence routine. */
+	/* Everything below is wire-derived and SPDK_PTL_FATAL ends in _exit(), so a
+	 * stale or foreign close - e.g. one naming a connection from before the
+	 * target restarted - is logged and ignored rather than fatal. */
 	if (ptl_control_plane_server.protocol_version != request->msg_header.version) {
 		SPDK_PTL_WARN("[%s], PROTOCOL versions mismatch client uses: %lu %s: %lu - ignoring close",
 			      ptl_control_plane_server.role, request->msg_header.version, ptl_control_plane_server.role,
@@ -603,11 +591,9 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 	reply_buf->conn_msg.conn_close_reply.initiator_qp_num = connection_id->initiator_qp_num;
 	reply_buf->conn_msg.conn_close_reply.target_qp_num = connection_id->target_qp_num;
 	
-	/* Release the conn_map slot here: SPDK never reaches rdma_destroy_id() on
-   	* this path, so without it every close leaked one of the
-   	* RDMA_PTL_MAX_CONNECTIONS entries and the target aborted with "No room
-   	* for new connections" after 128/5 ~= 25 migrations. Must come after the
-   	* last read of connection_id above. */
+	/* Release the conn_map slot here: SPDK never reaches rdma_destroy_id() on this
+	 * path, so every close leaked an entry until the target ran out of them. Must
+	 * come after the last read of connection_id above. */
 	rdma_ptl_conn_map_remove(connection_id);
 	rdma_cm_ptl_send_request(reply_buf);
 }
@@ -782,15 +768,9 @@ static void *rdma_run_ptl_cp_server(void *args)
 
 		struct ptl_conn_msg *msg = event.start;
 		/*Who is it?*/
-		/* A malformed control message must not kill the target. SPDK_PTL_FATAL
-		 * ends in _exit(), each time with event.rlength = 124
-		 * - the correct size - while the received header read total_msg_size = 0.
-		 * Skip the message and go back to PtlEQWait(); the peer retries its
-		 * connect (60 attempts), so dropping one bad message is recoverable
-		 * whereas exiting is not.
-		 * Note the old message printed send_buffer->conn_msg.msg_header.msg_type,
-		 * i.e. the SEND buffer, not the message that failed the check - which is
-		 * why both crashes reported nonsense types (0x1ed79100, 0x79579100). */
+		/* A malformed control message must not kill the target - SPDK_PTL_FATAL
+		 * ends in _exit(). Skip it and go back to PtlEQWait(); the peer retries
+		 * its connect, so dropping one bad message is recoverable. */
 		if (event.rlength != msg->msg_header.total_msg_size) {
 			SPDK_PTL_WARN("[%s] CP server: Wrong size received "
 				      "got: %lu should have been: %lu for message type: %d - "

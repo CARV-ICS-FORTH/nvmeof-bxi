@@ -205,18 +205,9 @@ int ib_portals_destroy_qp(struct ib_qp *qp) {
    * here.
    */
 
-  /* This used to read "rma_le, rma_leh has been destroyed during drain qp" and
-   * do nothing. The assumption does not hold - not every teardown path drains,
-   * and a QP freed with its LE still posted leaves the NIC holding a user_ptr
-   * into freed memory, on a PTE that ptl_cq_pool hands to the next connection.
-   * Unlink unconditionally; the helper is a no-op when the drain already ran.
-   * MUST stay ahead of the PTE free and the kfree() below.
-   *
-   * The still-linked case is logged, and deliberately at WARN: it means a
-   * teardown reached destroy without draining, which is exactly the condition
-   * that used to strand the LE. It is also the only externally visible sign that
-   * this fix did any work - the unlink itself succeeds silently, so without this
-   * line a clean run cannot be told from a run where the path never executed. */
+  /* Unlink unconditionally: not every teardown path drains, and a QP freed with
+   * its LE still posted leaves the NIC holding a freed user_ptr. Must stay ahead
+   * of the PTE free and the kfree() below. */
   if (ptl_qp->rma_le_linked) {
     PTL_WARN_RL("destroy_qp: rma_le still linked on PTE %d for ptl_qp "
                 "{initiator_qp_num: %d, target_qp_num: %d} - this teardown "
@@ -821,13 +812,9 @@ void ib_portals_unregister_client(struct ib_client *client) {
   list_for_each_entry_safe(client_entry, tmp, &ib_portals_client_list, node) {
     if (client_entry->client == client) {
       if (client_entry->client->remove) {
-        /* Not fatal. This shim keeps no per-device client_data, so the
-         * remove(dev, client_data) callback cannot be reconstructed - which is
-         * exactly what the comment above says. Skipping it is safe here:
-         * nvme_rdma_cleanup_module() calls this function and then deletes every
-         * controller itself, so the cleanup still happens.
-         * This used to be IB_PORTALS4_UNIMPL(), which ends in BUG() - making
-         * every single rmmod panic the machine. */
+        /* Not fatal: this shim keeps no per-device client_data, so the remove
+         * callback cannot be reconstructed, and nvme_rdma_cleanup_module()
+         * deletes the controllers itself. Was UNIMPL(), which BUG()s on rmmod. */
         IB_PORTALS4_WARN(
             "skipping remove callback for client '%s' (no per-device tracking)",
             client->name);
@@ -846,27 +833,10 @@ EXPORT_SYMBOL_GPL(ib_portals_unregister_client);
 /* Bounded retry budget for PtlLEUnlink() returning PTL_IN_USE, in 1 ms steps. */
 #define PTL_LE_UNLINK_MAX_RETRIES 100
 
-/* Unlink the QP's rma_le, once. Idempotent: a no-op if the LE is not currently
- * linked, so every teardown path may call it unconditionally.
- *
- * This exists as a helper because the LE carries the ptl_qp as its user_ptr, so
- * the LE must never outlive the object. Draining used to be the only caller,
- * and ib_portals_destroy_qp() simply assumed the drain had happened ("rma_le,
- * rma_leh has been destroyed during drain qp"). That assumption is false: a
- * capture on 2026-08-13 created 5 QPs, completed 2 drains, and destroyed all 5.
- * The 3 LEs left posted kept pointing at memory that was then kfree()d, and
- * because the CQ - and with it the PTE - goes back to ptl_cq_pool for reuse,
- * the next connection inherited them. An incoming message matches the older LE
- * in PTL_PRIORITY_LIST first, so ptl_handle_nvme_cpl() got a freed user_ptr and
- * dropped a live completion ("nvme_cpl with stale/invalid qp context"). One
- * dropped I/O-queue Connect completion is enough to hang nvme connect for 60 s,
- * and the stale LEs accumulate with every teardown that skips the drain - which
- * is why only a module reload cleared it.
- *
- * MUST be called from a sleepable context: the PTL_IN_USE retry msleep()s.
- * §117 panicked a host with "BUG: scheduling while atomic" by sleeping in a
- * threaded IRQ - might_sleep() makes any such caller announce itself loudly
- * instead of crashing obscurely later. */
+/* Unlink the QP's rma_le, once. Idempotent, so every teardown path may call it
+ * unconditionally. The LE carries the ptl_qp as its user_ptr and must not outlive
+ * it: a stale LE on a recycled PTE hands a freed pointer to ptl_handle_nvme_cpl().
+ * Sleepable context only - the PTL_IN_USE retry msleep()s. */
 static void ib_portals_unlink_rma_le(struct ptl_qp *ptl_qp, const char *who) {
   int rc = PTL_OK;
   int retries;
@@ -876,14 +846,9 @@ static void ib_portals_unlink_rma_le(struct ptl_qp *ptl_qp, const char *who) {
   if (!ptl_qp->rma_le_linked)
     return;
 
-  /* PTL_IN_USE means the NIC is still touching this LE - a message landed in it
-   * while we were tearing the QP down. It is transient: retry briefly before
-   * giving up. Anything left after the budget is logged, never fatal.
-   *
-   * This used to be PTL_FATAL(), which ends in BUG() and panicked the host on
-   * every unlucky teardown. A remote-driven teardown race is not an assertion
-   * violation: the drain is best-effort and the caller proceeds to free the QP
-   * either way. */
+  /* PTL_IN_USE means the NIC is still touching this LE; it is transient, so
+   * retry briefly and log rather than BUG() - a teardown race is not an
+   * assertion violation. */
   for (retries = 0; retries < PTL_LE_UNLINK_MAX_RETRIES; retries++) {
     rc = PtlLEUnlink(ptl_qp->rma_leh);
     if (PTL_IN_USE != rc)
@@ -892,10 +857,8 @@ static void ib_portals_unlink_rma_le(struct ptl_qp *ptl_qp, const char *who) {
   }
 
   if (PTL_OK != rc) {
-    /* The LE is still posted and this QP is about to be freed. Nothing more can
-     * be done from here, but say so: this is the state that strands a recycled
-     * PTE with a dangling user_ptr, and ptl_handle_nvme_cpl()'s guard is the
-     * only thing standing between it and a use-after-free. */
+    /* LE still posted with the QP about to be freed: this is the state that
+     * strands a recycled PTE with a dangling user_ptr. */
     PTL_WARN_RL("%s: failed to unlink receive buffer for ptl_qp: "
                 "{initiator_qp_num: %d, target_qp_num: %d} after %d retries. "
                 "Reason: %s. The LE stays posted on PTE %d - completions "

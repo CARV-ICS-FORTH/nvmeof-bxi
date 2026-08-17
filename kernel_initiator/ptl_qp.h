@@ -16,10 +16,8 @@ struct ptl_qp {
 	/*The one and only list entry for all data plus nvme completions*/
 	ptl_le_t rma_le;
 	ptl_handle_le_t rma_leh;
-	/* True between a successful PtlLEAppend() and a successful PtlLEUnlink().
-	 * The LE carries this ptl_qp as its user_ptr, so it MUST NOT outlive the
-	 * object: a stale LE left on a recycled PTE hands a freed pointer to
-	 * ptl_handle_nvme_cpl(). See ib_portals_unlink_rma_le(). */
+	/* True between a successful PtlLEAppend() and a successful PtlLEUnlink(). The
+	 * LE carries this ptl_qp as its user_ptr and must not outlive the object. */
 	bool rma_le_linked;
 	/*For each nvme_cpl we keep metadata*/
 	struct ptl_recv_op *recv_op_meta;

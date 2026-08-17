@@ -55,15 +55,9 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event,
   }
 
   if (NULL == ptl_qp) {
-    /* Not fatal, and note the lock: the old code called PTL_FATAL() here, which
-     * BUG()s, while still holding qp_map_lock.
-     *
-     * A reply with no matching QP is an ordinary race, not corruption. Since
-     * nvme_rdma_wait_for_cm() gained its timeout, the initiator gives up after
-     * NVME_RDMA_CM_TIMEOUT_MS and tears the queue down; a reply that arrives
-     * after that point legitimately finds nothing in the map. Panicking on it
-     * turns a slow target into a dead initiator. Drop the stale reply instead -
-     * the connect attempt has already failed and will be retried. */
+    /* Not fatal: a reply with no matching QP is an ordinary race once
+     * nvme_rdma_wait_for_cm() times out and tears the queue down. Note the
+     * unlock - the old PTL_FATAL() BUG()ed while holding qp_map_lock. */
     spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);
     PTL_WARN("Stale open_connection_reply for qp {initiator_qp_num: %d, "
              "target_qp_num: %d} - connection already torn down, dropping",
@@ -104,14 +98,9 @@ static void ptl_handle_close_connection_reply(ptl_event_t *event,
   PTL_DEBUG("</PTL_CLOSE_CONNECTION_REPLY>");
 }
 
-/* new addition
- * Target-initiated close (PtlPut op_type PTL_CLOSE_CONNECTION == 5). The old
- * dispatcher hit PTL_FATAL here and the disconnect hung. We must ack with a
- * CLOSE_CONNECTION_REPLY and raise DISCONNECTED so nvme tears down.
- * The reply send (ptl_cm_send_close_reply -> ptl_cm_send_request: DMA map +
- * PtlPut) may sleep, but this runs under the CQ drain_lock, so we DEFER the
- * reply + event to process context via a work item.
- * Requires: int ptl_cm_send_close_reply(struct ptl_cm_id *id);  (rdma_cm_portals.c) */
+/* Target-initiated close (PTL_CLOSE_CONNECTION): ack with a CLOSE_CONNECTION_REPLY
+ * and raise DISCONNECTED so nvme tears down. The reply send may sleep and this
+ * runs under drain_lock, so it is deferred to a work item. */
 struct ptl_close_work {                                    
   struct work_struct work;                                
   struct ptl_cm_id  *id;                                  
@@ -165,11 +154,9 @@ static void ptl_handle_close_connection(ptl_event_t *event,
   schedule_work(&cw->work); /* reply + DISCONNECTED off the drain_lock */ 
 }                                                             
 
-/* new addition: fail one completion instead of the whole machine.
- * A cid that does not match the buffer it landed in is untrusted, so the only
- * safe move is to error out that command and let NVMe retry / reset. Dropping
- * silently would stall until the 30s command timeout, so deliver an errored wc
- * when the slot is still usable. */
+/* Fail one completion instead of the whole machine: a cid that disagrees with the
+ * buffer it landed in is untrusted, so deliver an errored wc and let NVMe retry
+ * rather than stalling until the 30 s command timeout. */
 static void ptl_fail_nvme_cpl(struct ptl_cq *ptl_cq, struct ptl_qp *ptl_qp,
                               u16 nvme_cid) {
   struct ptl_recv_op *recv_op_meta;
@@ -206,15 +193,10 @@ static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   // recv_op = event->user_ptr;
 
   ptl_qp = event->user_ptr;
-  /* new addition: event->user_ptr is wire-derived. A stale event arriving after
-   * a reconnect can carry a pointer to a ptl_qp that was freed and reused, so
-   * neither NULL nor a bad object_type proves memory corruption - it proves the
-   * event belongs to a dead generation. Drop it rather than BUG().
-   * 2026-08-05: the :190 cid panic was fixed and the identical failure class
-   * immediately reappeared here at :214 ("Corrupted type").
-   * ponytail: still dereferences a possibly-dangling pointer to read
-   * object_type, exactly as PTL_CHECK did. Closing that needs a qp handle table
-   * instead of a raw pointer in user_ptr; this only stops the reboot. */
+  /* user_ptr is wire-derived: a stale event after a reconnect can name a ptl_qp
+   * that was freed and reused, so drop it rather than BUG().
+   * ponytail: still dereferences a possibly-dangling pointer; closing that needs
+   * a qp handle table instead of a raw pointer in user_ptr. */
   if (NULL == ptl_qp || PTL_QP != ptl_qp->object_type) {
     PTL_WARN_RL("nvme_cpl with stale/invalid qp context %p, dropping event",
                 ptl_qp);
@@ -493,13 +475,9 @@ static process_event handler[16] = {
 
 #define PTL_CQ_POLL_MS 250   //new addition (EQ poll fallback interval)
 
-/* new addition ---------------------------------------------------------------
- * Shared drain used by BOTH the interrupt callback and the poll fallback.
- * spin_trylock keeps the two from racing the recv_op_meta reassembly state:
- * whoever holds drain_lock drains everything; the other bails and retries next
- * interrupt / next poll tick. NOTE: handlers run under this spinlock, so they
- * must not sleep - the target-initiated close defers its send to a work item.
- * -------------------------------------------------------------------------- */
+/* Shared drain used by both the interrupt callback and the poll fallback;
+ * spin_trylock keeps the two off each other's reassembly state. Handlers run
+ * under this spinlock and must not sleep. */
 static void ptl_eq_drain(struct ptl_cq *ptl_cq) {         
   ptl_event_t event;                                       
   int rc;                                                  

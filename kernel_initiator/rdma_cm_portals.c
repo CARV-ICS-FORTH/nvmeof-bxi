@@ -15,11 +15,8 @@
 #include "ib_portals.h"        /* ib_portals_dma_* wrappers (virt-DMA corner case) */
 #include "ptl_bxiv3_dev_map.h"
 #include "ptl_bxiv3_device.h"
-/*
-* ptl_connection.h provides struct ptl_conn_msg / ptl_conn_send_buffer,
-* PTL_SPDK_PROTOCOL_VERSION, PTL_OPEN_CONNECTION / PTL_CLOSE_CONNECTION,
-* PTL_CP_SERVER_PTE, PTL_INITIATOR_DEPTH.
- */
+/* ptl_connection.h provides conn_msg / conn_send_buffer, the protocol version,
+ * the OPEN/CLOSE_CONNECTION op types, PTL_CP_SERVER_PTE and PTL_INITIATOR_DEPTH. */
  #include "ptl_pd.h"
  #include "ptl_uuid.h"
 #include "ptl_connection.h"
@@ -98,10 +95,7 @@ static int ptl_cm_send_request(struct ptl_conn_send_buffer *send_buffer,
 
 int ptl_cm_resolve_route(struct ptl_cm_id *id, unsigned long timeout_ms)
 {
-	/**
-	 * XXX TODO XXX Think if we need here to do something like ping the
-	 * targer or something similar
-	 */
+	/* XXX TODO XXX consider pinging the target here. */
 	struct ptl_cm_event ev = {0};
 	int rc;
 
@@ -304,10 +298,8 @@ int ptl_cm_disconnect(struct ptl_cm_id *id)
 	return 0;
 }
 
-/* Sends a CLOSE_CONNECTION_REPLY to the peer that initiated the close.
- * Runs in process context, from ptl_close_work_fn (ptl_cq.c): the handler
- * that triggers it holds ptl_cq->drain_lock and ptl_cm_send_request() maps
- * DMA, so it must NOT be called from the EQ callback directly. */
+/* Sends a CLOSE_CONNECTION_REPLY to the peer that initiated the close. Process
+ * context only: the triggering handler holds drain_lock and this maps DMA. */
 int ptl_cm_send_close_reply(struct ptl_cm_id *id)
 {
       struct ptl_conn_send_buffer *reply_buf;

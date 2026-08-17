@@ -10,12 +10,9 @@
 #include <portals4.h>
 #include <portals4_bxiext.h>
 #include"ptl_cm_id.h"
-/*
- * Speaks the EXISTING conn_msg wire protocol (PTL_SPDK_PROTOCOL_VERSION,
- * PTL_OPEN_CONNECTION / PTL_CLOSE_CONNECTION over PTL_CP_SERVER_PTE), so
- * the deployed SPDK target keeps understanding. Connection replies
- * arrive on the device's conn_mgmt EQ and are dispatched by ptl_cq.c
- */
+/* Speaks the existing conn_msg wire protocol over PTL_CP_SERVER_PTE, so the
+ * deployed SPDK target keeps understanding it. Replies arrive on the device's
+ * conn_mgmt EQ and are dispatched by ptl_cq.c. */
 
 /* Forward declarations */
 struct ptl_qp;

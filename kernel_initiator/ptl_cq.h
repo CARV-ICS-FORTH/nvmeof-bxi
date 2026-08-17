@@ -22,10 +22,8 @@ struct ptl_cq {
 	struct list_head head;
 	struct ib_cq fake_cq;
 	enum ib_poll_context poll_ctx;
-	/* The NIC interrupt is shared and coalesces, so a lone admin completion
-	 * (keep-alive, reconnect Connect capsule) can sit undrained at idle.
-	 * poll_work drains this EQ on a timer as a fallback; drain_lock
-	 * serializes the interrupt path against the poller. */
+	/* The NIC interrupt is shared and coalesces, so a lone admin completion can
+	 * sit undrained at idle; poll_work drains this EQ on a timer as a fallback. */
 	struct delayed_work poll_work;
 	spinlock_t drain_lock;
 };

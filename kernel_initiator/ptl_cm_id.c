@@ -159,13 +159,8 @@ void ptl_cm_id_destroy(struct ptl_cm_id *id)
     kfree((void *)id->param.private_data);
     id->param.private_data = NULL;
 
-    /*
-     * TODO: create-path takes kref_get(&bxiv3_dev->count) at bind
-     * time; the matching kref_put belongs here. The old code never
-     * put the ref (device leak). Identify the device release
-     * function and add:
-     *     kref_put(&id->bxiv3_dev->count, <release_fn>);
-     */
+    /* TODO: the create path takes kref_get(&bxiv3_dev->count) at bind time and
+     * the matching kref_put belongs here, once a device release fn exists. */
 
     put_net(id->net);
 

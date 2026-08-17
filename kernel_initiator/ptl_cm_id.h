@@ -52,17 +52,11 @@ struct ptl_cm_event {
 	u8 private_data_len;
 };
 
-/*
- * Connection parameters.
-
- * LAYOUT WARNING: the existing wire protocol embeds this struct BY VALUE
- * inside conn_msg.conn_open.To stay
- * byte-compatible with the deployed SPDK target, this struct mirrors
- * struct rdma_conn_param field-for-field, in order. Do not reorder or
- * resize fields. ptl_connection.h's conn_msg definition must have its
- * conn_param member re-typed from rdma_conn_param to this struct,
- * identical layout => identical bytes on the wire.
- */
+/* Connection parameters.
+ *
+ * LAYOUT WARNING: embedded by value in conn_msg.conn_open, so it must mirror
+ * struct rdma_conn_param field-for-field to stay byte-compatible with the
+ * deployed SPDK target. Do not reorder or resize fields. */
 struct ptl_cm_conn_param {
 	const void *private_data;
 	u8  private_data_len;
