@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
-#include "ptl_cm.h"
+#include "rdma_cm_portals.h"
 
 #include<linux/container_of.h>
+#include <linux/err.h>         /* ERR_PTR / IS_ERR */
 #include <linux/errno.h>
 #include <linux/in.h>          /* struct sockaddr_in, ntohs */
 #include <linux/in6.h>         /* struct sockaddr_in6 */
@@ -11,6 +12,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/build_bug.h>
+#include "ib_portals.h"        /* ib_portals_dma_* wrappers (virt-DMA corner case) */
 #include "ptl_bxiv3_dev_map.h"
 #include "ptl_bxiv3_device.h"
 /*
@@ -35,9 +37,9 @@ extern struct ptl_bxiv3_dev_map bxiv3_dev_map;
 /* by the existing ptl_cq.c dispatch, keyed on object_type ==          */
 /* PTL_CONN_SEND_BUFFER).                                              */
 /*                                                                     */
-/* Changes vs the old body: no container_of/fake_ib_dev — the DMA      */
-/* mapping goes straight through PtlGetDriverDev(nicia_handle),        */
-/* removing the ib_portals dependency. */
+/* DMA goes through the ib_portals_dma_* wrappers, not the kernel      */
+/* dma_* API directly: they carry the virt-DMA corner case             */
+/* (ib_portals_uses_virt_dma). Replacing ib_portals is a later MR.     */
 /* ------------------------------------------------------------------ */
 
 static int ptl_cm_send_request(struct ptl_conn_send_buffer *send_buffer,
@@ -45,7 +47,6 @@ static int ptl_cm_send_request(struct ptl_conn_send_buffer *send_buffer,
 {
 	struct ptl_conn_comm_pair_info *peer_info =
 		&send_buffer->conn_msg.msg_header.peer_info;
-	struct device *dma_dev;
 	ptl_process_t target;
 	int rc;
 
@@ -55,14 +56,14 @@ static int ptl_cm_send_request(struct ptl_conn_send_buffer *send_buffer,
 	send_buffer->bxiv3_dev = id->bxiv3_dev;
 
 	/* DMA-map the message for the NIC (md.start is a DMA address) */
-	dma_dev = PtlGetDriverDev(id->bxiv3_dev->nicia_handle);
 	send_buffer->md.length    = send_buffer->conn_msg.msg_header.total_msg_size;
 	send_buffer->md.cpu_start = &send_buffer->conn_msg;
-	send_buffer->md.start     = dma_map_single(dma_dev,
-						   send_buffer->md.cpu_start,
-						   send_buffer->md.length,
-						   DMA_TO_DEVICE);
-	if (dma_mapping_error(dma_dev, send_buffer->md.start)) {
+	send_buffer->md.start     = ib_portals_dma_map_single(&id->bxiv3_dev->fake_ib_dev,
+							      send_buffer->md.cpu_start,
+							      send_buffer->md.length,
+							      DMA_TO_DEVICE);
+	if (ib_portals_dma_mapping_error(&id->bxiv3_dev->fake_ib_dev,
+					 send_buffer->md.start)) {
 		PTL_WARN("DMA mapping failed for length %llu",
 			 send_buffer->md.length);
 		return -EIO;
@@ -88,106 +89,14 @@ static int ptl_cm_send_request(struct ptl_conn_send_buffer *send_buffer,
 			   (const ptl_md_t *)&send_buffer->md,
 			   (const ptl_msg_t *)&send_buffer->msg);
 	if (rc != PTL_OK) {
-		PTL_WARN("PtlMsgPutOnce failed with code: %d", rc);
-		dma_unmap_single(dma_dev, send_buffer->md.start,
-				 send_buffer->md.length, DMA_TO_DEVICE);
+		PTL_FATAL("PtlPut failed with code: %d", rc);
 		return -EIO;
 	}
 
 	return 0;
 }
 
-/* Address resolution — also binds the device */
-
-int ptl_resolve_addr(struct ptl_cm_id *id,
-		     const struct sockaddr *src_addr,
-		     const struct sockaddr *dst_addr,
-		     unsigned long timeout_ms)
-{
-	const struct sockaddr_in *sin;
-	const struct sockaddr_in6 *sin6;
-	unsigned long flags;
-	int rc;
-
-	if (!id || !dst_addr)
-		return -EINVAL;
-
-	rc = ptl_cm_set_state(id, PTL_CM_ADDR_RESOLVING);
-	if (rc)
-		return rc;
-
-	spin_lock_irqsave(&id->lock, flags);
-
-	switch (dst_addr->sa_family) {
-
-	case AF_INET:
-		sin = (const struct sockaddr_in *)dst_addr;
-		/* last byte of the IPv4 address; << 7 applied below.
-		 * TODO: replace with the real BXI node discovery. */
-		id->peer.phys.nid = ((const u8 *)&sin->sin_addr.s_addr)[3];
-		id->peer.phys.pid = ntohs(sin->sin_port);
-		break;
-
-	case AF_INET6:
-		sin6 = (const struct sockaddr_in6 *)dst_addr;
-		id->peer.phys.nid = sin6->sin6_addr.s6_addr[15];
-		id->peer.phys.pid = ntohs(sin6->sin6_port);
-		break;
-
-	default:
-		spin_unlock_irqrestore(&id->lock, flags);
-		ptl_cm_set_state(id, PTL_CM_ERROR);
-		return -EAFNOSUPPORT;
-	}
-
-	id->peer.phys.nid <<= 7;
-
-	/* keep the source address — connect serializes it into
-	 *conn_open.src_addr for the target */
-	memset(&id->src_addr, 0, sizeof(id->src_addr));
-	if (src_addr)
-		memcpy(&id->src_addr, src_addr,
-		       min_t(size_t, sizeof(id->src_addr),
-			     sizeof(struct sockaddr_storage)));
-
-	/* bind the device — statically dev 0, 
-	 *("XXX TODO XXX: spread it dynamically") */
-	if (!id->bxiv3_dev) {
-		if (!bxiv3_dev_map.bxiv3_dev[0]) {
-			spin_unlock_irqrestore(&id->lock, flags);
-			ptl_cm_set_state(id, PTL_CM_ERROR);
-			return -ENODEV;
-		}
-		id->bxiv3_dev = bxiv3_dev_map.bxiv3_dev[0];
-		kref_get(&id->bxiv3_dev->count);
-		id->nid = id->bxiv3_dev->proc_id.phys.nid;
-		id->pid = id->bxiv3_dev->proc_id.phys.pid;
-	}
-
-	spin_unlock_irqrestore(&id->lock, flags);
-
-	(void)timeout_ms;
-
-	rc = ptl_cm_set_state(id, PTL_CM_ADDR_RESOLVED);
-	if (rc)
-		return rc;
-
-	PTL_DEBUG("Resolved target {nid:%d,pid:%d}, initiator {nid:%d,pid:%d}",
-		  id->peer.phys.nid, id->peer.phys.pid, id->nid, id->pid);
-
-	
-	if (id->event_handler) {
-		struct ptl_cm_event ev = {
-			.event  = PTL_CM_EVENT_ADDR_RESOLVED,
-			.status = 0,
-		};
-		return id->event_handler(id, &ev);
-	}
-
-	return 0;
-}
-
-int ptl_resolve_route(struct ptl_cm_id *id, unsigned long timeout_ms)
+int ptl_cm_resolve_route(struct ptl_cm_id *id, unsigned long timeout_ms)
 {
 	/**
 	 * XXX TODO XXX Think if we need here to do something like ping the
@@ -199,16 +108,16 @@ int ptl_resolve_route(struct ptl_cm_id *id, unsigned long timeout_ms)
 	if (!id)
 		return -EINVAL;
 
-	rc = ptl_cm_set_state(id, PTL_CM_ROUTE_RESOLVING);
+	rc = ptl_cm_id_set_state(id, PTL_CM_ROUTE_RESOLVING);
 	if (rc)
 		return rc;
 
 	/* Portals has no route resolution equivalent. */
 	(void)timeout_ms;
 
-	rc = ptl_cm_set_state(id, PTL_CM_ROUTE_RESOLVED);
+	rc = ptl_cm_id_set_state(id, PTL_CM_ROUTE_RESOLVED);
 	if (rc) {
-		ptl_cm_set_state(id, PTL_CM_ERROR);
+		ptl_cm_id_set_state(id, PTL_CM_ERROR);
 		return rc;
 	}
 
@@ -226,7 +135,7 @@ int ptl_resolve_route(struct ptl_cm_id *id, unsigned long timeout_ms)
 /* when the open-connection reply arrives on the conn_mgmt EQ.         */
 
 
-int ptl_connect_locked(struct ptl_cm_id *id, struct ptl_cm_conn_param *param)
+int ptl_cm_connect_locked(struct ptl_cm_id *id, struct ptl_cm_conn_param *param)
 {
 	struct ptl_conn_send_buffer *send_buffer;
 	char *private_data_buf;
@@ -234,7 +143,7 @@ int ptl_connect_locked(struct ptl_cm_id *id, struct ptl_cm_conn_param *param)
 
 	if (!id || !param)
 		return -EINVAL;
-	if (!id->bxiv3_dev || !id->qp)
+	if (!id->bxiv3_dev || !id->ptl_qp)
 		return -ENODEV;   /* resolve_addr + create_qp must run first */
 
 	if (param->initiator_depth == 0) {
@@ -255,21 +164,21 @@ int ptl_connect_locked(struct ptl_cm_id *id, struct ptl_cm_conn_param *param)
 		sizeof(send_buffer->conn_msg) + param->private_data_len;
 
 	/* self identification */
-	send_buffer->conn_msg.msg_header.peer_info.src.nid = id->nid;
-	send_buffer->conn_msg.msg_header.peer_info.src.pid = id->pid;
+	send_buffer->conn_msg.msg_header.peer_info.src.nid = id->self_peer.phys.nid;
+	send_buffer->conn_msg.msg_header.peer_info.src.pid = id->self_peer.phys.pid;
 	send_buffer->conn_msg.msg_header.peer_info.src.pte = PTL_CP_SERVER_PTE;
 	/* destination */
-	send_buffer->conn_msg.msg_header.peer_info.dest.nid = id->peer.phys.nid;
-	send_buffer->conn_msg.msg_header.peer_info.dest.pid = id->peer.phys.pid;
+	send_buffer->conn_msg.msg_header.peer_info.dest.nid = id->remote_peer.phys.nid;
+  	send_buffer->conn_msg.msg_header.peer_info.dest.pid = id->remote_peer.phys.pid;
 	send_buffer->conn_msg.msg_header.peer_info.dest.pte = PTL_CP_SERVER_PTE;
 
 	/* body: initiator resources the target must know about.
 	 * rma_pte deliberately equals msg_pte  */
-	send_buffer->conn_msg.conn_open.msg_pte = id->qp->recv_cq->pte;
+	send_buffer->conn_msg.conn_open.msg_pte = id->ptl_qp->recv_cq->pte;
 	send_buffer->conn_msg.conn_open.rma_pte =
 		send_buffer->conn_msg.conn_open.msg_pte;
-	send_buffer->conn_msg.conn_open.cq_id   = id->qp->recv_cq->ptl_cq_id;
-	send_buffer->conn_msg.conn_open.initiator_qp_num = id->qp->qpn;
+	send_buffer->conn_msg.conn_open.cq_id   = id->ptl_qp->recv_cq->ptl_cq_id;
+	send_buffer->conn_msg.conn_open.initiator_qp_num = id->ptl_qp->qpn;
 
 	/* extensions */
 	send_buffer->conn_msg.conn_open.is_kernel_initiator = 1;
@@ -306,15 +215,15 @@ int ptl_connect_locked(struct ptl_cm_id *id, struct ptl_cm_conn_param *param)
 	}
 
 	/* record our qp num for the wire identity */
-	id->initiator_qp_num = id->qp->qpn;
+	id->initiator_qp_num = id->ptl_qp->qpn;
 
-	rc = ptl_cm_set_state(id, PTL_CM_CONNECTING);
+	rc = ptl_cm_id_set_state(id, PTL_CM_CONNECTING);
 	if (rc)
 		goto err_free;
 
 	rc = ptl_cm_send_request(send_buffer, id);
 	if (rc) {
-		ptl_cm_set_state(id, PTL_CM_ERROR);
+		ptl_cm_id_set_state(id, PTL_CM_ERROR);
 		goto err_free;
 	}
 
@@ -327,7 +236,7 @@ err_free:
 	return rc;
 }
 
-int ptl_connect_locked_with_ptl_params(struct ptl_cm_id *id,
+int ptl_cm_connect_locked_with_ptl_params(struct ptl_cm_id *id,
 				       struct ptl_cm_conn_param *param,
 				       struct ptl_obj_conn_params *ptl_params)
 {
@@ -337,12 +246,12 @@ int ptl_connect_locked_with_ptl_params(struct ptl_cm_id *id,
 	id->nvme_cpl_start             = ptl_params->nvme_cpl_start_dma_addr;
 	id->nvme_completion_queue_size = ptl_params->queue_size;
 
-	return ptl_connect_locked(id, param);
+	return ptl_cm_connect_locked(id, param);
 }
 
 /* Disconnect — port of rdma_cm_portals_disconnect                     */
 
-int ptl_disconnect(struct ptl_cm_id *id)
+int ptl_cm_disconnect(struct ptl_cm_id *id)
 {
 	struct ptl_conn_send_buffer *close_req_buf;
 	unsigned long flags;
@@ -351,16 +260,16 @@ int ptl_disconnect(struct ptl_cm_id *id)
 	if (!id)
 		return -EINVAL;
 
-	spin_lock_irqsave(&id->lock, flags);
-	if (id->state == PTL_CM_DISCONNECTING ||
-	    id->state == PTL_CM_DISCONNECTED) {
+	spin_lock_irqsave(&id->state_lock, flags);
+	if (id->cm_id_state == PTL_CM_DISCONNECTING ||
+	    id->cm_id_state == PTL_CM_DISCONNECTED) {
 		PTL_DEBUG("ptl_cm_id {initiator_qp_num: %d target_qp_num: %d} already disconnecting...go on",
 			  id->initiator_qp_num, id->target_qp_num);
-		spin_unlock_irqrestore(&id->lock, flags);
+		spin_unlock_irqrestore(&id->state_lock, flags);
 		return 0;
 	}
-	id->state = PTL_CM_DISCONNECTING;
-	spin_unlock_irqrestore(&id->lock, flags);
+	id->cm_id_state = PTL_CM_DISCONNECTING;
+	spin_unlock_irqrestore(&id->state_lock, flags);
 
 	close_req_buf = kzalloc(sizeof(*close_req_buf), GFP_KERNEL);
 	if (!close_req_buf)
@@ -372,12 +281,12 @@ int ptl_disconnect(struct ptl_cm_id *id)
 	close_req_buf->conn_msg.msg_header.total_msg_size =
 		sizeof(close_req_buf->conn_msg);
 	/* self identification */
-	close_req_buf->conn_msg.msg_header.peer_info.src.nid = id->nid;
-	close_req_buf->conn_msg.msg_header.peer_info.src.pid = id->pid;
+	close_req_buf->conn_msg.msg_header.peer_info.src.nid = id->self_peer.phys.nid;
+	close_req_buf->conn_msg.msg_header.peer_info.src.pid = id->self_peer.phys.pid;
 	close_req_buf->conn_msg.msg_header.peer_info.src.pte = PTL_CP_SERVER_PTE;
 	/* destination */
-	close_req_buf->conn_msg.msg_header.peer_info.dest.nid = id->peer.phys.nid;
-	close_req_buf->conn_msg.msg_header.peer_info.dest.pid = id->peer.phys.pid;
+	close_req_buf->conn_msg.msg_header.peer_info.dest.nid = id->remote_peer.phys.nid;
+    close_req_buf->conn_msg.msg_header.peer_info.dest.pid = id->remote_peer.phys.pid;
 	close_req_buf->conn_msg.msg_header.peer_info.dest.pte = PTL_CP_SERVER_PTE;
 	/* body */
 	close_req_buf->conn_msg.conn_close.initiator_qp_num = id->initiator_qp_num;
@@ -386,9 +295,9 @@ int ptl_disconnect(struct ptl_cm_id *id)
 	rc = ptl_cm_send_request(close_req_buf, id);
 	if (rc) {
 		kfree(close_req_buf);
-		spin_lock_irqsave(&id->lock, flags);
-		id->state = PTL_CM_ERROR;
-		spin_unlock_irqrestore(&id->lock, flags);
+		spin_lock_irqsave(&id->state_lock, flags);
+		id->cm_id_state = PTL_CM_ERROR;
+		spin_unlock_irqrestore(&id->state_lock, flags);
 		return rc;
 	}
 
@@ -423,24 +332,20 @@ const void *ptl_cm_reject_msg(struct ptl_cm_id *id, int status)
 	return "connection rejected by target";
 }
 
+/* Nothing emits PTL_CM_EVENT_REJECTED yet, so this is unreachable: the
+ * wire protocol has no reject message. Fail loudly rather than return
+ * empty data, so whoever wires up rejection knows it needs a real body. */
 const void *ptl_cm_consumer_reject_data(struct ptl_cm_id *id,
 					struct ptl_cm_event *ev, u8 *len)
 {
 	(void)id;
-
-	if (!ev || !ev->private_data || !ev->private_data_len) {
-		if (len)
-			*len = 0;
-		return NULL;
-	}
-
-	if (len)
-		*len = ev->private_data_len;
-	return ev->private_data;
-	
+	(void)ev;
+	(void)len;
+	PTL_FATAL("ptl_cm_consumer_reject_data unimplemented");
+	return ERR_PTR(-EOPNOTSUPP);
 }
 /* in ptl_qp.c — the CM-facing entry, replaces rdma_cm_portals_create_qp */
-int ptl_create_qp(struct ptl_cm_id *ptl_id, struct ib_pd *pd,
+int ptl_cm_create_qp(struct ptl_cm_id *ptl_id, struct ib_pd *pd,
                   struct ib_qp_init_attr *attr)
 {
     struct ptl_pd *ptl_pd;
@@ -451,13 +356,13 @@ int ptl_create_qp(struct ptl_cm_id *ptl_id, struct ib_pd *pd,
         return -EINVAL;
     }
 
-    ptl_id->qp = ptl_qp_create(ptl_id, ptl_pd, attr);
+    ptl_id->ptl_qp = ptl_qp_create(ptl_id, ptl_pd, attr);
     PTL_DEBUG("Created QP successfully");
-    return IS_ERR(ptl_id->qp) ? -EINVAL : 0;
+    return IS_ERR(ptl_id->ptl_qp) ? -EINVAL : 0;
 }
-int ptl_destroy_qp(struct ptl_cm_id *id)
+int ptl_cm_destroy_qp(struct ptl_cm_id *id)
 {
     (void)id;
-    PTL_FATAL("ptl_destroy_qp unimplemented"); 
+    PTL_FATAL("ptl_destroy_qp unimplemented");
     return -EOPNOTSUPP;
 }

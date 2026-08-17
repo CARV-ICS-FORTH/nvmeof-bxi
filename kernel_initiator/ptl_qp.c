@@ -10,7 +10,7 @@
 #include <linux/module.h>  /* MODULE_* macros if this is a module */
 #include <linux/slab.h>    /* kzalloc, kfree */
 #include <rdma/ib_verbs.h> /* struct ib_device, ib_alloc_pd, CQ, QP, etc. */
-#include "ptl_cm.h" /* struct ptl_cm_id */
+#include "rdma_cm_portals.h" /* struct ptl_cm_id */
 static atomic_t ptl_id_counter = ATOMIC_INIT(3);
 
 struct ptl_qp *ptl_qp_create(struct ptl_cm_id *ptl_id, struct ptl_pd *ptl_pd,

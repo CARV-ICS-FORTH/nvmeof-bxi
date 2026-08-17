@@ -1,6 +1,6 @@
 # Build bxiv3_initiator.ko from rdma.c and portals shims (ib_portals.c, rdma_cm_portals.c)
 obj-m += bxiv3_initiator.o
-bxiv3_initiator-y := rdma.o ib_portals.o ptl_cm.o mr_portals_pool.o ptl_cm_id.o ptl_pd.o ptl_bxiv3_device.o ptl_cq_pool.o ptl_cq.o ptl_qp.o ptl_uuid.o
+bxiv3_initiator-y := rdma.o ib_portals.o rdma_cm_portals.o mr_portals_pool.o ptl_cm_id.o ptl_pd.o ptl_bxiv3_device.o ptl_cq_pool.o ptl_cq.o ptl_qp.o ptl_uuid.o
 
 # Kernel build tree for standard includes
 KDIR ?= /lib/modules/$(shell uname -r)/build

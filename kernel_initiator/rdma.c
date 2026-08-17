@@ -28,7 +28,6 @@
 #include <linux/nvme-rdma.h>
 #include <rdma/ib_verbs.h>
 
-
 /*Note: Do not change the order of nvme.h and fabrics.h, fabrics.h relies on
  * nvme.h*/
 // clang-format off
@@ -43,7 +42,7 @@
 #include "ptl_bxiv3_dev_map.h"
 #include "ptl_bxiv3_device.h"
 #include "ptl_object_types.h"
-#include"ptl_cm.h"
+#include "rdma_cm_portals.h"
 #include <linux/bitmap.h>    /*Used for allocation of PTEs,CQs, etc */
 #include <portals4.h>        /*Portals API */
 #include <portals4_bxiext.h> /*BXIv3 extensions */
@@ -348,10 +347,11 @@ static int nvme_rdma_create_qp(struct nvme_rdma_queue *queue,
   }
   init_attr.qp_context = queue;
 
-  ret = ptl_create_qp(queue->cm_id, dev->pd, &init_attr);
-	if (ret) return ret;
-	queue->qp = &queue->cm_id->qp->fake_qp;
-	return ret;
+  ret = ptl_cm_create_qp(queue->cm_id, dev->pd, &init_attr);
+  if (ret)
+    return ret;
+  queue->qp = &queue->cm_id->ptl_qp->fake_qp;
+  return ret;
 }
 
 static void nvme_rdma_exit_request(struct blk_mq_tag_set *set,
@@ -437,7 +437,7 @@ nvme_rdma_find_get_device(struct ptl_cm_id *cm_id) {
   mutex_lock(&device_list_mutex);
   list_for_each_entry(ndev, &device_list, entry) {
     if (ndev->dev->node_guid == cm_id->bxiv3_dev->fake_ib_dev.node_guid &&
-		    nvme_rdma_dev_get(ndev)) {
+        nvme_rdma_dev_get(ndev)) {
       goto out_unlock;
     }
   }
@@ -598,7 +598,8 @@ static int nvme_rdma_create_queue_ib(struct nvme_rdma_queue *queue) {
     if (queue->cm_id->bxiv3_dev->fake_ib_dev.dev.parent == NULL) {
       PTL_FATAL("no client data found!\n");
     } else {
-      dev_err(queue->cm_id->bxiv3_dev->fake_ib_dev.dev.parent, "no client data found!\n");
+      dev_err(queue->cm_id->bxiv3_dev->fake_ib_dev.dev.parent,
+              "no client data found!\n");
     }
     return -ECONNREFUSED;
   }
@@ -678,7 +679,7 @@ out_destroy_ring:
   nvme_rdma_free_ring(ibdev, queue->rsp_ring, queue->queue_size,
                       sizeof(struct nvme_completion), DMA_FROM_DEVICE);
 out_destroy_qp:
-  ptl_destroy_qp(queue->cm_id);
+  ptl_cm_destroy_qp(queue->cm_id);
 out_destroy_ib_cq:
   nvme_rdma_free_cq(queue);
 out_put_dev:
@@ -710,7 +711,7 @@ static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl, int idx,
 
   queue->queue_size = queue_size;
 
-  queue->cm_id = ptl_create_id(&init_net, nvme_rdma_cm_handler, queue);
+  queue->cm_id = ptl_cm_id_create(&init_net, nvme_rdma_cm_handler, queue);
   if (IS_ERR(queue->cm_id)) {
     dev_info(ctrl->ctrl.device, "failed to create CM ID: %ld\n",
              PTR_ERR(queue->cm_id));
@@ -723,9 +724,8 @@ static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl, int idx,
   }
 
   queue->cm_error = -ETIMEDOUT;
-  ret = ptl_resolve_addr(queue->cm_id, src_addr,
-                           (struct sockaddr *)&ctrl->addr,
-                           NVME_RDMA_CM_TIMEOUT_MS);
+  ret = ptl_cm_id_resolve_addr(queue->cm_id, src_addr, (struct sockaddr *)&ctrl->addr,
+                         NVME_RDMA_CM_TIMEOUT_MS);
   if (ret) {
     dev_info(ctrl->ctrl.device, "rdma_cm_portals_resolve_addr failed (%d).\n",
              ret);
@@ -744,7 +744,7 @@ static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl, int idx,
   return 0;
 
 out_destroy_cm_id:
-  ptl_destroy_id(queue->cm_id);
+  ptl_cm_id_destroy(queue->cm_id);
   nvme_rdma_destroy_queue_ib(queue);
 out_destroy_mutex:
   mutex_destroy(&queue->queue_lock);
@@ -752,7 +752,7 @@ out_destroy_mutex:
 }
 
 static void __nvme_rdma_stop_queue(struct nvme_rdma_queue *queue) {
-  ptl_disconnect(queue->cm_id);
+  ptl_cm_disconnect(queue->cm_id);
   ib_portals_drain_qp(queue->qp);
 }
 
@@ -773,8 +773,9 @@ static void nvme_rdma_free_queue(struct nvme_rdma_queue *queue) {
     return;
   }
 
-  nvme_rdma_destroy_queue_ib(queue);   /* reads cm_id via qp->ptl_id — must run first  sos */
-  ptl_destroy_id(queue->cm_id);        /* frees cm_id — must run last */
+  nvme_rdma_destroy_queue_ib(
+      queue); /* reads cm_id via qp->ptl_id — must run first  sos */
+  ptl_cm_id_destroy(queue->cm_id); /* frees cm_id — must run last */
   mutex_destroy(&queue->queue_lock);
 }
 
@@ -2128,7 +2129,7 @@ static int nvme_rdma_conn_rejected(struct nvme_rdma_queue *queue,
   const struct nvme_rdma_cm_rej *rej_data;
   u8 rej_data_len;
 
-  rej_msg =  ptl_cm_reject_msg(cm_id, status);
+  rej_msg = ptl_cm_reject_msg(cm_id, status);
   rej_data = ptl_cm_consumer_reject_data(cm_id, ev, &rej_data_len);
   if (rej_data && rej_data_len >= sizeof(u16)) {
     u16 sts = le16_to_cpu(rej_data->sts);
@@ -2158,7 +2159,7 @@ static int nvme_rdma_addr_resolved(struct nvme_rdma_queue *queue) {
   if (ctrl->opts->tos >= 0) {
     ptl_cm_set_service_type(queue->cm_id, ctrl->opts->tos);
   }
-  ret = ptl_resolve_route(queue->cm_id, NVME_RDMA_CM_TIMEOUT_MS);
+  ret = ptl_cm_resolve_route(queue->cm_id, NVME_RDMA_CM_TIMEOUT_MS);
   if (ret) {
     dev_err(ctrl->device, "rdma_cm_portals_resolve_route failed (%d).\n",
             queue->cm_error);
@@ -2257,76 +2258,76 @@ static int nvme_rdma_route_resolved(struct nvme_rdma_queue *queue) {
    * the data payload has been globally observed, maintaining NVMe semantics.
    */
   struct ptl_obj_conn_params ptl_params = {
-        .nvme_cpl_start_dma_addr = queue->rsp_ring[0].dma,
-        .queue_size = queue->queue_size,
-    };
-    ret = ptl_connect_locked_with_ptl_params(queue->cm_id, &param, &ptl_params);
-    if (ret) {
-        dev_err(ctrl->ctrl.device, "ptl_connect_locked failed (%d).\n", ret);
-        return ret;
-    }
-    return 0;
+      .nvme_cpl_start_dma_addr = queue->rsp_ring[0].dma,
+      .queue_size = queue->queue_size,
+  };
+  PTL_DEBUG("CONN_PARAM out: rr=%u id=%u qpn=%u", param.responder_resources,
+            param.initiator_depth, param.qp_num);
+  ret = ptl_cm_connect_locked_with_ptl_params(queue->cm_id, &param, &ptl_params);
+  if (ret) {
+    dev_err(ctrl->ctrl.device, "ptl_connect_locked failed (%d).\n", ret);
+    return ret;
+  }
+  return 0;
 }
 
 static int nvme_rdma_cm_handler(struct ptl_cm_id *cm_id,
-                                struct ptl_cm_event *ev)
-{
-    struct nvme_rdma_queue *queue = cm_id->context;
-    int cm_error = 0;
+                                struct ptl_cm_event *ev) {
+  struct nvme_rdma_queue *queue = cm_id->event_handler_context;
+  int cm_error = 0;
 
-    PTL_DEBUG("CORE_DRIVER: Is queue NULL ? %s", queue ? "NO" : "YES");
+  PTL_DEBUG("CORE_DRIVER: Is queue NULL ? %s", queue ? "NO" : "YES");
 
-    dev_dbg(queue->ctrl->ctrl.device, "%s (%d): status %d id %p\n",
-            ptl_cm_event_msg(ev->event), ev->event, ev->status, cm_id);
+  dev_dbg(queue->ctrl->ctrl.device, "%s (%d): status %d id %p\n",
+          ptl_cm_event_msg(ev->event), ev->event, ev->status, cm_id);
 
-    PTL_DEBUG("CORE_DRIVER: Going into the switch");
+  PTL_DEBUG("CORE_DRIVER: Going into the switch");
 
-    switch (ev->event) {
-    case PTL_CM_EVENT_ADDR_RESOLVED:
-        PTL_DEBUG("CORE_DRIVER: ADDR RESOLVED");
-        cm_error = nvme_rdma_addr_resolved(queue);
-        break;
-    case PTL_CM_EVENT_ROUTE_RESOLVED:
-        cm_error = nvme_rdma_route_resolved(queue);
-        break;
-    case PTL_CM_EVENT_ESTABLISHED:
-        PTL_DEBUG("CORE_DRIVER: ESTABLISHED HELLO");
-        queue->cm_error = nvme_rdma_conn_established(queue);
-        complete(&queue->cm_done);
-        return 0;
-    case PTL_CM_EVENT_REJECTED:
-        cm_error = nvme_rdma_conn_rejected(queue, ev);
-        break;
-    case PTL_CM_EVENT_ROUTE_ERROR:
-    case PTL_CM_EVENT_CONNECT_ERROR:
-    case PTL_CM_EVENT_UNREACHABLE:
-    case PTL_CM_EVENT_ADDR_ERROR:
-        dev_dbg(queue->ctrl->ctrl.device, "CM error event %d\n", ev->event);
-        cm_error = -ECONNRESET;
-        break;
-    case PTL_CM_EVENT_DISCONNECTED:
-    case PTL_CM_EVENT_ADDR_CHANGE:
-    case PTL_CM_EVENT_TIMEWAIT_EXIT:
-        dev_dbg(queue->ctrl->ctrl.device,
-                "disconnect received - connection closed\n");
-        nvme_rdma_error_recovery(queue->ctrl);
-        break;
-    case PTL_CM_EVENT_DEVICE_REMOVAL:
-        /* device removal is handled via the ib_client API */
-        break;
-    default:
-        dev_err(queue->ctrl->ctrl.device, "Unexpected CM event (%d)\n",
-                ev->event);
-        nvme_rdma_error_recovery(queue->ctrl);
-        break;
-    }
-
-    if (cm_error) {
-        queue->cm_error = cm_error;
-        complete(&queue->cm_done);
-    }
-
+  switch (ev->event) {
+  case PTL_CM_EVENT_ADDR_RESOLVED:
+    PTL_DEBUG("CORE_DRIVER: ADDR RESOLVED");
+    cm_error = nvme_rdma_addr_resolved(queue);
+    break;
+  case PTL_CM_EVENT_ROUTE_RESOLVED:
+    cm_error = nvme_rdma_route_resolved(queue);
+    break;
+  case PTL_CM_EVENT_ESTABLISHED:
+    PTL_DEBUG("CORE_DRIVER: ESTABLISHED HELLO");
+    queue->cm_error = nvme_rdma_conn_established(queue);
+    complete(&queue->cm_done);
     return 0;
+  case PTL_CM_EVENT_REJECTED:
+    cm_error = nvme_rdma_conn_rejected(queue, ev);
+    break;
+  case PTL_CM_EVENT_ROUTE_ERROR:
+  case PTL_CM_EVENT_CONNECT_ERROR:
+  case PTL_CM_EVENT_UNREACHABLE:
+  case PTL_CM_EVENT_ADDR_ERROR:
+    dev_dbg(queue->ctrl->ctrl.device, "CM error event %d\n", ev->event);
+    cm_error = -ECONNRESET;
+    break;
+  case PTL_CM_EVENT_DISCONNECTED:
+  case PTL_CM_EVENT_ADDR_CHANGE:
+  case PTL_CM_EVENT_TIMEWAIT_EXIT:
+    dev_dbg(queue->ctrl->ctrl.device,
+            "disconnect received - connection closed\n");
+    nvme_rdma_error_recovery(queue->ctrl);
+    break;
+  case PTL_CM_EVENT_DEVICE_REMOVAL:
+    /* device removal is handled via the ib_client API */
+    break;
+  default:
+    dev_err(queue->ctrl->ctrl.device, "Unexpected CM event (%d)\n", ev->event);
+    nvme_rdma_error_recovery(queue->ctrl);
+    break;
+  }
+
+  if (cm_error) {
+    queue->cm_error = cm_error;
+    complete(&queue->cm_done);
+  }
+
+  return 0;
 }
 
 static void nvme_rdma_complete_timed_out(struct request *rq) {

@@ -33,10 +33,13 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event,
   struct ptl_conn_msg *msg = recv_buffer->conn_msg;
   struct ptl_bxiv3_qp_map_entry *entry;
   struct ptl_qp *ptl_qp = NULL;
-  struct ptl_cm_id *id;
+
   int qpn;
 
   qpn = msg->conn_open_reply.initiator_qp_num;
+  PTL_DEBUG("REPLY: msg_pte=%d rma_pte=%d cq_id=%d status=%d",
+            msg->conn_open_reply.msg_pte, msg->conn_open_reply.rma_pte,
+            msg->conn_open_reply.cq_id, msg->conn_open_reply.status);
   PTL_DEBUG("<PTL_OPEN_CONNECTION_REPLY> rlength: %llu mlength: %llu",
             event->rlength, event->mlength);
   PTL_DEBUG("Initiator qp num for which this event is: %d", qpn);
@@ -57,23 +60,24 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event,
               msg->conn_open_reply.target_qp_num);
   }
 
-  id= ptl_qp->ptl_id;
-	id->remote_msg_pte = msg->conn_open_reply.msg_pte;
-	id->remote_rma_pte = msg->conn_open_reply.rma_pte;
-	id->remote_cq_id = msg->conn_open_reply.cq_id;
-	id->initiator_qp_num = msg->conn_open_reply.initiator_qp_num;
-	id->target_qp_num = msg->conn_open_reply.target_qp_num;
+  ptl_qp->ptl_id->remote_msg_pte = msg->conn_open_reply.msg_pte;
+  ptl_qp->ptl_id->remote_rma_pte = msg->conn_open_reply.rma_pte;
+  ptl_qp->ptl_id->remote_cq_id = msg->conn_open_reply.cq_id;
+  ptl_qp->ptl_id->initiator_qp_num = msg->conn_open_reply.initiator_qp_num;
+  ptl_qp->ptl_id->target_qp_num = msg->conn_open_reply.target_qp_num;
+  ptl_qp->ptl_id->remote_cq_id = msg->conn_open_reply.cq_id;
 
   spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);
-	if(ptl_cm_set_state(id,PTL_CM_ESTABLISHED)){
-		PTL_WARN("QPN: %d reply arrived in unexpected CM state %d",
-			 qpn, id->state);
-		return;
-	}
-	cm_event.event=PTL_CM_EVENT_ESTABLISHED;
-	cm_event.status=0;
-	if (id->event_handler) id->event_handler(id, &cm_event);
-	PTL_DEBUG("</PTL_OPEN_CONNECTION_REPLY> QPN: %d FOUND", qpn);
+  if (ptl_cm_id_set_state(ptl_qp->ptl_id, PTL_CM_ESTABLISHED)) {
+    PTL_WARN("QPN: %d reply arrived in unexpected CM state %d", qpn,
+             ptl_qp->ptl_id->cm_id_state);
+    return;
+  }
+  cm_event.event = PTL_CM_EVENT_ESTABLISHED;
+  cm_event.status = 0;
+  if (ptl_qp->ptl_id->event_handler)
+    ptl_qp->ptl_id->event_handler(ptl_qp->ptl_id, &cm_event);
+  PTL_DEBUG("</PTL_OPEN_CONNECTION_REPLY> QPN: %d FOUND", qpn);
 }
 
 static void ptl_handle_close_connection_reply(ptl_event_t *event,
@@ -369,14 +373,15 @@ void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh) {
         PTL_FATAL("Cannot handle event of type: %d", event.type);
       }
       if (event.ni_fail_type != PTL_NI_OK) {
-    pr_warn_ratelimited(
+        PTL_WARN(
         "[%s:%s:%d] PTL: ni_fail %d(%s) on event %d(%s) from {nid:%d,pid:%d}, "
-        "delivering errored completion\n",
+        "delivering errored completion",
         __FILE__, __func__, __LINE__,
         event.ni_fail_type, PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE),
         event.type, PtlToStr(event.type, PTL_STR_EVENT),
         event.initiator.phys.nid, event.initiator.phys.pid);
 }
+
       handler[event.type](event, ptl_cq);
       continue;
     } else if (rc == PTL_EQ_EMPTY) {

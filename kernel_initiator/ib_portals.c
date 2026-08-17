@@ -8,7 +8,6 @@
 #include <linux/printk.h>
 #include <linux/ratelimit.h>
 #include <linux/slab.h>
-#include <rdma/ib_cm.h>
 #include <rdma/ib_verbs.h>
 
 #include "asm-generic/errno-base.h"
@@ -192,6 +191,7 @@ int ib_portals_destroy_qp(struct ib_qp *qp) {
   struct ptl_bxiv3_qp_map_entry *entry;
   ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
   PTL_CHECK(ptl_qp, PTL_QP);
+  PTL_CHECK(ptl_qp->ptl_id, PTL_CM_ID);
   /**
    * List of things to destory/clean:
    *  1) ptl_id -->later there is an explicit call for it
@@ -201,7 +201,7 @@ int ib_portals_destroy_qp(struct ib_qp *qp) {
    * rma_le, rma_leh has been destroyed during drain qp 6) recv_op_meta the
    * buffer that accepts the nvme_cpl. Destroy it here.
    */
-  if (ptl_qp->ptl_id && ptl_qp->ptl_id->qp == ptl_qp) ptl_qp->ptl_id->qp = NULL;
+
   if (NULL == ptl_qp->recv_cq->cq_pool) {
     ptl_cq_destroy(ptl_qp->recv_cq);
     ptl_bxiv3_dev_free_pte(ptl_qp->ptl_id->bxiv3_dev, ptl_qp->recv_cq->pte);
@@ -216,7 +216,7 @@ int ib_portals_destroy_qp(struct ib_qp *qp) {
   hash_for_each_possible(ptl_qp->ptl_id->bxiv3_dev->qp_map, entry, node,
                          ptl_qp->qpn) {
     if (entry->key == ptl_qp->qpn) {
-      //ptl_qp = entry->ptl_qp;
+      ptl_qp = entry->ptl_qp;
       // Remove the entry from the hash table
       hash_del(&entry->node);
       break; // Exit immediately once found and removed
@@ -448,8 +448,8 @@ static void ib_portals_send_nvmeof_cmd(struct ptl_qp *ptl_qp,
 
   msg.length = sge->length;
   msg.ack_req = send_op ? PTL_ACK_REQ : PTL_NO_ACK_REQ;
-  msg.target_id.phys.nid = ptl_qp->ptl_id->peer.phys.nid;
-	msg.target_id.phys.pid = ptl_qp->ptl_id->peer.phys.pid;
+  msg.target_id.phys.nid = ptl_qp->ptl_id->remote_peer.phys.nid;
+  msg.target_id.phys.pid = ptl_qp->ptl_id->remote_peer.phys.pid;
   msg.pt_index = ptl_qp->ptl_id->remote_msg_pte;
   msg.user_ptr = send_op;
   ptl_uuid_set_op_type(&msg.hdr_data, NVMeOF_cmd);
