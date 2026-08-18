@@ -475,6 +475,16 @@ static process_event handler[16] = {
 
 #define PTL_CQ_POLL_MS 250   //new addition (EQ poll fallback interval)
 
+/* EQ poll fallback is compiled OUT by default; build with -DPTL_EQ_POLL to include it. */
+#ifdef PTL_EQ_POLL
+static bool ptl_eq_poll_enabled = true;
+#else
+static bool ptl_eq_poll_enabled;
+#endif
+module_param(ptl_eq_poll_enabled, bool, 0444);
+MODULE_PARM_DESC(ptl_eq_poll_enabled,
+                 "EQ poll fallback compiled in (rebuild with -DPTL_EQ_POLL to enable)");
+
 /* Shared drain used by both the interrupt callback and the poll fallback;
  * spin_trylock keeps the two off each other's reassembly state. Handlers run
  * under this spinlock and must not sleep. */
@@ -535,6 +545,7 @@ void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh) {     /* interrupt path */
   ptl_eq_drain(ptl_cq);                                    
 }
 
+#ifdef PTL_EQ_POLL
 /* new addition: timer fallback for the shared-interrupt/coalescing problem.
  * A lone admin completion (keep-alive / reconnect Connect) can sit undrained at
  * idle; poll every EQ so admin always makes progress even with no IO traffic. */
@@ -545,6 +556,7 @@ static void ptl_cq_poll_work(struct work_struct *w) {
   schedule_delayed_work(&ptl_cq->poll_work,               
                         msecs_to_jiffies(PTL_CQ_POLL_MS));  
 }                                                          
+#endif /* PTL_EQ_POLL */
 
 struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
                              struct ptl_bxiv3_device *bxiv3_dev, int nr_cqes,
@@ -578,7 +590,9 @@ struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
    * before the tail of this function is reached. Initialising the lock down
    * there also re-inits it under a drain already in flight. */
   spin_lock_init(&cq->drain_lock);
+#ifdef PTL_EQ_POLL
   INIT_DELAYED_WORK(&cq->poll_work, ptl_cq_poll_work);
+#endif /* PTL_EQ_POLL */
 
   rc = PtlEQAllocAsync(bxiv3_dev->nicia_handle, cq->nr_cqes, &cq->eq,
                        ptl_eq_callback, cq, cq->bxiv3_dev->intr_index);
@@ -599,11 +613,13 @@ struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
   PTL_DEBUG("Enabled for iface_id: %d PTE: %u and created cq with %d number of "
             "entries",
             bxiv3_dev->iface_id, cq->pte, nr_cqes);
+#ifdef PTL_EQ_POLL
   /* new addition: arm the poll fallback so admin completions drain even when
    * the shared NIC interrupt does not fire at idle. Armed last, once the CQ is
    * fully built; the error paths below never queued it, so they need no cancel. */
   schedule_delayed_work(&cq->poll_work,
                         msecs_to_jiffies(PTL_CQ_POLL_MS));
+#endif /* PTL_EQ_POLL */
   return cq;
 free_cq:
   rc = PtlEQFree(cq->eq);
@@ -626,7 +642,9 @@ ptl_pt_index_t ptl_cq_destroy(struct ptl_cq *ptl_cq) {
 
   /* new addition: stop the poll fallback before tearing down the EQ/PTE, so no
    * poll runs against a freed event queue. sync = wait for any in-flight poll. */
+#ifdef PTL_EQ_POLL
   cancel_delayed_work_sync(&ptl_cq->poll_work);   //new addition
+#endif /* PTL_EQ_POLL */
 
   /* Free the portal table entry */
   rc = PtlPTFree(ptl_cq->bxiv3_dev->nicia_handle, ptl_cq->pte);
