@@ -195,7 +195,7 @@ static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   ptl_qp = event->user_ptr;
   /* user_ptr is wire-derived: a stale event after a reconnect can name a ptl_qp
    * that was freed and reused, so drop it rather than BUG().
-   * ponytail: still dereferences a possibly-dangling pointer; closing that needs
+   *still dereferences a possibly-dangling pointer; closing that needs
    * a qp handle table instead of a raw pointer in user_ptr. */
   if (NULL == ptl_qp || PTL_QP != ptl_qp->object_type) {
     PTL_WARN_RL("nvme_cpl with stale/invalid qp context %p, dropping event",
@@ -329,8 +329,8 @@ static void ptl_cnxt_process_put(ptl_event_t event, struct ptl_cq *ptl_cq) {
     ptl_handle_open_connection_reply(&event, ptl_cq);
   } else if (PTL_CLOSE_CONNECTION_REPLY == op_type) {
     ptl_handle_close_connection_reply(&event, ptl_cq);
-  } else if (PTL_CLOSE_CONNECTION == op_type) {     //new addition
-    ptl_handle_close_connection(&event, ptl_cq);    //new addition
+  } else if (PTL_CLOSE_CONNECTION == op_type) {    
+    ptl_handle_close_connection(&event, ptl_cq);    
   } else if (NVMeOF_cmd == op_type) {
     PTL_FATAL("Got an NVMeOF_cmd. I am the initiator hello?");
   } else {
@@ -475,7 +475,9 @@ static process_event handler[16] = {
 
 #define PTL_CQ_POLL_MS 250   //new addition (EQ poll fallback interval)
 
-/* EQ poll fallback is compiled OUT by default; build with -DPTL_EQ_POLL to include it. */
+/* EQ poll fallback is compiled OUT by default; build with -DPTL_EQ_POLL to include it.
+* This flag is readable at runtime so a loaded module can say which variant it is:
+* cat /sys/module/bxiv3_initiator/parameters/ptl_eq_poll_enabled */
 #ifdef PTL_EQ_POLL
 static bool ptl_eq_poll_enabled = true;
 #else
@@ -495,12 +497,15 @@ static void ptl_eq_drain(struct ptl_cq *ptl_cq) {
     return; /* another context already draining this EQ */ 
   for (;;) {                                               
     rc = PtlEQGet(ptl_cq->eq, &event); /* was eqh; poller has no eqh */ 
-    /* PTL_EQ_DROPPED carries a VALID event*/
+    /* PTL_EQ_DROPPED carries a VALID event, but events BEFORE it were lost.
+     * Deliberately fatal: a gap in the completion stream corrupts NVMe state in
+     * ways that surface far from here and long after. Stop at the point of loss
+     * so it gets reported, rather than degrading quietly. */
     if (rc == PTL_OK || rc == PTL_EQ_DROPPED) {
       if (rc == PTL_EQ_DROPPED) {
-        PTL_WARN_RL("EQ overflow: events were dropped BEFORE this one on "
-                    "iface_id:%d - processing this event and continuing",
-                    ptl_cq->bxiv3_dev->iface_id);
+        PTL_FATAL("EQ overflow on iface_id:%d pte:%d - events were dropped "
+                  "BEFORE this one, the completion stream has a gap",
+                  ptl_cq->bxiv3_dev->iface_id, ptl_cq->pte);
       }
       PTL_DEBUG(
           "Event: iface_id:%d EV:%d(%s) PTE:%d match_bits=0x%llx "
