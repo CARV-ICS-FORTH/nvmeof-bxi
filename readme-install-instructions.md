@@ -82,14 +82,25 @@ Build:
 make
 ```
 
-## 4. Set huge pages
+## 4. Memory settings on the target
 
-On the machine where SPDK target runs:
+Both settings below are runtime state and **reset on every reboot**.
+
+Set up huge pages:
 
 ```bash
 sh -c 'echo 512 > /proc/sys/vm/nr_hugepages'
 ```
+Transparent huge pages — must be never:
 
+**IMPORTANT FOR CONSISTENT RESULTS** — not needed to build or connect, but without it 30-60 % of
+runs stall and die on a keep-alive timeout. The cause is a defect in qemu-bxi3-kvm, not in SPDK
+or the initiator. Check issues for details.
+
+``` bash
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+cat  /sys/kernel/mm/transparent_hugepage/enabled    # expect: always madvise [never]
+```
 ## 5. Connect to the VM on shuttle6/7
 
 Use this flow to discover and access the VM IP from inside the containerized environment.
