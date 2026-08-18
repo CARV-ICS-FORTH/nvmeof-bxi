@@ -573,6 +573,13 @@ struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
   cq->ptl_cq_id = pte;
   cq->nr_cqes = nr_cqes;
 
+  /* Must precede PtlEQAllocAsync: that call arms ptl_eq_callback with this cq,
+   * so an event can reach ptl_eq_drain() -> spin_trylock(&cq->drain_lock)
+   * before the tail of this function is reached. Initialising the lock down
+   * there also re-inits it under a drain already in flight. */
+  spin_lock_init(&cq->drain_lock);
+  INIT_DELAYED_WORK(&cq->poll_work, ptl_cq_poll_work);
+
   rc = PtlEQAllocAsync(bxiv3_dev->nicia_handle, cq->nr_cqes, &cq->eq,
                        ptl_eq_callback, cq, cq->bxiv3_dev->intr_index);
   if (PTL_OK != rc) {
@@ -593,11 +600,10 @@ struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
             "entries",
             bxiv3_dev->iface_id, cq->pte, nr_cqes);
   /* new addition: arm the poll fallback so admin completions drain even when
-   * the shared NIC interrupt does not fire at idle. */
-  spin_lock_init(&cq->drain_lock);                              
-  INIT_DELAYED_WORK(&cq->poll_work, ptl_cq_poll_work);         
-  schedule_delayed_work(&cq->poll_work,                         
-                        msecs_to_jiffies(PTL_CQ_POLL_MS));       
+   * the shared NIC interrupt does not fire at idle. Armed last, once the CQ is
+   * fully built; the error paths below never queued it, so they need no cancel. */
+  schedule_delayed_work(&cq->poll_work,
+                        msecs_to_jiffies(PTL_CQ_POLL_MS));
   return cq;
 free_cq:
   rc = PtlEQFree(cq->eq);
