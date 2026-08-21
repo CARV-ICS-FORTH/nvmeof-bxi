@@ -4,6 +4,7 @@
 #define PTL_CM_ID_H
 
 #include <linux/spinlock.h>
+#include <linux/workqueue.h>
 #include <linux/socket.h>      /* struct sockaddr, sockaddr_storage */
 #include <linux/types.h>
 
@@ -110,6 +111,14 @@ struct ptl_cm_id {
 	/* new: was fake_cm_id->route.addr.src_addr, needed by
 	 * ptl_connect_locked() to fill conn_open.src_addr */
 	struct sockaddr_storage src_addr;
+
+	/* Deferred CLOSE_CONNECTION reply + DISCONNECTED delivery, run off the
+	 * drain_lock. Embedded rather than allocated: the handler runs in the EQ
+	 * drain, where a GFP_ATOMIC failure is routine rather than a sign of a
+	 * broken system, and there is nothing to allocate if the work lives in
+	 * the cm_id it already needs. INIT_WORK()ed once in ptl_cm_id_create();
+	 * ptl_cm_id_destroy() cancel_work_sync()s it before kfree(id). */
+	struct work_struct close_work;
 };
 
 /* Lifecycle */
@@ -124,4 +133,7 @@ int ptl_cm_id_set_state(struct ptl_cm_id *id, ptl_cm_id_e new_state);
 int ptl_cm_id_resolve_addr(struct ptl_cm_id *id,const struct sockaddr *src_addr,const struct sockaddr *dst_addr,unsigned long timeout_ms);
 
 int ptl_cm_send_close_reply(struct ptl_cm_id *id);
+
+/* Work handler for close_work above; defined in ptl_cq.c. */
+void ptl_close_work_fn(struct work_struct *w);
 #endif

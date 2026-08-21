@@ -101,23 +101,16 @@ static void ptl_handle_close_connection_reply(ptl_event_t *event,
 /* Target-initiated close (PTL_CLOSE_CONNECTION): ack with a CLOSE_CONNECTION_REPLY
  * and raise DISCONNECTED so nvme tears down. The reply send may sleep and this
  * runs under drain_lock, so it is deferred to a work item. */
-struct ptl_close_work {
-  struct work_struct work;
-  struct ptl_cm_id  *id;
-};
-
-static void ptl_close_work_fn(struct work_struct *w) {
-  struct ptl_close_work *cw =
-      container_of(w, struct ptl_close_work, work);
+void ptl_close_work_fn(struct work_struct *w) {
+  struct ptl_cm_id *id = container_of(w, struct ptl_cm_id, close_work);
   struct ptl_cm_event cm_event = {0};
-  int rc = ptl_cm_send_close_reply(cw->id);
+  int rc = ptl_cm_send_close_reply(id);
   if (rc)
     PTL_WARN("CLOSE_CONNECTION_REPLY send failed rc=%d", rc);
-  cm_event.event  = PTL_CM_EVENT_DISCONNECTED;
+  cm_event.event = PTL_CM_EVENT_DISCONNECTED;
   cm_event.status = 0;
-  if (cw->id->event_handler)
-    cw->id->event_handler(cw->id, &cm_event);
-  kfree(cw);
+  if (id->event_handler)
+    id->event_handler(id, &cm_event);
 }
 
 static void ptl_handle_close_connection(ptl_event_t *event,
@@ -126,7 +119,6 @@ static void ptl_handle_close_connection(ptl_event_t *event,
   struct ptl_conn_msg *msg = recv_buffer->conn_msg;
   struct ptl_bxiv3_qp_map_entry *entry;
   struct ptl_qp *ptl_qp = NULL;
-  struct ptl_close_work *cw;
   int qpn = msg->conn_close.initiator_qp_num;
 
   PTL_DEBUG("<PTL_CLOSE_CONNECTION> init_qp=%d tgt_qp=%d",
@@ -150,14 +142,11 @@ static void ptl_handle_close_connection(ptl_event_t *event,
       ptl_qp->ptl_id->cm_id_state != PTL_CM_DISCONNECTED)
     ptl_cm_id_set_state(ptl_qp->ptl_id, PTL_CM_DISCONNECTING);
 
-  cw = kzalloc(sizeof(*cw), GFP_ATOMIC);
-  if (!cw) {
-    PTL_WARN("close_work OOM for qpn %d", qpn);
-    return;
-  }
-  cw->id = ptl_qp->ptl_id;
-  INIT_WORK(&cw->work, ptl_close_work_fn);
-  schedule_work(&cw->work); /* reply + DISCONNECTED off the drain_lock */
+  /* The work is embedded in the cm_id and INIT_WORK()ed at create time, so
+   * there is nothing to allocate here and no GFP_ATOMIC failure to handle. A
+   * duplicate close for the same qp finds it already queued and
+   * schedule_work() is a no-op, which is the behaviour we want: one reply. */
+  schedule_work(&ptl_qp->ptl_id->close_work); /* off the drain_lock */
 }
 
 /* Fail one completion instead of the whole machine: a cid that disagrees with the

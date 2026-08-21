@@ -137,6 +137,7 @@ struct ptl_cm_id *ptl_cm_id_create(struct net *net, ptl_cm_handler handler,
 
     id->cm_id_state = PTL_CM_IDLE;
     spin_lock_init(&id->state_lock);
+    INIT_WORK(&id->close_work, ptl_close_work_fn);
 
     PTL_DEBUG("Created ptl_cm_id: %p", id);
     return id;
@@ -148,6 +149,12 @@ void ptl_cm_id_destroy(struct ptl_cm_id *id)
 
     if (!id)
         return;
+
+    /* A target-initiated close may have queued close_work; it dereferences
+     * this id, so it must not outlive the kfree() below. Both callers are
+     * process context (they mutex_destroy() right after), so syncing here is
+     * safe. */
+    cancel_work_sync(&id->close_work);
 
     /* stop further operations; every state may transition to ERROR */
     ptl_cm_id_set_state(id, PTL_CM_ERROR);   //renamed: ptl_cm_set_state -> ptl_cm_id_set_state
