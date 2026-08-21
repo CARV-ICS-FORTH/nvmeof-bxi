@@ -206,6 +206,11 @@ static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq) {
    * BUG(). A remote peer (or a stale event arriving after a reconnect) must not
    * be able to reboot this host  */
   if (nvme_cid >= ptl_qp->recv_op_meta_size) {
+    /* Loud but not fatal: the index is wire-controlled, so a peer must not be
+     * able to BUG() this host. WARN_ON_ONCE() still gives a stack trace and
+     * taints the kernel, and a box booted panic_on_warn=1 dies here on the
+     * first occurrence - the fast detection, chosen by the operator. */
+    WARN_ON_ONCE(1);
     PTL_WARN_RL("Wrong recv_op_meta_idx: it is: %u size is: %lu qpn: %d, "
                 "dropping event",
                 nvme_cid, ptl_qp->recv_op_meta_size, ptl_qp->qpn);
