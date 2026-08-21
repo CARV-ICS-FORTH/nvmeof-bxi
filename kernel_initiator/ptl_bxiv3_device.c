@@ -427,8 +427,9 @@ int ptl_bxiv3_dev_destroy(struct ptl_bxiv3_device *bxiv3_dev) {
    * PtlPTFree()/PtlEQFree() write to, so running it first oopsed on every rmmod. */
   rc = PtlNIFini(bxiv3_dev->nicia_handle);
   if (PTL_OK != rc) {
-    PTL_WARN("Failed to shut down nicia handle of iface id: %d with code: %d",
-             bxiv3_dev->iface_id, rc);
+    PTL_WARN("Failed to shut down nicia handle of iface id: %d with code: %d "
+             "(%s)",
+             bxiv3_dev->iface_id, rc, PtlToStr(rc, PTL_STR_ERROR));
   }
 
   kfree(bxiv3_dev);

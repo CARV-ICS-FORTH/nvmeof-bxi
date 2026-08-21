@@ -5,17 +5,17 @@
 #include <linux/printk.h>
 #include <linux/string.h>
 #include "ptl_object_types.h"
-#include <linux/in.h>            
-#include <linux/in6.h>           
-#include <linux/kref.h>         
-#include <linux/spinlock.h>      
-#include "ptl_bxiv3_dev_map.h"   
-#include "ptl_bxiv3_device.h"    
+#include <linux/in.h>
+#include <linux/in6.h>
+#include <linux/kref.h>
+#include <linux/spinlock.h>
+#include "ptl_bxiv3_dev_map.h"
+#include "ptl_bxiv3_device.h"
 /* the global device map, defined in the device layer */
-extern struct ptl_bxiv3_dev_map bxiv3_dev_map;   
+extern struct ptl_bxiv3_dev_map bxiv3_dev_map;
 static unsigned long next_nicia_num = 0;
 /* State machine */
-int ptl_cm_id_set_state(struct ptl_cm_id *id, ptl_cm_id_e new_state)   
+int ptl_cm_id_set_state(struct ptl_cm_id *id, ptl_cm_id_e new_state)
 {
     unsigned long flags;
 
@@ -90,7 +90,7 @@ int ptl_cm_id_set_state(struct ptl_cm_id *id, ptl_cm_id_e new_state)
         goto invalid;
     }
 
-    PTL_DEBUG("ptl_cm_id: state %d -> %d", id->cm_id_state, new_state);   
+    PTL_DEBUG("ptl_cm_id: state %d -> %d", id->cm_id_state, new_state);
     id->cm_id_state = new_state;
 
 out:
@@ -98,7 +98,7 @@ out:
     return 0;
 
 invalid:
-    PTL_WARN("ptl_cm_id: invalid state transition %d -> %d",              
+    PTL_WARN("ptl_cm_id: invalid state transition %d -> %d",
            id->cm_id_state, new_state);
     spin_unlock_irqrestore(&id->state_lock, flags);
     return -EINVAL;
@@ -164,7 +164,7 @@ void ptl_cm_id_destroy(struct ptl_cm_id *id)
 
     put_net(id->net);
 
-    PTL_DEBUG("ptl_cm_id: destroyed id %p", id);   
+    PTL_DEBUG("ptl_cm_id: destroyed id %p", id);
 
     id->object_type = 0;
 

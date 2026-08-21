@@ -10,13 +10,13 @@
 #include <linux/slab.h>
 #include <rdma/ib_verbs.h>
 
-#include "asm-generic/errno-base.h"
+#include <asm-generic/errno-base.h>
 #include "ib_portals.h"
-#include "linux/bxi3/ptl.h"
-#include "linux/container_of.h"
-#include "linux/gfp_types.h"
-#include "linux/scatterlist.h"
-#include "linux/types.h"
+#include <linux/bxi3/ptl.h>
+#include <linux/container_of.h>
+#include <linux/gfp_types.h>
+#include <linux/scatterlist.h>
+#include <linux/types.h>
 #include "mr_portals_pool.h"
 #include "portals4.h"
 #include "portals4_bxiext.h"
@@ -209,12 +209,12 @@ int ib_portals_destroy_qp(struct ib_qp *qp) {
    * its LE still posted leaves the NIC holding a freed user_ptr. Must stay ahead
    * of the PTE free and the kfree() below. */
   if (ptl_qp->rma_le_linked) {
-    PTL_WARN_RL("destroy_qp: rma_le still linked on PTE %d for ptl_qp "
-                "{initiator_qp_num: %d, target_qp_num: %d} - this teardown "
-                "skipped the drain; unlinking here so the LE cannot outlive "
-                "the QP",
-                ptl_qp->recv_cq->pte, ptl_qp->ptl_id->initiator_qp_num,
-                ptl_qp->ptl_id->target_qp_num);
+    PTL_WARN("destroy_qp: rma_le still linked on PTE %d for ptl_qp "
+             "{initiator_qp_num: %d, target_qp_num: %d} - this teardown "
+             "skipped the drain; unlinking here so the LE cannot outlive "
+             "the QP",
+             ptl_qp->recv_cq->pte, ptl_qp->ptl_id->initiator_qp_num,
+             ptl_qp->ptl_id->target_qp_num);
   }
   ib_portals_unlink_rma_le(ptl_qp, "destroy_qp");
 
@@ -815,7 +815,7 @@ void ib_portals_unregister_client(struct ib_client *client) {
         /* Not fatal: this shim keeps no per-device client_data, so the remove
          * callback cannot be reconstructed, and nvme_rdma_cleanup_module()
          * deletes the controllers itself. Was UNIMPL(), which BUG()s on rmmod. */
-        IB_PORTALS4_WARN(
+        PTL_WARN(
             "skipping remove callback for client '%s' (no per-device tracking)",
             client->name);
       }
@@ -859,22 +859,22 @@ static void ib_portals_unlink_rma_le(struct ptl_qp *ptl_qp, const char *who) {
   if (PTL_OK != rc) {
     /* LE still posted with the QP about to be freed: this is the state that
      * strands a recycled PTE with a dangling user_ptr. */
-    PTL_WARN_RL("%s: failed to unlink receive buffer for ptl_qp: "
-                "{initiator_qp_num: %d, target_qp_num: %d} after %d retries. "
-                "Reason: %s. The LE stays posted on PTE %d - completions "
-                "arriving on it will be dropped.",
-                who, ptl_qp->ptl_id->initiator_qp_num,
-                ptl_qp->ptl_id->target_qp_num, retries,
-                PtlToStr(rc, PTL_STR_ERROR), ptl_qp->recv_cq->pte);
+    PTL_WARN("%s: failed to unlink receive buffer for ptl_qp: "
+             "{initiator_qp_num: %d, target_qp_num: %d} after %d retries. "
+             "Reason: %s. The LE stays posted on PTE %d - completions "
+             "arriving on it will be dropped.",
+             who, ptl_qp->ptl_id->initiator_qp_num,
+             ptl_qp->ptl_id->target_qp_num, retries,
+             PtlToStr(rc, PTL_STR_ERROR), ptl_qp->recv_cq->pte);
     return;
   }
 
   ptl_qp->rma_le_linked = false;
   if (retries > 0) {
-    PTL_WARN_RL("%s: unlinked receive buffer for ptl_qp: {initiator_qp_num: %d, "
-                "target_qp_num: %d} after %d PTL_IN_USE retries",
-                who, ptl_qp->ptl_id->initiator_qp_num,
-                ptl_qp->ptl_id->target_qp_num, retries);
+    PTL_DEBUG("%s: unlinked receive buffer for ptl_qp: {initiator_qp_num: %d, "
+              "target_qp_num: %d} after %d PTL_IN_USE retries",
+              who, ptl_qp->ptl_id->initiator_qp_num,
+              ptl_qp->ptl_id->target_qp_num, retries);
   }
 }
 
