@@ -303,7 +303,8 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 	rc = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_cnxt), &md, &send_buffer->md_handle);
 	if (rc != PTL_OK) {
 		PTL_CP_SERVER_UNLOCK(&ptl_cmd_queue_lock);
-		SPDK_PTL_FATAL("PtlMDBind failed with code: %d\n", rc);
+		SPDK_PTL_FATAL("PtlMDBind failed with code: %d (%s)\n", rc,
+			       PtlToStr(rc, PTL_STR_ERROR));
 	}
 
 
@@ -325,7 +326,8 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 	PTL_CP_SERVER_UNLOCK(&ptl_cmd_queue_lock);
 
 	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("PtlPut failed with code: %d\n", rc);
+		SPDK_PTL_FATAL("PtlPut failed with code: %d (%s)\n", rc,
+			       PtlToStr(rc, PTL_STR_ERROR));
 	}
 }
 
@@ -446,8 +448,9 @@ static void rdma_ptl_handle_open_conn_reply(struct ptl_cm_id *listen_id,
 	struct ptl_cm_id *connection_id;
 
 	if (PTL_OK != open_conn_reply->status) {
-		SPDK_PTL_FATAL("[%s], CP server: connection failed with code: %d", ptl_control_plane_server.role,
-			       open_conn_reply->status);
+		SPDK_PTL_FATAL("[%s], CP server: connection failed with code: %d (%s)",
+			       ptl_control_plane_server.role, open_conn_reply->status,
+			       PtlToStr(open_conn_reply->status, PTL_STR_ERROR));
 	}
 	/*XXX TODO XXX*/
 	int qp_num = is_target ? conn_msg->conn_open_reply.target_qp_num :
@@ -610,8 +613,9 @@ static void rdma_ptl_handle_close_conn_reply(struct ptl_conn_msg *conn_msg)
 	}
 
 	if (PTL_OK != close_reply->status) {
-		SPDK_PTL_FATAL("[%s], connection close failed with code: %d", ptl_control_plane_server.role,
-			       close_reply->status);
+		SPDK_PTL_FATAL("[%s], connection close failed with code: %d (%s)",
+			       ptl_control_plane_server.role, close_reply->status,
+			       PtlToStr(close_reply->status, PTL_STR_ERROR));
 	}
 
 	SPDK_PTL_DEBUG("[%s] Got a close connection reply! connection id is: {initiator qp num: %d target_qp_num: %d } aldready done staff nothing to do",
@@ -844,14 +848,15 @@ static void rdma_ptl_boot_cp_server(struct  ptl_cm_id *cm_id, const char *role)
 	rc = PtlEQAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_CONTROL_PLANE_NUM_RECV_BUFFERS,
 			&ptl_control_plane_server.eq_handle);
 	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("PtlEQAlloc for the control plane failed with code: %d\n", rc);
+		SPDK_PTL_FATAL("PtlEQAlloc for the control plane failed with code: %d (%s)\n",
+			       rc, PtlToStr(rc, PTL_STR_ERROR));
 	}
 	/*Bind it to the portal index*/
 	rc = PtlPTAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt), 0, ptl_control_plane_server.eq_handle,
 			PTL_CP_SERVER_PTE, &ptl_control_plane_server.pt_index);
 	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("Error allocating portal for connection server %d reason: %d",
-			       PTL_CP_SERVER_PTE, rc);
+		SPDK_PTL_FATAL("Error allocating portal for connection server %d reason: %d (%s)",
+			       PTL_CP_SERVER_PTE, rc, PtlToStr(rc, PTL_STR_ERROR));
 	}
 	rc = PtlPTEnable(ptl_cnxt_get_ni_handle(ptl_cnxt), ptl_control_plane_server.pt_index);
 	if (PTL_OK != rc) {

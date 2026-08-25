@@ -1152,7 +1152,8 @@ int spdk_rdma_provider_qp_flush_send_wrs(
 #endif
 
       if (rc != PTL_OK) {
-        SPDK_PTL_FATAL("PtlPut failed with rc: %d", rc);
+        SPDK_PTL_FATAL("PtlPut failed with rc: %d (%s)", rc,
+                       PtlToStr(rc, PTL_STR_ERROR));
       }
       spdk_rdma_provider_ptl_unmark_wr(wr);
     }

@@ -624,7 +624,8 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
       SPDK_PTL_DEBUG("Ok queue overflow break");
       break;
     } else {
-      SPDK_PTL_FATAL("PtlEQGet failed with error code %d", ret);
+      SPDK_PTL_FATAL("PtlEQGet failed with error code %d (%s)", ret,
+                     PtlToStr(ret, PTL_STR_ERROR));
     }
   }
   pthread_mutex_unlock(&g_lock);
@@ -674,7 +675,8 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
       // SPDK_PTL_DEBUG("No events ok COOL");
       break;
     } else {
-      SPDK_PTL_FATAL("PtlEQGet failed with error code %d", ret);
+      SPDK_PTL_FATAL("PtlEQGet failed with error code %d (%s)", ret,
+                     PtlToStr(ret, PTL_STR_ERROR));
     }
   }
   /*hack*/
@@ -848,8 +850,9 @@ struct ptl_context *ptl_cnxt_get(void) {
 #endif
 
   if (ret != PTL_OK) {
-    SPDK_PTL_FATAL("PtlNIInit failed with code: %d for nid: %d and pid: %d",
-                   ret, ptl_context.nid, ptl_context.pid);
+    SPDK_PTL_FATAL("PtlNIInit failed with code: %d (%s) for nid: %d and pid: %d",
+                   ret, PtlToStr(ret, PTL_STR_ERROR), ptl_context.nid,
+                   ptl_context.pid);
   }
   ptl_cnxt_dev_print_ni_limits(&actual);
 

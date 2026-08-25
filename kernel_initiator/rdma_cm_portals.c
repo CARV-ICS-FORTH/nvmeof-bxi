@@ -86,7 +86,8 @@ static int ptl_cm_send_request(struct ptl_conn_send_buffer *send_buffer,
 			   (const ptl_md_t *)&send_buffer->md,
 			   (const ptl_msg_t *)&send_buffer->msg);
 	if (rc != PTL_OK) {
-		PTL_FATAL("PtlPut failed with code: %d", rc);
+		PTL_FATAL("PtlPut failed with code: %d (%s)", rc,
+			  PtlToStr(rc, PTL_STR_ERROR));
 		return -EIO;
 	}
 

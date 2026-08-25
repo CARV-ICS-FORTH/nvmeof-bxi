@@ -532,7 +532,8 @@ static void ptl_eq_drain(struct ptl_cq *ptl_cq) {
     } else if (rc == PTL_EQ_EMPTY) {
       break;
     } else {
-      PTL_FATAL("PtlEQGet unhandled code %d", rc);
+      PTL_FATAL("PtlEQGet unhandled code %d (%s)", rc,
+                PtlToStr(rc, PTL_STR_ERROR));
       break;
     }
   }
@@ -601,17 +602,20 @@ struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
   rc = PtlEQAllocAsync(bxiv3_dev->nicia_handle, cq->nr_cqes, &cq->eq,
                        ptl_eq_callback, cq, cq->bxiv3_dev->intr_index);
   if (PTL_OK != rc) {
-    PTL_FATAL("Failed to allocate event queue for pte: %d", pte);
+    PTL_FATAL("Failed to allocate event queue for pte: %d with code: %d (%s)",
+              pte, rc, PtlToStr(rc, PTL_STR_ERROR));
     goto err;
   }
   rc = PtlPTAlloc(bxiv3_dev->nicia_handle, 0, cq->eq, pte, &cq->pte);
   if (PTL_OK != rc) {
-    PTL_FATAL("Failed to allocate PTE: %u with reason: %d", pte, rc);
+    PTL_FATAL("Failed to allocate PTE: %u with reason: %d (%s)", pte, rc,
+              PtlToStr(rc, PTL_STR_ERROR));
     goto free_cq;
   }
   rc = PtlPTEnable(bxiv3_dev->nicia_handle, cq->pte);
   if (PTL_OK != rc) {
-    PTL_FATAL("Failed to enable PTE: %u with reason: %d", pte, rc);
+    PTL_FATAL("Failed to enable PTE: %u with reason: %d (%s)", pte, rc,
+              PtlToStr(rc, PTL_STR_ERROR));
     goto free_cq;
   }
   PTL_DEBUG("Enabled for iface_id: %d PTE: %u and created cq with %d number of "
@@ -628,7 +632,8 @@ struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
 free_cq:
   rc = PtlEQFree(cq->eq);
   if (PTL_OK != rc)
-    PTL_WARN("Failed to free event queue with code: %d, continuing", rc);
+    PTL_WARN("Failed to free event queue with code: %d (%s), continuing", rc,
+             PtlToStr(rc, PTL_STR_ERROR));
 err:
   kfree(cq);
   return ERR_PTR(-EINVAL);
@@ -653,14 +658,15 @@ ptl_pt_index_t ptl_cq_destroy(struct ptl_cq *ptl_cq) {
   /* Free the portal table entry */
   rc = PtlPTFree(ptl_cq->bxiv3_dev->nicia_handle, ptl_cq->pte);
   if (PTL_OK != rc) {
-    PTL_WARN("Failed to free PTE: %d with code: %d, continuing", ptl_cq->pte,
-             rc);
+    PTL_WARN("Failed to free PTE: %d with code: %d (%s), continuing",
+             ptl_cq->pte, rc, PtlToStr(rc, PTL_STR_ERROR));
   }
 
   /* Free the event queue */
   rc = PtlEQFree(ptl_cq->eq);
   if (PTL_OK != rc) {
-    PTL_WARN("Failed to free event queue with code: %d, continuing", rc);
+    PTL_WARN("Failed to free event queue with code: %d (%s), continuing", rc,
+             PtlToStr(rc, PTL_STR_ERROR));
   }
   PTL_DEBUG("Destroyed cq for PTE: %d", ptl_cq->pte);
   /* Free the cq structure */
