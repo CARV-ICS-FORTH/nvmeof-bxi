@@ -203,9 +203,9 @@ static bool rdma_ptl_conn_map_remove(struct ptl_cm_id *ptl_id)
 	}
 	ret = false;
 	/* Not fatal: the close handler already released the slot, so a later
-  	* rdma_destroy_id() on the same connection finds nothing. Harmless. */
-  	SPDK_PTL_WARN("[%s] CP server: Did not find connection with qp num: %d",
-          ptl_control_plane_server.role, ptl_id->ptl_qp_num);
+	 * rdma_destroy_id() on the same connection finds nothing. Harmless. */
+	SPDK_PTL_WARN("[%s] CP server: Did not find connection with qp num: %d",
+		      ptl_control_plane_server.role, ptl_id->ptl_qp_num);
 exit:
 	PTL_CP_SERVER_UNLOCK(&conn_map.conn_map_lock);
 	return ret;

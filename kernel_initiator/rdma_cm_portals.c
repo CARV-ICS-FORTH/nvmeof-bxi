@@ -17,8 +17,8 @@
 #include "ptl_bxiv3_device.h"
 /* ptl_connection.h provides conn_msg / conn_send_buffer, the protocol version,
  * the OPEN/CLOSE_CONNECTION op types, PTL_CP_SERVER_PTE and PTL_INITIATOR_DEPTH. */
- #include "ptl_pd.h"
- #include "ptl_uuid.h"
+#include "ptl_pd.h"
+#include "ptl_uuid.h"
 #include "ptl_connection.h"
 #include "ptl_cq.h"            /* ptl_cq: recv_cq->pte / ->ptl_cq_id / conn_mgmt_eq */
 #include "ptl_object_types.h"  /* PTL_CONN_SEND_BUFFER, PTL_DEBUG/WARN, ptl_obj_conn_params */
@@ -163,7 +163,7 @@ int ptl_cm_connect_locked(struct ptl_cm_id *id, struct ptl_cm_conn_param *param)
 	send_buffer->conn_msg.msg_header.peer_info.src.pte = PTL_CP_SERVER_PTE;
 	/* destination */
 	send_buffer->conn_msg.msg_header.peer_info.dest.nid = id->remote_peer.phys.nid;
-  	send_buffer->conn_msg.msg_header.peer_info.dest.pid = id->remote_peer.phys.pid;
+	send_buffer->conn_msg.msg_header.peer_info.dest.pid = id->remote_peer.phys.pid;
 	send_buffer->conn_msg.msg_header.peer_info.dest.pte = PTL_CP_SERVER_PTE;
 
 	/* body: initiator resources the target must know about.

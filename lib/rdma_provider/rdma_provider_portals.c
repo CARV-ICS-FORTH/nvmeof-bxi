@@ -1013,6 +1013,7 @@ int spdk_rdma_provider_qp_flush_send_wrs(
   ptl_msg_t msg;
   u16 nvme_cid;
   struct ptl_mem_desc *ptl_mem_desc;
+  struct ibv_send_wr *next_wr = NULL;
 
   if (spdk_unlikely(NULL == spdk_rdma_qp->send_wrs.first)) {
     return 0;
@@ -1022,7 +1023,6 @@ int spdk_rdma_provider_qp_flush_send_wrs(
   // redundant*/
   SPDK_PTL_DEBUG("send_wrs list start....QPN: %d",
                  ptl_qp->ptl_cm_id->ptl_qp_num);
-  struct ibv_send_wr *next_wr = NULL;
   for (struct ibv_send_wr *wr = spdk_rdma_qp->send_wrs.first; wr != NULL;
        wr = next_wr) {
     /* Detach before processing: these WRs are recycled, and a stale ->next
