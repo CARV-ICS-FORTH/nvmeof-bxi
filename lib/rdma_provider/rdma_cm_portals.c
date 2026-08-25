@@ -523,27 +523,21 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 	struct rdma_cm_event *fake_event;
 	struct ptl_cm_id * connection_id;
 	struct rdma_ptl_send_buffer *reply_buf;
-
-	/* Everything below is wire-derived and SPDK_PTL_FATAL ends in _exit(), so a
-	 * stale or foreign close - e.g. one naming a connection from before the
-	 * target restarted - is logged and ignored rather than fatal. */
-	if (ptl_control_plane_server.protocol_version != request->msg_header.version) {
-		SPDK_PTL_WARN("[%s], PROTOCOL versions mismatch client uses: %lu %s: %lu - ignoring close",
-			      ptl_control_plane_server.role, request->msg_header.version, ptl_control_plane_server.role,
-			      ptl_control_plane_server.protocol_version);
-		return;
-	}
-
 	int initiator_qp_num = conn_close->initiator_qp_num;
-	if (initiator_qp_num == 0) {
-		SPDK_PTL_WARN("initiator qp num == 0 in close message - ignoring");
-		return;
+	int target_qp_num = conn_close->target_qp_num;
+
+	if (ptl_control_plane_server.protocol_version != request->msg_header.version) {
+		SPDK_PTL_FATAL("[%s], PROTOCOL versions mismatch client uses: %lu %s: %lu",
+			       ptl_control_plane_server.role, request->msg_header.version, ptl_control_plane_server.role,
+			       ptl_control_plane_server.protocol_version);
 	}
 
-	int target_qp_num = conn_close->target_qp_num;
+	if (initiator_qp_num == 0) {
+		SPDK_PTL_FATAL("initiator qp num == 0: Nida does not assign 0 qp numbers!");
+	}
+
 	if (target_qp_num == 0) {
-		SPDK_PTL_WARN("target qp num == 0 in close message - ignoring");
-		return;
+		SPDK_PTL_FATAL("target qp num == 0: Nida does not assign 0 qp numbers!");
 	}
 
 
