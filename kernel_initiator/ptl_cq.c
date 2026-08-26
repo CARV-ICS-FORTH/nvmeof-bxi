@@ -149,35 +149,6 @@ static void ptl_handle_close_connection(ptl_event_t *event,
   schedule_work(&ptl_qp->ptl_id->close_work); /* off the drain_lock */
 }
 
-/* Fail one completion instead of the whole machine: a cid that disagrees with the
- * buffer it landed in is untrusted, so deliver an errored wc and let NVMe retry
- * rather than stalling until the 30 s command timeout. */
-static void ptl_fail_nvme_cpl(struct ptl_cq *ptl_cq, struct ptl_qp *ptl_qp,
-                              u16 nvme_cid) {
-  struct ptl_recv_op *recv_op_meta;
-  struct ib_wc wc;
-
-  if (nvme_cid >= ptl_qp->recv_op_meta_size)
-    return; /* cannot index safely; command will time out and reconnect */
-  recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
-  if (false == recv_op_meta->is_set || NULL == recv_op_meta->wr_cqe)
-    return; /* nothing outstanding in this slot, nothing to complete */
-
-  memset(&wc, 0, sizeof(wc));
-  wc.status = IB_WC_GENERAL_ERR;
-  wc.opcode = IB_WC_RECV;
-  wc.wr_id = recv_op_meta->wr_id;
-  wc.wr_cqe = recv_op_meta->wr_cqe;
-  wc.qp = &recv_op_meta->ptl_qp->fake_qp;
-  wc.src_qp = recv_op_meta->ptl_qp->qpn;
-
-  recv_op_meta->is_set = false;
-  recv_op_meta->late_wc_valid = false;
-  recv_op_meta->parts_num_received = 0;
-  recv_op_meta->total_parts = 0;
-  recv_op_meta->wr_cqe->done(&ptl_cq->fake_cq, &wc);
-}
-
 static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   struct ptl_recv_op *recv_op_meta = NULL;
   struct ptl_qp *ptl_qp;
@@ -189,48 +160,32 @@ static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   // recv_op = event->user_ptr;
 
   ptl_qp = event->user_ptr;
-  /* user_ptr is wire-derived: a stale event after a reconnect can name a ptl_qp
-   * that was freed and reused, so drop it rather than BUG().
-   *still dereferences a possibly-dangling pointer; closing that needs
-   * a qp handle table instead of a raw pointer in user_ptr. */
+  /* Fatal by design: a stale user_ptr means the qp table is corrupt. */
   if (NULL == ptl_qp || PTL_QP != ptl_qp->object_type) {
-    PTL_WARN_RL("nvme_cpl with stale/invalid qp context %p, dropping event",
-                ptl_qp);
-    return;
+    PTL_FATAL("nvme_cpl with stale/invalid qp context %p", ptl_qp);
   }
   PTL_DEBUG("nvme_cpl: got nvme_completion at addr: 0x%llx pte: %d qpn: %d",
             event->start, event->pt_index, ptl_qp->qpn);
 
   nvme_cid = ptl_uuid_get_nvme_cid(&event->hdr_data);
-  /* new addition: everything below is derived from the wire, so none of it may
-   * BUG(). A remote peer (or a stale event arriving after a reconnect) must not
-   * be able to reboot this host  */
+  /* Clean over 305 reconnects and ~130k completions, so these stay fatal. */
   if (nvme_cid >= ptl_qp->recv_op_meta_size) {
-    /* Loud but not fatal: the index is wire-controlled, so a peer must not be
-     * able to BUG() this host. WARN_ON_ONCE() still gives a stack trace and
-     * taints the kernel, and a box booted panic_on_warn=1 dies here on the
-     * first occurrence - the fast detection, chosen by the operator. */
-    WARN_ON_ONCE(1);
-    PTL_WARN_RL("Wrong recv_op_meta_idx: it is: %u size is: %lu qpn: %d, "
-                "dropping event",
-                nvme_cid, ptl_qp->recv_op_meta_size, ptl_qp->qpn);
-    return;
+    PTL_FATAL("Wrong recv_op_meta_idx: it is: %u size is: %lu qpn: %d",
+              nvme_cid, ptl_qp->recv_op_meta_size, ptl_qp->qpn);
   }
   calculated_cid =
       (u16)(((u64)event->start - (u64)ptl_qp->ptl_id->nvme_cpl_start) /
             sizeof(struct nvme_completion));
   if (calculated_cid != nvme_cid) {
-    PTL_WARN_RL("Corrupted nvme_cid value: %u calculated: %u qpn: %d, "
-                "failing this completion",
-                nvme_cid, calculated_cid, ptl_qp->qpn);
-    ptl_fail_nvme_cpl(ptl_cq, ptl_qp, nvme_cid);
-    return;
+    PTL_FATAL("Corrupted nvme_cid value: %u calculated: %u qpn: %d",
+              nvme_cid, calculated_cid, ptl_qp->qpn);
   }
   recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
 
   // PTL_DEBUG("nvme_cpl: recv_op_meta_idx = %llu for qpn: %d",recv_op_meta_idx,
   // ptl_qp->qpn);
   if (false == recv_op_meta->is_set) {
+    /* An ordinary post-reconnect race, not corruption, so this one stays non-fatal. */
     PTL_WARN_RL("Metadata not set for qpn: %d nvme_cid: %u, dropping event",
                 ptl_qp->qpn, nvme_cid);
     return;
@@ -272,18 +227,14 @@ static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   u16 nvme_cid;
 
 
-  /* new addition: same wire-derived context as ptl_handle_nvme_cpl - a stale
-   * post-reconnect event must not be able to BUG() the host. See :214. */
+  /* Same wire-derived context as ptl_handle_nvme_cpl. */
   if (NULL == ptl_qp || PTL_QP != ptl_qp->object_type) {
-    PTL_WARN_RL("rdma_write with stale/invalid qp context %p, dropping event",
-                ptl_qp);
-    return;
+    PTL_FATAL("rdma_write with stale/invalid qp context %p", ptl_qp);
   }
 
   // sanity check
   if (event->rlength == sizeof(struct nvme_completion)) {
-    PTL_WARN_RL("rdma_write sized like an nvme_completion, dropping event");
-    return;
+    PTL_FATAL("rdma_write sized like an nvme_completion");
   }
 
   nvme_cid = ptl_uuid_get_nvme_cid(&event->hdr_data);
@@ -292,12 +243,10 @@ static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq) {
             "%d queue size: %d",
             event->start, event->pt_index, ptl_qp->qpn, nvme_cid,
             ptl_qp->recv_op_meta_size);
-  /* new addition: nvme_cid is a wire value and this path had no bounds check at
-   * all - an out-of-range cid indexed recv_op_meta[] straight out of bounds. */
+  /* This path had no bounds check at all before. */
   if (nvme_cid >= ptl_qp->recv_op_meta_size) {
-    PTL_WARN_RL("rdma_write cid %u out of range (size %lu) qpn: %d, dropping",
-                nvme_cid, ptl_qp->recv_op_meta_size, ptl_qp->qpn);
-    return;
+    PTL_FATAL("rdma_write cid %u out of range (size %lu) qpn: %d",
+              nvme_cid, ptl_qp->recv_op_meta_size, ptl_qp->qpn);
   }
   recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
   ++recv_op_meta->parts_num_received;
