@@ -30,34 +30,6 @@
 #include "ptl_recv_op.h"
 #include "ptl_uuid.h"
 
-#define GES_UNIMPL_RATELIMIT_PERIOD HZ
-#define GES_UNIMPL_RATELIMIT_BURST 10
-
-static DEFINE_RATELIMIT_STATE(ges_unimpl_rs, GES_UNIMPL_RATELIMIT_PERIOD,
-                              GES_UNIMPL_RATELIMIT_BURST);
-
-#define IB_PORTALS4_UNIMPL(fmt, ...)                                           \
-  do {                                                                         \
-    if (__ratelimit(&ges_unimpl_rs))                                           \
-      pr_warn("Portals4/ib: UNIMPLEMENTED: %s:%d %s: " fmt "\n", __FILE__,     \
-              __LINE__, __func__, ##__VA_ARGS__);                              \
-    BUG();                                                                     \
-  } while (0)
-
-#define IB_PORTALS4_WARN_ONCE(fmt, ...)                                        \
-  do {                                                                         \
-    static bool __once;                                                        \
-    if (!__once) {                                                             \
-      __once = true;                                                           \
-      pr_warn("Portals4/ib: %s:%d %s: " fmt "\n", __FILE__, __LINE__,          \
-              __func__, ##__VA_ARGS__);                                        \
-      WARN_ON(1);                                                              \
-    }                                                                          \
-  } while (0)
-
-#define IB_PORTALS4_WARN(fmt, ...)                                             \
-  pr_warn("%s:%s:%d: " fmt "\n", __FILE__, __func__, __LINE__, ##__VA_ARGS__)
-
 // Add near the top of ib_portals.c (after includes)
 #include <linux/list.h>
 #include <linux/mutex.h>
@@ -144,7 +116,7 @@ struct ib_cq *ib_portals_alloc_cq(void *ibdev, void *cq_context, int cqe,
   (void)cq_context;
   (void)cqe;
   (void)comp_vector;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  PTL_FATAL("UNIMPLEMENTED");
   return ERR_PTR(-EOPNOTSUPP);
 }
 
@@ -152,7 +124,7 @@ EXPORT_SYMBOL_GPL(ib_portals_alloc_cq);
 
 void ib_portals_free_cq(struct ib_cq *cq) {
   (void)cq;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  PTL_FATAL("UNIMPLEMENTED");
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_free_cq);
@@ -606,7 +578,7 @@ EXPORT_SYMBOL_GPL(ib_portals_post_recv);
 int ib_portals_process_cq_direct(struct ib_cq *cq, int budget) {
   (void)cq;
   (void)budget;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  PTL_FATAL("UNIMPLEMENTED");
   return -EOPNOTSUPP;
 }
 
@@ -701,7 +673,7 @@ int ib_portals_map_mr_sg_pi(struct ib_mr *mr, struct scatterlist *data_sg,
                             unsigned int *meta_sg_offset,
                             unsigned int page_size) {
   (void)mr;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  PTL_FATAL("UNIMPLEMENTED");
   return -EOPNOTSUPP;
 }
 
@@ -744,7 +716,7 @@ int ib_portals_check_mr_status(struct ib_mr *mr, int check, void *status) {
   (void)mr;
   (void)check;
   (void)status;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  PTL_FATAL("UNIMPLEMENTED");
   return -EOPNOTSUPP;
 }
 
@@ -754,12 +726,12 @@ int ib_portals_register_client(struct ib_client *client) {
   struct ib_portals_client_entry *client_entry;
 
   if (!client) {
-    IB_PORTALS4_WARN("Portals4/ib: register_client: NULL ib_client");
+    PTL_WARN("register_client: NULL ib_client");
     return -EINVAL;
   }
 
   if (!client->name) {
-    IB_PORTALS4_WARN("Portals4/ib: register_client: NULL client name");
+    PTL_WARN("register_client: NULL client name");
     return -EINVAL;
   }
   pr_info("Portals4/ib: register_client name=%s add=%ps remove=%ps "
@@ -768,13 +740,11 @@ int ib_portals_register_client(struct ib_client *client) {
           client->get_net_dev_by_params);
 
   if (!client->add) {
-    IB_PORTALS4_WARN("Portals4/ib: client '%s' has no add() callback",
-                     client->name);
+    PTL_WARN("client '%s' has no add() callback", client->name);
   }
 
   if (!client->remove) {
-    IB_PORTALS4_WARN("Portals4/ib: client '%s' has no remove() callback",
-                     client->name);
+    PTL_WARN("client '%s' has no remove() callback", client->name);
   }
 
   client_entry = kzalloc(sizeof(*client_entry), GFP_KERNEL);
@@ -788,7 +758,7 @@ int ib_portals_register_client(struct ib_client *client) {
   list_add_tail(&client_entry->node, &ib_portals_client_list);
   mutex_unlock(&ib_portals_client_lock);
 
-  IB_PORTALS4_WARN("Portals4/ib: registered client '%s'", client->name);
+  PTL_WARN("registered client '%s'", client->name);
   return 0;
 }
 
@@ -797,12 +767,12 @@ EXPORT_SYMBOL_GPL(ib_portals_register_client);
 void ib_portals_unregister_client(struct ib_client *client) {
   struct ib_portals_client_entry *client_entry, *tmp;
   if (!client) {
-    IB_PORTALS4_WARN("NULL ib_client");
+    PTL_WARN("NULL ib_client");
     return;
   }
 
   if (!client->name) {
-    IB_PORTALS4_WARN("NULL client name");
+    PTL_WARN("NULL client name");
     return;
   }
   // Semantics: real ib_core would call remove(dev, client_data) for each device
