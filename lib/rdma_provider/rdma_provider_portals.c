@@ -604,7 +604,6 @@ int spdk_rdma_provider_qp_disconnect(
 
   assert(spdk_rdma_qp != NULL);
   SPDK_PTL_DEBUG("Calling disconnect for the queue pair...");
-  assert(0);
   spdk_rdma_provider_qp_flush_send_wrs(spdk_rdma_qp, NULL);
 
   if (spdk_rdma_qp->cm_id) {
