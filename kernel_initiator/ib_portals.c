@@ -8,17 +8,15 @@
 #include <linux/printk.h>
 #include <linux/ratelimit.h>
 #include <linux/slab.h>
-#include <rdma/ib_cm.h>
 #include <rdma/ib_verbs.h>
-#include <rdma/rdma_cm.h>
 
-#include "asm-generic/errno-base.h"
+#include <asm-generic/errno-base.h>
 #include "ib_portals.h"
-#include "linux/bxi3/ptl.h"
-#include "linux/container_of.h"
-#include "linux/gfp_types.h"
-#include "linux/scatterlist.h"
-#include "linux/types.h"
+#include <linux/bxi3/ptl.h>
+#include <linux/container_of.h>
+#include <linux/gfp_types.h>
+#include <linux/scatterlist.h>
+#include <linux/types.h>
 #include "mr_portals_pool.h"
 #include "portals4.h"
 #include "portals4_bxiext.h"
@@ -31,34 +29,6 @@
 #include "ptl_pd.h"
 #include "ptl_recv_op.h"
 #include "ptl_uuid.h"
-
-#define GES_UNIMPL_RATELIMIT_PERIOD HZ
-#define GES_UNIMPL_RATELIMIT_BURST 10
-
-static DEFINE_RATELIMIT_STATE(ges_unimpl_rs, GES_UNIMPL_RATELIMIT_PERIOD,
-                              GES_UNIMPL_RATELIMIT_BURST);
-
-#define IB_PORTALS4_UNIMPL(fmt, ...)                                           \
-  do {                                                                         \
-    if (__ratelimit(&ges_unimpl_rs))                                           \
-      pr_warn("Portals4/ib: UNIMPLEMENTED: %s:%d %s: " fmt "\n", __FILE__,     \
-              __LINE__, __func__, ##__VA_ARGS__);                              \
-    BUG();                                                                     \
-  } while (0)
-
-#define IB_PORTALS4_WARN_ONCE(fmt, ...)                                        \
-  do {                                                                         \
-    static bool __once;                                                        \
-    if (!__once) {                                                             \
-      __once = true;                                                           \
-      pr_warn("Portals4/ib: %s:%d %s: " fmt "\n", __FILE__, __LINE__,          \
-              __func__, ##__VA_ARGS__);                                        \
-      WARN_ON(1);                                                              \
-    }                                                                          \
-  } while (0)
-
-#define IB_PORTALS4_WARN(fmt, ...)                                             \
-  pr_warn("%s:%s:%d: " fmt "\n", __FILE__, __func__, __LINE__, ##__VA_ARGS__)
 
 // Add near the top of ib_portals.c (after includes)
 #include <linux/list.h>
@@ -146,7 +116,7 @@ struct ib_cq *ib_portals_alloc_cq(void *ibdev, void *cq_context, int cqe,
   (void)cq_context;
   (void)cqe;
   (void)comp_vector;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  PTL_FATAL("UNIMPLEMENTED");
   return ERR_PTR(-EOPNOTSUPP);
 }
 
@@ -154,7 +124,7 @@ EXPORT_SYMBOL_GPL(ib_portals_alloc_cq);
 
 void ib_portals_free_cq(struct ib_cq *cq) {
   (void)cq;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  PTL_FATAL("UNIMPLEMENTED");
 }
 
 EXPORT_SYMBOL_GPL(ib_portals_free_cq);
@@ -188,20 +158,38 @@ EXPORT_SYMBOL_GPL(ib_portals_cq_pool_put);
 
 /* QP */
 
+static void ib_portals_unlink_rma_le(struct ptl_qp *ptl_qp, const char *who);
+
 int ib_portals_destroy_qp(struct ib_qp *qp) {
   struct ptl_qp *ptl_qp;
   struct ptl_bxiv3_qp_map_entry *entry;
   ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
   PTL_CHECK(ptl_qp, PTL_QP);
+  PTL_CHECK(ptl_qp->ptl_id, PTL_CM_ID);
   /**
    * List of things to destory/clean:
    *  1) ptl_id -->later there is an explicit call for it
    *  2) ptl_pd --> it's dummy but there are explicit calls to free it
    * ib_portals_dealloc_pd. Do nothing here. 3) send_cq, recv_cq: If it belongs
    * to a cq_pool do not touch it. Otherwise, destroy it here 4) ptl_mr_list? 5)
-   * rma_le, rma_leh has been destroyed during drain qp 6) recv_op_meta the
-   * buffer that accepts the nvme_cpl. Destroy it here.
+   * rma_le, rma_leh: unlinked here if the drain did not already do it - see
+   * below. 6) recv_op_meta the buffer that accepts the nvme_cpl. Destroy it
+   * here.
    */
+
+  /* Unlink unconditionally: not every teardown path drains, and a QP freed with
+   * its LE still posted leaves the NIC holding a freed user_ptr. Must stay ahead
+   * of the PTE free and the kfree() below. */
+  if (ptl_qp->rma_le_linked) {
+    PTL_WARN("destroy_qp: rma_le still linked on PTE %d for ptl_qp "
+             "{initiator_qp_num: %d, target_qp_num: %d} - this teardown "
+             "skipped the drain; unlinking here so the LE cannot outlive "
+             "the QP",
+             ptl_qp->recv_cq->pte, ptl_qp->ptl_id->initiator_qp_num,
+             ptl_qp->ptl_id->target_qp_num);
+  }
+  ib_portals_unlink_rma_le(ptl_qp, "destroy_qp");
+
   if (NULL == ptl_qp->recv_cq->cq_pool) {
     ptl_cq_destroy(ptl_qp->recv_cq);
     ptl_bxiv3_dev_free_pte(ptl_qp->ptl_id->bxiv3_dev, ptl_qp->recv_cq->pte);
@@ -448,8 +436,8 @@ static void ib_portals_send_nvmeof_cmd(struct ptl_qp *ptl_qp,
 
   msg.length = sge->length;
   msg.ack_req = send_op ? PTL_ACK_REQ : PTL_NO_ACK_REQ;
-  msg.target_id.phys.nid = ptl_qp->ptl_id->remote_nid;
-  msg.target_id.phys.pid = ptl_qp->ptl_id->remote_pid;
+  msg.target_id.phys.nid = ptl_qp->ptl_id->remote_peer.phys.nid;
+  msg.target_id.phys.pid = ptl_qp->ptl_id->remote_peer.phys.pid;
   msg.pt_index = ptl_qp->ptl_id->remote_msg_pte;
   msg.user_ptr = send_op;
   ptl_uuid_set_op_type(&msg.hdr_data, NVMeOF_cmd);
@@ -590,7 +578,7 @@ EXPORT_SYMBOL_GPL(ib_portals_post_recv);
 int ib_portals_process_cq_direct(struct ib_cq *cq, int budget) {
   (void)cq;
   (void)budget;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  PTL_FATAL("UNIMPLEMENTED");
   return -EOPNOTSUPP;
 }
 
@@ -685,7 +673,7 @@ int ib_portals_map_mr_sg_pi(struct ib_mr *mr, struct scatterlist *data_sg,
                             unsigned int *meta_sg_offset,
                             unsigned int page_size) {
   (void)mr;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  PTL_FATAL("UNIMPLEMENTED");
   return -EOPNOTSUPP;
 }
 
@@ -728,7 +716,7 @@ int ib_portals_check_mr_status(struct ib_mr *mr, int check, void *status) {
   (void)mr;
   (void)check;
   (void)status;
-  IB_PORTALS4_UNIMPL("Sorry!");
+  PTL_FATAL("UNIMPLEMENTED");
   return -EOPNOTSUPP;
 }
 
@@ -738,12 +726,12 @@ int ib_portals_register_client(struct ib_client *client) {
   struct ib_portals_client_entry *client_entry;
 
   if (!client) {
-    IB_PORTALS4_WARN("Portals4/ib: register_client: NULL ib_client");
+    PTL_WARN("register_client: NULL ib_client");
     return -EINVAL;
   }
 
   if (!client->name) {
-    IB_PORTALS4_WARN("Portals4/ib: register_client: NULL client name");
+    PTL_WARN("register_client: NULL client name");
     return -EINVAL;
   }
   pr_info("Portals4/ib: register_client name=%s add=%ps remove=%ps "
@@ -752,13 +740,11 @@ int ib_portals_register_client(struct ib_client *client) {
           client->get_net_dev_by_params);
 
   if (!client->add) {
-    IB_PORTALS4_WARN("Portals4/ib: client '%s' has no add() callback",
-                     client->name);
+    PTL_WARN("client '%s' has no add() callback", client->name);
   }
 
   if (!client->remove) {
-    IB_PORTALS4_WARN("Portals4/ib: client '%s' has no remove() callback",
-                     client->name);
+    PTL_WARN("client '%s' has no remove() callback", client->name);
   }
 
   client_entry = kzalloc(sizeof(*client_entry), GFP_KERNEL);
@@ -772,7 +758,7 @@ int ib_portals_register_client(struct ib_client *client) {
   list_add_tail(&client_entry->node, &ib_portals_client_list);
   mutex_unlock(&ib_portals_client_lock);
 
-  IB_PORTALS4_WARN("Portals4/ib: registered client '%s'", client->name);
+  PTL_WARN("registered client '%s'", client->name);
   return 0;
 }
 
@@ -781,12 +767,12 @@ EXPORT_SYMBOL_GPL(ib_portals_register_client);
 void ib_portals_unregister_client(struct ib_client *client) {
   struct ib_portals_client_entry *client_entry, *tmp;
   if (!client) {
-    IB_PORTALS4_WARN("NULL ib_client");
+    PTL_WARN("NULL ib_client");
     return;
   }
 
   if (!client->name) {
-    IB_PORTALS4_WARN("NULL client name");
+    PTL_WARN("NULL client name");
     return;
   }
   // Semantics: real ib_core would call remove(dev, client_data) for each device
@@ -796,8 +782,12 @@ void ib_portals_unregister_client(struct ib_client *client) {
   list_for_each_entry_safe(client_entry, tmp, &ib_portals_client_list, node) {
     if (client_entry->client == client) {
       if (client_entry->client->remove) {
-        IB_PORTALS4_UNIMPL(
-            "Sorry! I don't know how to call the remove callback");
+        /* Not fatal: this shim keeps no per-device client_data, so the remove
+         * callback cannot be reconstructed, and nvme_rdma_cleanup_module()
+         * deletes the controllers itself. Was UNIMPL(), which BUG()s on rmmod. */
+        PTL_WARN(
+            "skipping remove callback for client '%s' (no per-device tracking)",
+            client->name);
       }
       list_del(&client_entry->node);
       kfree(client_entry);
@@ -810,10 +800,57 @@ void ib_portals_unregister_client(struct ib_client *client) {
 
 EXPORT_SYMBOL_GPL(ib_portals_unregister_client);
 
+/* Bounded retry budget for PtlLEUnlink() returning PTL_IN_USE, in 1 ms steps. */
+#define PTL_LE_UNLINK_MAX_RETRIES 100
+
+/* Unlink the QP's rma_le, once. Idempotent, so every teardown path may call it
+ * unconditionally. The LE carries the ptl_qp as its user_ptr and must not outlive
+ * it: a stale LE on a recycled PTE hands a freed pointer to ptl_handle_nvme_cpl().
+ * Sleepable context only - the PTL_IN_USE retry msleep()s. */
+static void ib_portals_unlink_rma_le(struct ptl_qp *ptl_qp, const char *who) {
+  int rc = PTL_OK;
+  int retries;
+
+  might_sleep();
+
+  if (!ptl_qp->rma_le_linked)
+    return;
+
+  /* PTL_IN_USE means the NIC is still touching this LE; it is transient, so
+   * retry briefly and log rather than BUG() - a teardown race is not an
+   * assertion violation. */
+  for (retries = 0; retries < PTL_LE_UNLINK_MAX_RETRIES; retries++) {
+    rc = PtlLEUnlink(ptl_qp->rma_leh);
+    if (PTL_IN_USE != rc)
+      break;
+    msleep(1); /*Sleep for 1 millisecond*/
+  }
+
+  if (PTL_OK != rc) {
+    /* LE still posted with the QP about to be freed: this is the state that
+     * strands a recycled PTE with a dangling user_ptr. */
+    PTL_WARN("%s: failed to unlink receive buffer for ptl_qp: "
+             "{initiator_qp_num: %d, target_qp_num: %d} after %d retries. "
+             "Reason: %s. The LE stays posted on PTE %d - completions "
+             "arriving on it will be dropped.",
+             who, ptl_qp->ptl_id->initiator_qp_num,
+             ptl_qp->ptl_id->target_qp_num, retries,
+             PtlToStr(rc, PTL_STR_ERROR), ptl_qp->recv_cq->pte);
+    return;
+  }
+
+  ptl_qp->rma_le_linked = false;
+  if (retries > 0) {
+    PTL_DEBUG("%s: unlinked receive buffer for ptl_qp: {initiator_qp_num: %d, "
+              "target_qp_num: %d} after %d PTL_IN_USE retries",
+              who, ptl_qp->ptl_id->initiator_qp_num,
+              ptl_qp->ptl_id->target_qp_num, retries);
+  }
+}
+
 /* Draining */
 void ib_portals_drain_qp(struct ib_qp *qp) {
   struct ptl_qp *ptl_qp;
-  int rc;
   ptl_qp = container_of(qp, struct ptl_qp, fake_qp);
   PTL_CHECK(ptl_qp, PTL_QP);
   PTL_DEBUG("Waiting for all pending nvme cmds to complete for "
@@ -828,13 +865,7 @@ void ib_portals_drain_qp(struct ib_qp *qp) {
   PTL_DEBUG("Unlinking LE for "
             "ptl_qp {initiator_qp_num: %d, target_qp_num: %d}...",
             ptl_qp->ptl_id->initiator_qp_num, ptl_qp->ptl_id->target_qp_num);
-  rc = PtlLEUnlink(ptl_qp->rma_leh);
-  if (PTL_OK != rc) {
-    PTL_FATAL("Failed to unlink receive buffer for ptl_qp: {initiator_qp_num: "
-              "%d, target_qp_num: %d}. Reason: %s",
-              ptl_qp->ptl_id->initiator_qp_num, ptl_qp->ptl_id->target_qp_num,
-              PtlToStr(rc, PTL_STR_ERROR));
-  }
+  ib_portals_unlink_rma_le(ptl_qp, "drain_qp");
   PTL_DEBUG("Unlinking LE for "
             "ptl_qp {initiator_qp_num: %d, target_qp_num: %d}...DONE. Drain "
             "successfull",
@@ -878,6 +909,10 @@ int ib_portals_enable_rma_ops(struct ib_qp *qp, struct ib_cq *cq) {
               "Reason: %s",
               PtlToStr(rc, PTL_STR_ERROR));
   }
+  /* The LE now carries this ptl_qp as its user_ptr. From here until it is
+   * unlinked, freeing the ptl_qp would leave a dangling pointer reachable from
+   * the NIC. ib_portals_destroy_qp() enforces that. */
+  ptl_qp->rma_le_linked = true;
   ptl_qp->recv_op_meta = kzalloc(ptl_qp->ptl_id->nvme_completion_queue_size *
                                      sizeof(struct ptl_recv_op),
                                  GFP_KERNEL);

@@ -60,6 +60,12 @@
     } \
 } while(0)
 
+/* Serializes the Portals calls that push commands onto the BXI NIC command queue,
+ * which ptlbxi_send_command() does not make thread-safe: the SPDK reactor reaches
+ * it via rdma_disconnect() while the CP server thread reaches it via
+ * PtlMDRelease()/PtlLEAppend(). Do NOT hold it across PtlEQWait(). */
+static pthread_mutex_t ptl_cmd_queue_lock = PTHREAD_MUTEX_INITIALIZER;
+
 volatile int is_target;
 
 
@@ -196,8 +202,10 @@ static bool rdma_ptl_conn_map_remove(struct ptl_cm_id *ptl_id)
 		goto exit;
 	}
 	ret = false;
-	SPDK_PTL_FATAL("[%s] CP server: Did not find connection with qp num: %d",
-		       ptl_control_plane_server.role, ptl_id->ptl_qp_num);
+	/* Not fatal: the close handler already released the slot, so a later
+	 * rdma_destroy_id() on the same connection finds nothing. Harmless. */
+	SPDK_PTL_WARN("[%s] CP server: Did not find connection with qp num: %d",
+		      ptl_control_plane_server.role, ptl_id->ptl_qp_num);
 exit:
 	PTL_CP_SERVER_UNLOCK(&conn_map.conn_map_lock);
 	return ret;
@@ -291,9 +299,12 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 	md.eq_handle = ptl_control_plane_server.eq_handle;
 	md.ct_handle = PTL_CT_NONE;
 
+	PTL_CP_SERVER_LOCK(&ptl_cmd_queue_lock);
 	rc = PtlMDBind(ptl_cnxt_get_ni_handle(ptl_cnxt), &md, &send_buffer->md_handle);
 	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("PtlMDBind failed with code: %d\n", rc);
+		PTL_CP_SERVER_UNLOCK(&ptl_cmd_queue_lock);
+		SPDK_PTL_FATAL("PtlMDBind failed with code: %d (%s)\n", rc,
+			       PtlToStr(rc, PTL_STR_ERROR));
 	}
 
 
@@ -312,8 +323,11 @@ static void rdma_cm_ptl_send_request(struct rdma_ptl_send_buffer *send_buffer)
 		    send_buffer, /* user ptr */
 		    hdr_data);
 
+	PTL_CP_SERVER_UNLOCK(&ptl_cmd_queue_lock);
+
 	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("PtlPut failed with code: %d\n", rc);
+		SPDK_PTL_FATAL("PtlPut failed with code: %d (%s)\n", rc,
+			       PtlToStr(rc, PTL_STR_ERROR));
 	}
 }
 
@@ -434,8 +448,9 @@ static void rdma_ptl_handle_open_conn_reply(struct ptl_cm_id *listen_id,
 	struct ptl_cm_id *connection_id;
 
 	if (PTL_OK != open_conn_reply->status) {
-		SPDK_PTL_FATAL("[%s], CP server: connection failed with code: %d", ptl_control_plane_server.role,
-			       open_conn_reply->status);
+		SPDK_PTL_FATAL("[%s], CP server: connection failed with code: %d (%s)",
+			       ptl_control_plane_server.role, open_conn_reply->status,
+			       PtlToStr(open_conn_reply->status, PTL_STR_ERROR));
 	}
 	/*XXX TODO XXX*/
 	int qp_num = is_target ? conn_msg->conn_open_reply.target_qp_num :
@@ -511,6 +526,8 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 	struct rdma_cm_event *fake_event;
 	struct ptl_cm_id * connection_id;
 	struct rdma_ptl_send_buffer *reply_buf;
+	int initiator_qp_num = conn_close->initiator_qp_num;
+	int target_qp_num = conn_close->target_qp_num;
 
 	if (ptl_control_plane_server.protocol_version != request->msg_header.version) {
 		SPDK_PTL_FATAL("[%s], PROTOCOL versions mismatch client uses: %lu %s: %lu",
@@ -518,12 +535,10 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 			       ptl_control_plane_server.protocol_version);
 	}
 
-	int initiator_qp_num = conn_close->initiator_qp_num;
 	if (initiator_qp_num == 0) {
 		SPDK_PTL_FATAL("initiator qp num == 0: Nida does not assign 0 qp numbers!");
 	}
 
-	int target_qp_num = conn_close->target_qp_num;
 	if (target_qp_num == 0) {
 		SPDK_PTL_FATAL("target qp num == 0: Nida does not assign 0 qp numbers!");
 	}
@@ -531,8 +546,11 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 
 	connection_id = rdma_ptl_conn_map_find_from_qp_num(is_target ? target_qp_num : initiator_qp_num);
 	if (NULL == connection_id) {
-		SPDK_PTL_FATAL("Could not find in connection map queue pair with number: %d",
-			       is_target ? target_qp_num : initiator_qp_num);
+		/* Unknown qp: almost always a close for a connection that predates this
+		 * process (target restart) or that we already tore down. Nothing to do. */
+		SPDK_PTL_WARN("Could not find in connection map queue pair with number: %d - ignoring stale close",
+			      is_target ? target_qp_num : initiator_qp_num);
+		return;
 	}
 
 	// SPDK_PTL_DEBUG("PTL_ID: found ptl_id: %p (or fake_cm_id: %p) with context: %p", connection_id,
@@ -569,6 +587,11 @@ static void rdma_ptl_handle_close_conn(struct ptl_conn_msg *request)
 	reply_buf->conn_msg.conn_close_reply.status = PTL_OK;
 	reply_buf->conn_msg.conn_close_reply.initiator_qp_num = connection_id->initiator_qp_num;
 	reply_buf->conn_msg.conn_close_reply.target_qp_num = connection_id->target_qp_num;
+	
+	/* Release the conn_map slot here: SPDK never reaches rdma_destroy_id() on this
+	 * path, so every close leaked an entry until the target ran out of them. Must
+	 * come after the last read of connection_id above. */
+	rdma_ptl_conn_map_remove(connection_id);
 	rdma_cm_ptl_send_request(reply_buf);
 }
 
@@ -590,8 +613,9 @@ static void rdma_ptl_handle_close_conn_reply(struct ptl_conn_msg *conn_msg)
 	}
 
 	if (PTL_OK != close_reply->status) {
-		SPDK_PTL_FATAL("[%s], connection close failed with code: %d", ptl_control_plane_server.role,
-			       close_reply->status);
+		SPDK_PTL_FATAL("[%s], connection close failed with code: %d (%s)",
+			       ptl_control_plane_server.role, close_reply->status,
+			       PtlToStr(close_reply->status, PTL_STR_ERROR));
 	}
 
 	SPDK_PTL_DEBUG("[%s] Got a close connection reply! connection id is: {initiator qp num: %d target_qp_num: %d } aldready done staff nothing to do",
@@ -667,6 +691,7 @@ static void *rdma_run_ptl_cp_server(void *args)
 		if (event.type == PTL_EVENT_AUTO_UNLINK) {
 			SPDK_PTL_DEBUG("[%s] CP server: Got an autounlink event Re-register buffer...",
 				       ptl_control_plane_server.role);
+			PTL_CP_SERVER_LOCK(&ptl_cmd_queue_lock);
 #if PTL_USE_MATCHING
 			memset(&match_entry, 0, sizeof(match_entry));
 			match_entry.ignore_bits = 0;//RDMA_PTL_IGNORE;
@@ -701,6 +726,7 @@ static void *rdma_run_ptl_cp_server(void *args)
 					 PTL_CP_SERVER_PTE, &list_entry, PTL_PRIORITY_LIST,
 					 event.user_ptr, event.user_ptr);
 #endif
+			PTL_CP_SERVER_UNLOCK(&ptl_cmd_queue_lock);
 			if (rc != PTL_OK) {
 				SPDK_PTL_FATAL(
 					"Re-registering recv buffer failed in control plane server with code: %d\n",
@@ -719,7 +745,9 @@ static void *rdma_run_ptl_cp_server(void *args)
 		     send_buffer->conn_msg.msg_header.msg_type == PTL_CLOSE_CONNECTION)) {
 			SPDK_PTL_DEBUG("[%s] CP server: Send operation of msg with type: %s arrived, do the cleanup...",
 				       ptl_control_plane_server.role, ptl_msg_types[send_buffer->conn_msg.msg_header.msg_type]);
+			PTL_CP_SERVER_LOCK(&ptl_cmd_queue_lock);
 			PtlMDRelease(send_buffer->md_handle);
+			PTL_CP_SERVER_UNLOCK(&ptl_cmd_queue_lock);
 			free(send_buffer);
 			continue;
 		}
@@ -738,12 +766,17 @@ static void *rdma_run_ptl_cp_server(void *args)
 
 		struct ptl_conn_msg *msg = event.start;
 		/*Who is it?*/
+		/* A malformed control message must not kill the target - SPDK_PTL_FATAL
+		 * ends in _exit(). Skip it and go back to PtlEQWait(); the peer retries
+		 * its connect, so dropping one bad message is recoverable. */
 		if (event.rlength != msg->msg_header.total_msg_size) {
-			SPDK_PTL_FATAL("[%s] CP server: Wrong size received "
-				       "got: %lu should have been: %lu for message type: %d",
-				       ptl_control_plane_server.role,
-				       event.rlength,
-				       msg->msg_header.total_msg_size, send_buffer->conn_msg.msg_header.msg_type);
+			SPDK_PTL_WARN("[%s] CP server: Wrong size received "
+				      "got: %lu should have been: %lu for message type: %d - "
+				      "dropping this control message",
+				      ptl_control_plane_server.role,
+				      event.rlength,
+				      msg->msg_header.total_msg_size, msg->msg_header.msg_type);
+			continue;
 		}
 
 
@@ -815,14 +848,15 @@ static void rdma_ptl_boot_cp_server(struct  ptl_cm_id *cm_id, const char *role)
 	rc = PtlEQAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt), PTL_CONTROL_PLANE_NUM_RECV_BUFFERS,
 			&ptl_control_plane_server.eq_handle);
 	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("PtlEQAlloc for the control plane failed with code: %d\n", rc);
+		SPDK_PTL_FATAL("PtlEQAlloc for the control plane failed with code: %d (%s)\n",
+			       rc, PtlToStr(rc, PTL_STR_ERROR));
 	}
 	/*Bind it to the portal index*/
 	rc = PtlPTAlloc(ptl_cnxt_get_ni_handle(ptl_cnxt), 0, ptl_control_plane_server.eq_handle,
 			PTL_CP_SERVER_PTE, &ptl_control_plane_server.pt_index);
 	if (rc != PTL_OK) {
-		SPDK_PTL_FATAL("Error allocating portal for connection server %d reason: %d",
-			       PTL_CP_SERVER_PTE, rc);
+		SPDK_PTL_FATAL("Error allocating portal for connection server %d reason: %d (%s)",
+			       PTL_CP_SERVER_PTE, rc, PtlToStr(rc, PTL_STR_ERROR));
 	}
 	rc = PtlPTEnable(ptl_cnxt_get_ni_handle(ptl_cnxt), ptl_control_plane_server.pt_index);
 	if (PTL_OK != rc) {

@@ -6,9 +6,8 @@
 #include <linux/dma-mapping.h>
 #include <linux/mm.h>
 #include <linux/scatterlist.h>
-#include <rdma/ib_cm.h>
 #include <rdma/ib_verbs.h>
-#include <rdma/rdma_cm.h>
+
 
 /* PD */
 

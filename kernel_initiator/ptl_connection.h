@@ -5,7 +5,7 @@
 #include <linux/types.h>
 #include <portals4.h>
 #include <portals4_bxiext.h>
-#include <rdma/rdma_cm.h>
+#include "ptl_cm_id.h"
 #define PTL_SPDK_PROTOCOL_VERSION 1UL
 
 /**
@@ -60,7 +60,7 @@ struct ptl_conn_open {
 	u64 nvme_cpl_start_addr;
 	size_t nvme_cpl_queue_size;
 	/*extensions for nvme cpls, end*/
-	struct rdma_conn_param conn_param;
+	struct ptl_cm_conn_param conn_param;
 } __attribute((packed));
 
 struct ptl_conn_open_reply {
@@ -70,7 +70,7 @@ struct ptl_conn_open_reply {
 	int rma_pte;
 	int cq_id;
 	int status;
-	struct rdma_conn_param conn_param;
+	struct ptl_cm_conn_param conn_param;
 } __attribute((packed));
 
 struct ptl_conn_close {

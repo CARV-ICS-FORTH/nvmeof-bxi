@@ -16,6 +16,9 @@ struct ptl_qp {
 	/*The one and only list entry for all data plus nvme completions*/
 	ptl_le_t rma_le;
 	ptl_handle_le_t rma_leh;
+	/* True between a successful PtlLEAppend() and a successful PtlLEUnlink(). The
+	 * LE carries this ptl_qp as its user_ptr and must not outlive the object. */
+	bool rma_le_linked;
 	/*For each nvme_cpl we keep metadata*/
 	struct ptl_recv_op *recv_op_meta;
 	size_t recv_op_meta_size;

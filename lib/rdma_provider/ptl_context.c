@@ -624,7 +624,8 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
       SPDK_PTL_DEBUG("Ok queue overflow break");
       break;
     } else {
-      SPDK_PTL_FATAL("PtlEQGet failed with error code %d", ret);
+      SPDK_PTL_FATAL("PtlEQGet failed with error code %d (%s)", ret,
+                     PtlToStr(ret, PTL_STR_ERROR));
     }
   }
   pthread_mutex_unlock(&g_lock);
@@ -646,7 +647,13 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
 
   while (events_processed < num_entries) {
     ret = PtlEQGet(ptl_cq_get_queue(ptl_cq), &event);
-    if (ret == PTL_OK) {
+    /* PTL_EQ_DROPPED delivers a valid event and reports that earlier ones were
+     * lost (bxi3-portals eq.c:589). Breaking on it discarded this event too. */
+    if (ret == PTL_OK || ret == PTL_EQ_DROPPED) {
+      if (ret == PTL_EQ_DROPPED) {
+        SPDK_PTL_WARN("EQ overflow on cq %d: events were dropped BEFORE this "
+                      "one - processing it and continuing", ptl_cq_get_id(ptl_cq));
+      }
       op_meta = handler[event.type](event, &wc[events_processed], ptl_cq);
       if (NULL == op_meta) {
         continue;
@@ -667,11 +674,9 @@ static int ptl_cnxt_poll_cq(struct ibv_cq *ibv_cq, int num_entries,
     } else if (ret == PTL_EQ_EMPTY) {
       // SPDK_PTL_DEBUG("No events ok COOL");
       break;
-    } else if (ret == PTL_EQ_DROPPED) {
-      SPDK_PTL_DEBUG("Ok queue overflow break");
-      break;
     } else {
-      SPDK_PTL_FATAL("PtlEQGet failed with error code %d", ret);
+      SPDK_PTL_FATAL("PtlEQGet failed with error code %d (%s)", ret,
+                     PtlToStr(ret, PTL_STR_ERROR));
     }
   }
   /*hack*/
@@ -826,8 +831,11 @@ struct ptl_context *ptl_cnxt_get(void) {
   // desired.max_waw_ordered_size = 0;
   // desired.max_war_ordered_size = 0;
   // desired.max_volatile_size = 60;
-  desired.features =
-      PTL_BXI3_DEBUG | PTL_BXI3_SERVICE; // XXX TODO XXX check again
+  /* PTL_BXI3_DEBUG deliberately NOT set: it makes PtlMDRelease() block on an
+   * untimed spin inside ptlbxi_send_command(), which hangs the CP server thread
+   * for good once the NIC stops answering and leaves the target deaf to every
+   * later connection. */
+  desired.features = PTL_BXI3_SERVICE;
   // desired.bxi_max_cqs = 1;
   // desired.bxi_compute_line = 0;
   // desired.cq_mode = 0;
@@ -842,8 +850,9 @@ struct ptl_context *ptl_cnxt_get(void) {
 #endif
 
   if (ret != PTL_OK) {
-    SPDK_PTL_FATAL("PtlNIInit failed with code: %d for nid: %d and pid: %d",
-                   ret, ptl_context.nid, ptl_context.pid);
+    SPDK_PTL_FATAL("PtlNIInit failed with code: %d (%s) for nid: %d and pid: %d",
+                   ret, PtlToStr(ret, PTL_STR_ERROR), ptl_context.nid,
+                   ptl_context.pid);
   }
   ptl_cnxt_dev_print_ni_limits(&actual);
 

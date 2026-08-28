@@ -1,108 +1,268 @@
 #include "ptl_cm_id.h"
-#include "linux/cpumask.h"
-#include "linux/gfp_types.h"
-#include "linux/kref.h"
-#include "linux/slab.h"
+#include <linux/slab.h>
+#include <linux/err.h>
+#include <net/net_namespace.h>
+#include <linux/printk.h>
+#include <linux/string.h>
+#include "ptl_object_types.h"
+#include <linux/in.h>
+#include <linux/in6.h>
+#include <linux/kref.h>
+#include <linux/spinlock.h>
 #include "ptl_bxiv3_dev_map.h"
 #include "ptl_bxiv3_device.h"
-#include "ptl_object_types.h"
-#include <linux/string.h>
-
+/* the global device map, defined in the device layer */
 extern struct ptl_bxiv3_dev_map bxiv3_dev_map;
 static unsigned long next_nicia_num = 0;
-struct ptl_cm_id *ptl_cm_id_create(struct net *net,
-                                   rdma_cm_event_handler event_handler,
-                                   void *context, enum rdma_ucm_port_space ps,
-                                   enum ib_qp_type qp_type,
-                                   const char *caller)
+/* State machine */
+int ptl_cm_id_set_state(struct ptl_cm_id *id, ptl_cm_id_e new_state)
 {
-	struct ptl_cm_id *ptl_cm_id;
-	(void)qp_type;
-	if (RDMA_PS_TCP != ps) {
-		PTL_FATAL("Sorry only RDMA_PS_TCP supported");
-		return ERR_PTR(-EOPNOTSUPP);
-	}
-	ptl_cm_id = kzalloc(sizeof(*ptl_cm_id), GFP_KERNEL);
-	if (!ptl_cm_id) {
-		return ERR_PTR(-ENOMEM);
-	}
-	ptl_cm_id->object_type = PTL_CM_ID;
-	ptl_cm_id->net = get_net(net);
-	ptl_cm_id->event_handler = event_handler;
-	ptl_cm_id->event_handler_context = context;
+    unsigned long flags;
 
-	/*Wiring staff of the og rdma_cm_id for the bottom layer of the driver to work */
-	kref_get(&bxiv3_dev_map.bxiv3_dev[next_nicia_num]->count);
-	ptl_cm_id->fake_cm_id.device =
-	        &bxiv3_dev_map.bxiv3_dev[next_nicia_num]->fake_ib_dev;
+    spin_lock_irqsave(&id->state_lock, flags);
 
-	ptl_cm_id->fake_cm_id.context = context;
-	ptl_cm_id->fake_cm_id.event_handler = event_handler;/*Just in case*/
-	spin_lock_init(&ptl_cm_id->state_lock);
+    if (id->cm_id_state == new_state)
+        goto out;
 
+    switch (id->cm_id_state) {
 
-	//  ptl_cm_id->fake_cm_id.device =
-	//     kzalloc(sizeof(*ptl_cm_id->fake_cm_id.device), GFP_KERNEL);
-	// strlcpy(ptl_cm_id->fake_cm_id.device->name, "BXIv3",
-	//    IB_DEVICE_NAME_MAX);
-	// ptl_cm_id->fake_cm_id.device->attrs.device_cap_flags =
-	//     IB_DEVICE_MEM_MGT_EXTENSIONS;
-	// ptl_cm_id->fake_cm_id.device->attrs.max_send_sge =
-	//     PTL_RDMA_MAX_INLINE_SEGMENTS;
-	// ptl_cm_id->fake_cm_id.device->num_comp_vectors = num_online_cpus();
-	ptl_cm_id->nid = -1;
-	ptl_cm_id->pid = -1;
-	PTL_DEBUG("Created a new ptl cm id from called: %s", caller);
-	return ptl_cm_id;
+    case PTL_CM_IDLE:
+        if (new_state == PTL_CM_ADDR_RESOLVING ||
+            new_state == PTL_CM_CONNECTING ||
+            new_state == PTL_CM_ERROR)
+            break;
+        goto invalid;
+
+    case PTL_CM_ADDR_RESOLVING:
+        if (new_state == PTL_CM_ADDR_RESOLVED ||
+            new_state == PTL_CM_ERROR)
+            break;
+        goto invalid;
+
+    case PTL_CM_ADDR_RESOLVED:
+        if (new_state == PTL_CM_ROUTE_RESOLVING ||
+            new_state == PTL_CM_CONNECTING ||
+            new_state == PTL_CM_ERROR)
+            break;
+        goto invalid;
+
+    case PTL_CM_ROUTE_RESOLVING:
+        if (new_state == PTL_CM_ROUTE_RESOLVED ||
+            new_state == PTL_CM_ERROR)
+            break;
+        goto invalid;
+
+    case PTL_CM_ROUTE_RESOLVED:
+        if (new_state == PTL_CM_CONNECTING ||
+            new_state == PTL_CM_ERROR)
+            break;
+        goto invalid;
+
+    case PTL_CM_CONNECTING:
+        if (new_state == PTL_CM_ESTABLISHED ||
+            new_state == PTL_CM_ERROR)
+            break;
+        goto invalid;
+
+    case PTL_CM_ESTABLISHED:
+        if (new_state == PTL_CM_DISCONNECTING ||
+            new_state == PTL_CM_ERROR)
+            break;
+        goto invalid;
+
+    case PTL_CM_DISCONNECTING:
+        if (new_state == PTL_CM_DISCONNECTED ||
+            new_state == PTL_CM_ERROR)
+            break;
+        goto invalid;
+
+    case PTL_CM_DISCONNECTED:
+        if (new_state == PTL_CM_ERROR)
+            break;
+        goto invalid;
+
+    case PTL_CM_ERROR:
+        if (new_state == PTL_CM_IDLE)
+            break;
+        goto invalid;
+
+    default:
+        goto invalid;
+    }
+
+    PTL_DEBUG("ptl_cm_id: state %d -> %d", id->cm_id_state, new_state);
+    id->cm_id_state = new_state;
+
+out:
+    spin_unlock_irqrestore(&id->state_lock, flags);
+    return 0;
+
+invalid:
+    PTL_WARN("ptl_cm_id: invalid state transition %d -> %d",
+           id->cm_id_state, new_state);
+    spin_unlock_irqrestore(&id->state_lock, flags);
+    return -EINVAL;
 }
 
-int ptl_cm_id_resolve_addr(struct ptl_cm_id *ptl_cm_id,
-                           struct sockaddr *src_addr,
-                           const struct sockaddr *dst_addr,
-                           unsigned long timeout_ms)
-{
+/* Lifecycle */
 
-	struct sockaddr_in *addr_in;
-	struct sockaddr_in6 *addr_in6;
-	if (!ptl_cm_id || !dst_addr) {
+
+struct ptl_cm_id *ptl_cm_id_create(struct net *net, ptl_cm_handler handler,
+                void *context)
+{
+    struct ptl_cm_id *id;
+
+    if (!handler)
+        return ERR_PTR(-EINVAL);
+
+    id = kzalloc(sizeof(*id), GFP_KERNEL);
+    if (!id)
+        return ERR_PTR(-ENOMEM);
+
+    id->object_type = PTL_CM_ID;
+
+    id->net           = get_net(net);
+    id->event_handler = handler;
+    id->event_handler_context       = context;
+
+    /*Wiring staff of the og rdma_cm_id for the bottom layer of the driver to work */
+	kref_get(&bxiv3_dev_map.bxiv3_dev[next_nicia_num]->count);
+
+
+    /* device is bound later in ptl_cm_id_resolve_addr(); local identity */
+    id->bxiv3_dev = NULL;
+    /* self_peer/remote_peer stay zeroed by kzalloc; both are filled in
+    * ptl_cm_resolve_addr() before any send path reads them */
+    id->ptl_qp        = NULL;
+
+    id->cm_id_state = PTL_CM_IDLE;
+    spin_lock_init(&id->state_lock);
+    INIT_WORK(&id->close_work, ptl_close_work_fn);
+
+    PTL_DEBUG("Created ptl_cm_id: %p", id);
+    return id;
+}
+
+void ptl_cm_id_destroy(struct ptl_cm_id *id)
+{
+    unsigned long flags;
+
+    if (!id)
+        return;
+
+    /* A target-initiated close may have queued close_work; it dereferences
+     * this id, so it must not outlive the kfree() below. Both callers are
+     * process context (they mutex_destroy() right after), so syncing here is
+     * safe. */
+    cancel_work_sync(&id->close_work);
+
+    /* stop further operations; every state may transition to ERROR */
+    ptl_cm_id_set_state(id, PTL_CM_ERROR);   //renamed: ptl_cm_set_state -> ptl_cm_id_set_state
+
+    spin_lock_irqsave(&id->state_lock, flags);
+    id->event_handler = NULL;
+    spin_unlock_irqrestore(&id->state_lock, flags);
+
+    kfree((void *)id->param.private_data);
+    id->param.private_data = NULL;
+
+    /* TODO: the create path takes kref_get(&bxiv3_dev->count) at bind time and
+     * the matching kref_put belongs here, once a device release fn exists. */
+
+    put_net(id->net);
+
+    PTL_DEBUG("ptl_cm_id: destroyed id %p", id);
+
+    id->object_type = 0;
+
+    kfree(id);
+}
+
+/* Address resolution — also binds the device */
+int ptl_cm_id_resolve_addr(struct ptl_cm_id *id,
+		     const struct sockaddr *src_addr,
+		     const struct sockaddr *dst_addr,
+		     unsigned long timeout_ms)
+{
+	const struct sockaddr_in *sin;
+	const struct sockaddr_in6 *sin6;
+	unsigned long flags;
+	int rc;
+
+	if (!id || !dst_addr)
 		return -EINVAL;
-	}
+
+	rc = ptl_cm_id_set_state(id, PTL_CM_ADDR_RESOLVING);
+	if (rc)
+		return rc;
+
+	spin_lock_irqsave(&id->state_lock, flags);
 
 	switch (dst_addr->sa_family) {
-	case AF_INET: {
-		addr_in = (struct sockaddr_in *)dst_addr;
 
-		/* Last byte of IPv4 address */
-		ptl_cm_id->remote_nid = ((unsigned char *)&addr_in->sin_addr.s_addr)[3];
-
-		/* Port number (convert from network to host byte order) */
-		ptl_cm_id->remote_pid = ntohs(addr_in->sin_port);
+	case AF_INET:
+		sin = (const struct sockaddr_in *)dst_addr;
+		/* last byte of the IPv4 address; << 7 applied below.
+		 * TODO: replace with the real BXI node discovery. */
+		id->remote_peer.phys.nid = ((const u8 *)&sin->sin_addr.s_addr)[3];
+        id->remote_peer.phys.pid = ntohs(sin->sin_port);
 		break;
-	}
-	case AF_INET6: {
-		addr_in6 = (struct sockaddr_in6 *)dst_addr;
 
-		/* Last byte of IPv6 address */
-		ptl_cm_id->remote_nid = addr_in6->sin6_addr.s6_addr[15];
-
-		/* Port number (convert from network to host byte order) */
-		ptl_cm_id->remote_pid = ntohs(addr_in6->sin6_port);
+	case AF_INET6:
+		sin6 = (const struct sockaddr_in6 *)dst_addr;
+		id->remote_peer.phys.nid = sin6->sin6_addr.s6_addr[15];
+        id->remote_peer.phys.pid = ntohs(sin6->sin6_port);
 		break;
-	}
+
 	default:
+		spin_unlock_irqrestore(&id->state_lock, flags);
+		ptl_cm_id_set_state(id, PTL_CM_ERROR);
 		return -EAFNOSUPPORT;
 	}
-	ptl_cm_id->remote_nid = ptl_cm_id->remote_nid << 7;
 
-	ptl_cm_id->bxiv3_dev = bxiv3_dev_map.bxiv3_dev[0];
-	ptl_cm_id->nid = ptl_cm_id->bxiv3_dev->proc_id.phys.nid;
-	ptl_cm_id->pid = ptl_cm_id->bxiv3_dev->proc_id.phys.pid;
-	PTL_DEBUG("Resolved Target address: {nid:%d,pid:%d} initiator is "
-	          "{nid:%d, pid:%d}",
-	          ptl_cm_id->remote_nid, ptl_cm_id->remote_pid, ptl_cm_id->nid,
-	          ptl_cm_id->pid);
-	PTL_DEBUG("Statically assign ptl_cm_id to BXIv3-1 XXX TODO XXX: spread it dynamically Ok: %s",
-	          "yes");
+	 id->remote_peer.phys.nid = id->remote_peer.phys.nid << 7;
+
+	/* keep the source address — connect serializes it into
+	 *conn_open.src_addr for the target */
+	memset(&id->src_addr, 0, sizeof(id->src_addr));
+	if (src_addr)
+		memcpy(&id->src_addr, src_addr,
+		       min_t(size_t, sizeof(id->src_addr),
+			     sizeof(struct sockaddr_storage)));
+
+	/* bind the device — statically dev 0,
+	 *("XXX TODO XXX: spread it dynamically") */
+	if (!id->bxiv3_dev) {
+		if (!bxiv3_dev_map.bxiv3_dev[0]) {
+			spin_unlock_irqrestore(&id->state_lock, flags);
+			ptl_cm_id_set_state(id, PTL_CM_ERROR);
+			return -ENODEV;
+		}
+		id->bxiv3_dev = bxiv3_dev_map.bxiv3_dev[0];
+		kref_get(&id->bxiv3_dev->count);
+		 id->self_peer = id->bxiv3_dev->proc_id;
+	}
+
+	spin_unlock_irqrestore(&id->state_lock, flags);
+
+	(void)timeout_ms;
+
+	rc = ptl_cm_id_set_state(id, PTL_CM_ADDR_RESOLVED);
+	if (rc)
+		return rc;
+
+	 PTL_DEBUG("Resolved target {nid:%u,pid:%u}, initiator {nid:%u,pid:%u}",
+      id->remote_peer.phys.nid, id->remote_peer.phys.pid,
+      id->self_peer.phys.nid, id->self_peer.phys.pid);
+
+
+	if (id->event_handler) {
+		struct ptl_cm_event ev = {
+			.event  = PTL_CM_EVENT_ADDR_RESOLVED,
+			.status = 0,
+		};
+		return id->event_handler(id, &ev);
+	}
+
 	return 0;
 }
-

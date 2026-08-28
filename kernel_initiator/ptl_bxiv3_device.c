@@ -194,7 +194,8 @@ struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id) {
   rc = PtlNIInit(iface_id, PTL_NI_NO_MATCHING | PTL_NI_PHYSICAL, PTL_PID_ANY,
                  NULL, &bxiv3_dev->actual, &bxiv3_dev->nicia_handle);
   if (PTL_OK != rc) {
-    PTL_WARN("PtlNIInit() failed with code: %d no ifcace: %d", rc, iface_id);
+    PTL_WARN("PtlNIInit() failed with code: %d (%s) no ifcace: %d", rc,
+             PtlToStr(rc, PTL_STR_ERROR), iface_id);
     ret = -EIO;
     goto clean_up;
   }
@@ -202,8 +203,8 @@ struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id) {
 
   rc = PtlGetPhysId(bxiv3_dev->nicia_handle, &bxiv3_dev->proc_id);
   if (PTL_OK != rc) {
-    PTL_FATAL("Failed to get physical id of #iface: %d reason: %d", iface_id,
-              rc);
+    PTL_FATAL("Failed to get physical id of #iface: %d reason: %d (%s)",
+              iface_id, rc, PtlToStr(rc, PTL_STR_ERROR));
     ret = -EIO;
     goto clean_up;
   }
@@ -222,7 +223,8 @@ struct ptl_bxiv3_device *ptl_bxiv3_dev_create(u32 iface_id) {
                            &bxiv3_dev->intr_index);
   if (PTL_OK != rc) {
     PTL_FATAL(
-        "Failed to allocate interrupt index for BXIv3 with error code: %d", rc);
+        "Failed to allocate interrupt index for BXIv3 with error code: %d (%s)",
+        rc, PtlToStr(rc, PTL_STR_ERROR));
     goto clean_up;
   }
   bxiv3_dev->conn_mgmt_eq =
@@ -386,18 +388,10 @@ int ptl_bxiv3_dev_destroy(struct ptl_bxiv3_device *bxiv3_dev) {
 
   rc = PtlEQAsyncIntrFree(bxiv3_dev->nicia_handle, bxiv3_dev->intr_index);
   if (PTL_OK != rc) {
-    PTL_WARN("Failed to destroy interrupt vector with error code: %d. OK, life "
-             "goes on",
-             rc);
+    PTL_WARN("Failed to destroy interrupt vector with error code: %d (%s). OK, "
+             "life goes on",
+             rc, PtlToStr(rc, PTL_STR_ERROR));
   }
-  /* Finalize the NI handle */
-  rc = PtlNIFini(bxiv3_dev->nicia_handle);
-  if (PTL_OK != rc) {
-    PTL_WARN("Failed to shut down nicia handle of iface id: %d with code: %d",
-             bxiv3_dev->iface_id, rc);
-    goto error;
-  }
-
   /* Destroy the pool */
   rc = ptl_cq_pool_destroy(bxiv3_dev->ptl_cq_pool);
   if (rc) {
@@ -430,6 +424,16 @@ int ptl_bxiv3_dev_destroy(struct ptl_bxiv3_device *bxiv3_dev) {
     kfree(e);
   }
   spin_unlock(&bxiv3_dev->qp_map_lock);
+
+  /* Finalize the NI last: PtlNIFini() tears down the portal table that
+   * PtlPTFree()/PtlEQFree() write to, so running it first oopsed on every rmmod. */
+  rc = PtlNIFini(bxiv3_dev->nicia_handle);
+  if (PTL_OK != rc) {
+    PTL_WARN("Failed to shut down nicia handle of iface id: %d with code: %d "
+             "(%s)",
+             bxiv3_dev->iface_id, rc, PtlToStr(rc, PTL_STR_ERROR));
+  }
+
   kfree(bxiv3_dev);
   return 0;
 error:

@@ -3,7 +3,6 @@
 #include "linux/err.h"
 #include "linux/spinlock.h"
 #include "ptl_bxiv3_device.h"
-#include "ptl_cm_id.h"
 #include "ptl_cq.h"
 #include "ptl_object_types.h"
 #include <linux/container_of.h>
@@ -11,8 +10,7 @@
 #include <linux/module.h>  /* MODULE_* macros if this is a module */
 #include <linux/slab.h>    /* kzalloc, kfree */
 #include <rdma/ib_verbs.h> /* struct ib_device, ib_alloc_pd, CQ, QP, etc. */
-#include <rdma/rdma_cm.h>  /* struct rdma_cm_id, rdma_create_qp, events */
-
+#include "rdma_cm_portals.h" /* struct ptl_cm_id */
 static atomic_t ptl_id_counter = ATOMIC_INIT(3);
 
 struct ptl_qp *ptl_qp_create(struct ptl_cm_id *ptl_id, struct ptl_pd *ptl_pd,

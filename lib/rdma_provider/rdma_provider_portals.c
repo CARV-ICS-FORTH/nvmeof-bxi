@@ -604,7 +604,6 @@ int spdk_rdma_provider_qp_disconnect(
 
   assert(spdk_rdma_qp != NULL);
   SPDK_PTL_DEBUG("Calling disconnect for the queue pair...");
-  assert(0);
   spdk_rdma_provider_qp_flush_send_wrs(spdk_rdma_qp, NULL);
 
   if (spdk_rdma_qp->cm_id) {
@@ -1013,6 +1012,7 @@ int spdk_rdma_provider_qp_flush_send_wrs(
   ptl_msg_t msg;
   u16 nvme_cid;
   struct ptl_mem_desc *ptl_mem_desc;
+  struct ibv_send_wr *next_wr = NULL;
 
   if (spdk_unlikely(NULL == spdk_rdma_qp->send_wrs.first)) {
     return 0;
@@ -1023,7 +1023,12 @@ int spdk_rdma_provider_qp_flush_send_wrs(
   SPDK_PTL_DEBUG("send_wrs list start....QPN: %d",
                  ptl_qp->ptl_cm_id->ptl_qp_num);
   for (struct ibv_send_wr *wr = spdk_rdma_qp->send_wrs.first; wr != NULL;
-       wr = wr->next) {
+       wr = next_wr) {
+    /* Detach before processing: these WRs are recycled, and a stale ->next
+     * makes queue_send_wrs() splice an already-sent chain back onto the list,
+     * which is then re-flushed forever and the commands never retire. */
+    next_wr = wr->next;
+    wr->next = NULL;
 
     // spdk_rdma_print_wr_flags(wr);
     if (wr->opcode == IBV_WR_RDMA_READ) {
@@ -1146,7 +1151,8 @@ int spdk_rdma_provider_qp_flush_send_wrs(
 #endif
 
       if (rc != PTL_OK) {
-        SPDK_PTL_FATAL("PtlPut failed with rc: %d", rc);
+        SPDK_PTL_FATAL("PtlPut failed with rc: %d (%s)", rc,
+                       PtlToStr(rc, PTL_STR_ERROR));
       }
       spdk_rdma_provider_ptl_unmark_wr(wr);
     }
@@ -1156,6 +1162,7 @@ int spdk_rdma_provider_qp_flush_send_wrs(
   // rc = ibv_post_send(spdk_rdma_qp->qp, spdk_rdma_qp->send_wrs.first, bad_wr);
 
   spdk_rdma_qp->send_wrs.first = NULL;
+  spdk_rdma_qp->send_wrs.last = NULL;
   spdk_rdma_qp->stats->send.doorbell_updates++;
   SPDK_PTL_DEBUG("NVMe: Flushing send requests....DONE\n");
   return 0;

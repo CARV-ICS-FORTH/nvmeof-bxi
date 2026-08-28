@@ -1,57 +1,64 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * Fake RDMA-CM "portals" shim — no-op / fail-fast mock for NVMe-RDMA
- * experimentation
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef PTL_CM_H
+#define PTL_CM_H
 
-#include <linux/err.h>
-#include <linux/errno.h>
-#include <linux/module.h>
-#include <linux/printk.h>
-#include <linux/ratelimit.h>
-#include <linux/slab.h>
-#include <rdma/rdma_cm.h>
-#include <rdma/rdma_user_cm.h>
+#include <rdma/ib_verbs.h> /* uses struct ib_qp_init_attr for now */
+#include <linux/types.h>
+#include <linux/spinlock.h>
+#include <linux/socket.h>      /* struct sockaddr, sockaddr_storage */
 
-#define rdma_cm_portals_create_id(net, event_handler, context, ps, qp_type)    \
-  __rdma_cm_portals_create_kernel_id(net, event_handler, context, ps, qp_type, \
-                                     KBUILD_MODNAME)
+#include <portals4.h>
+#include <portals4_bxiext.h>
+#include"ptl_cm_id.h"
+/* Speaks the existing conn_msg wire protocol over PTL_CP_SERVER_PTE, so the
+ * deployed SPDK target keeps understanding it. Replies arrive on the device's
+ * conn_mgmt EQ and are dispatched by ptl_cq.c. */
 
-struct rdma_cm_id *__rdma_cm_portals_create_kernel_id(
-        struct net *net, rdma_cm_event_handler event_handler, void *context,
-        enum rdma_ucm_port_space ps, enum ib_qp_type qp_type, const char *caller);
+/* Forward declarations */
+struct ptl_qp;
+struct ptl_pd;
+struct ptl_qp_init_attr;
+struct ptl_bxiv3_device;
+struct ptl_obj_conn_params;
+struct net;
 
-int rdma_cm_portals_destroy_id(struct rdma_cm_id *id);
+/* Sentinels — not in the Portals 4.0 spec; guard in case BXI headers
+ * provide them. */
+#ifndef PTL_INVALID_PT_INDEX
+#define PTL_INVALID_PT_INDEX  ((ptl_pt_index_t)~0u)
+#endif
 
-int rdma_cm_portals_resolve_addr(struct rdma_cm_id *id,
-                                 struct sockaddr *src_addr,
-                                 const struct sockaddr *dst_addr,
-                                 unsigned long timeout_ms);
+/* route (route resolution is a no-op state walk in Portals).
+ * Both fire their event synchronously before returning*/
 
-int rdma_cm_portals_resolve_route(struct rdma_cm_id *id,
-                                  unsigned long timeout_ms);
+int ptl_cm_resolve_route(struct ptl_cm_id *id, unsigned long timeout_ms);
 
-int rdma_cm_portals_connect_locked(struct rdma_cm_id *id,
-                                   struct rdma_conn_param *param);
+/* Connection — old conn_msg wire format, fire-and-forget send on the
+ * device's conn_mgmt EQ. The ESTABLISHED transition is driven later by
+ * ptl_cq.c when the open-connection reply arrives. */
+int ptl_cm_connect_locked(struct ptl_cm_id *id, struct ptl_cm_conn_param *param);
+int ptl_cm_connect_locked_with_ptl_params(struct ptl_cm_id *id,
+				       struct ptl_cm_conn_param *param,
+				       struct ptl_obj_conn_params *ptl_params);
+int ptl_cm_disconnect(struct ptl_cm_id *id);
 
-int rdma_cm_portals_disconnect(struct rdma_cm_id *id);
+/* QP */
+int ptl_cm_create_qp(struct ptl_cm_id *id, struct ib_pd *pd,struct ib_qp_init_attr *attr);
 
-int rdma_cm_portals_create_qp(struct rdma_cm_id *id, struct ib_pd *pd,
-                              struct ib_qp_init_attr *attr);
+int ptl_cm_destroy_qp(struct ptl_cm_id *id);
 
-int rdma_cm_portals_destroy_qp(struct rdma_cm_id *id);
 
-/* --- Helpers that return strings/data ---- */
+/* Helpers */
+const char *ptl_cm_event_msg(int ev);
+const void *ptl_cm_reject_msg(struct ptl_cm_id *id, int status);
+const void *ptl_cm_consumer_reject_data(struct ptl_cm_id *id,
+					struct ptl_cm_event *ev, u8 *len);
 
-const char *rdma_cm_portals_event_msg(int ev);
+static inline int ptl_cm_set_service_type(struct ptl_cm_id *id, u8 tos)
+{
+	(void)id;
+	(void)tos;
+	return 0;
+}
 
-const void *rdma_cm_portals_reject_msg(struct rdma_cm_id *id, int status);
-
-const void *rdma_cm_portals_consumer_reject_data(struct rdma_cm_id *id,
-                                                 struct rdma_cm_event *ev,
-                                                 u8 *data_len);
-
-int rdma_cm_portals_set_service_type(struct rdma_cm_id *id, u8 tos);
-
-int rdma_cm_portals_connect(struct rdma_cm_id *id,
-                            struct rdma_conn_param *conn_param);
+#endif

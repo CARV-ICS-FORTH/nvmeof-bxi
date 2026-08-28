@@ -10,10 +10,10 @@
 #include "ptl_object_types.h"
 #include "ptl_recv_op.h"
 #include "ptl_uuid.h"
-#include "rdma/rdma_cm.h"
 #include <asm-generic/errno-base.h>
 #include <linux/err.h>
 #include <linux/hashtable.h>
+#include <linux/workqueue.h>
 #include <nvme.h>
 #include <portals4.h>
 #include <portals4_bxiext.h>
@@ -29,15 +29,18 @@ static void ptl_cnxt_process_get_overflow(ptl_event_t event,
 
 static void ptl_handle_open_connection_reply(ptl_event_t *event,
                                              struct ptl_cq *ptl_cq) {
-  struct rdma_cm_event *cm_event = NULL;
+  struct ptl_cm_event cm_event = {0};
   struct ptl_conn_recv_buffer *recv_buffer = event->user_ptr;
   struct ptl_conn_msg *msg = recv_buffer->conn_msg;
   struct ptl_bxiv3_qp_map_entry *entry;
   struct ptl_qp *ptl_qp = NULL;
+
   int qpn;
-  cm_event = kzalloc(sizeof(*cm_event), GFP_KERNEL);
 
   qpn = msg->conn_open_reply.initiator_qp_num;
+  PTL_DEBUG("REPLY: msg_pte=%d rma_pte=%d cq_id=%d status=%d",
+            msg->conn_open_reply.msg_pte, msg->conn_open_reply.rma_pte,
+            msg->conn_open_reply.cq_id, msg->conn_open_reply.status);
   PTL_DEBUG("<PTL_OPEN_CONNECTION_REPLY> rlength: %llu mlength: %llu",
             event->rlength, event->mlength);
   PTL_DEBUG("Initiator qp num for which this event is: %d", qpn);
@@ -52,10 +55,15 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event,
   }
 
   if (NULL == ptl_qp) {
-    PTL_FATAL("No matching ptl_qp found in open_connection_reply for qp "
-              "{initator_qp_num: %d, target_qp_num: %d}",
-              msg->conn_open_reply.initiator_qp_num,
-              msg->conn_open_reply.target_qp_num);
+    /* Not fatal: a reply with no matching QP is an ordinary race once
+     * nvme_rdma_wait_for_cm() times out and tears the queue down. Note the
+     * unlock - the old PTL_FATAL() BUG()ed while holding qp_map_lock. */
+    spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);
+    PTL_WARN("Stale open_connection_reply for qp {initiator_qp_num: %d, "
+             "target_qp_num: %d} - connection already torn down, dropping",
+             msg->conn_open_reply.initiator_qp_num,
+             msg->conn_open_reply.target_qp_num);
+    return;
   }
 
   ptl_qp->ptl_id->remote_msg_pte = msg->conn_open_reply.msg_pte;
@@ -66,15 +74,15 @@ static void ptl_handle_open_connection_reply(ptl_event_t *event,
   ptl_qp->ptl_id->remote_cq_id = msg->conn_open_reply.cq_id;
 
   spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);
-  if (NULL == ptl_qp) {
-    PTL_WARN("QPN: %d not found!, is Target ok in its health?", qpn);
-    cm_event->event = RDMA_CM_EVENT_CONNECT_ERROR;
-    cm_event->status = -ENETUNREACH;
-  } else {
-    cm_event->event = RDMA_CM_EVENT_ESTABLISHED;
+  if (ptl_cm_id_set_state(ptl_qp->ptl_id, PTL_CM_ESTABLISHED)) {
+    PTL_WARN("QPN: %d reply arrived in unexpected CM state %d", qpn,
+             ptl_qp->ptl_id->cm_id_state);
+    return;
   }
-
-  ptl_qp->ptl_id->event_handler(&ptl_qp->ptl_id->fake_cm_id, cm_event);
+  cm_event.event = PTL_CM_EVENT_ESTABLISHED;
+  cm_event.status = 0;
+  if (ptl_qp->ptl_id->event_handler)
+    ptl_qp->ptl_id->event_handler(ptl_qp->ptl_id, &cm_event);
   PTL_DEBUG("</PTL_OPEN_CONNECTION_REPLY> QPN: %d FOUND", qpn);
 }
 
@@ -90,35 +98,97 @@ static void ptl_handle_close_connection_reply(ptl_event_t *event,
   PTL_DEBUG("</PTL_CLOSE_CONNECTION_REPLY>");
 }
 
+/* Target-initiated close (PTL_CLOSE_CONNECTION): ack with a CLOSE_CONNECTION_REPLY
+ * and raise DISCONNECTED so nvme tears down. The reply send may sleep and this
+ * runs under drain_lock, so it is deferred to a work item. */
+void ptl_close_work_fn(struct work_struct *w) {
+  struct ptl_cm_id *id = container_of(w, struct ptl_cm_id, close_work);
+  struct ptl_cm_event cm_event = {0};
+  int rc = ptl_cm_send_close_reply(id);
+  if (rc)
+    PTL_WARN("CLOSE_CONNECTION_REPLY send failed rc=%d", rc);
+  cm_event.event = PTL_CM_EVENT_DISCONNECTED;
+  cm_event.status = 0;
+  if (id->event_handler)
+    id->event_handler(id, &cm_event);
+}
+
+static void ptl_handle_close_connection(ptl_event_t *event,
+                                        struct ptl_cq *ptl_cq) {
+  struct ptl_conn_recv_buffer *recv_buffer = event->user_ptr;
+  struct ptl_conn_msg *msg = recv_buffer->conn_msg;
+  struct ptl_bxiv3_qp_map_entry *entry;
+  struct ptl_qp *ptl_qp = NULL;
+  int qpn = msg->conn_close.initiator_qp_num;
+
+  PTL_DEBUG("<PTL_CLOSE_CONNECTION> init_qp=%d tgt_qp=%d",
+            msg->conn_close.initiator_qp_num,
+            msg->conn_close.target_qp_num);
+
+  spin_lock(&ptl_cq->bxiv3_dev->qp_map_lock);
+  hash_for_each_possible(ptl_cq->bxiv3_dev->qp_map, entry, node, qpn) {
+    if (entry->key == qpn) {
+      ptl_qp = entry->ptl_qp;
+      break;
+    }
+  }
+  spin_unlock(&ptl_cq->bxiv3_dev->qp_map_lock);
+  if (NULL == ptl_qp) {
+    PTL_WARN("Target-initiated close for unknown qpn %d, ignoring", qpn);
+    return;
+  }
+
+  if (ptl_qp->ptl_id->cm_id_state != PTL_CM_DISCONNECTING &&
+      ptl_qp->ptl_id->cm_id_state != PTL_CM_DISCONNECTED)
+    ptl_cm_id_set_state(ptl_qp->ptl_id, PTL_CM_DISCONNECTING);
+
+  /* The work is embedded in the cm_id and INIT_WORK()ed at create time, so
+   * there is nothing to allocate here and no GFP_ATOMIC failure to handle. A
+   * duplicate close for the same qp finds it already queued and
+   * schedule_work() is a no-op, which is the behaviour we want: one reply. */
+  schedule_work(&ptl_qp->ptl_id->close_work); /* off the drain_lock */
+}
+
 static void ptl_handle_nvme_cpl(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   struct ptl_recv_op *recv_op_meta = NULL;
   struct ptl_qp *ptl_qp;
   struct ib_wc wc;
   u16 nvme_cid;
+  u16 calculated_cid;
   /*<gesalous> non-matching feat*/
   // vanilla case
   // recv_op = event->user_ptr;
 
   ptl_qp = event->user_ptr;
-  if (ptl_qp == NULL) {
-    PTL_FATAL("Null context? cannot happen!");
+  /* Fatal by design: a stale user_ptr means the qp table is corrupt. */
+  if (NULL == ptl_qp || PTL_QP != ptl_qp->object_type) {
+    PTL_FATAL("nvme_cpl with stale/invalid qp context %p", ptl_qp);
   }
-  PTL_CHECK(ptl_qp, PTL_QP);
   PTL_DEBUG("nvme_cpl: got nvme_completion at addr: 0x%llx pte: %d qpn: %d",
             event->start, event->pt_index, ptl_qp->qpn);
 
   nvme_cid = ptl_uuid_get_nvme_cid(&event->hdr_data);
+  /* Clean over 305 reconnects and ~130k completions, so these stay fatal. */
   if (nvme_cid >= ptl_qp->recv_op_meta_size) {
-    PTL_FATAL("Wrong recv_op_meta_idx: it is: %u size is: %lu", nvme_cid,
-              ptl_qp->recv_op_meta_size);
+    PTL_FATAL("Wrong recv_op_meta_idx: it is: %u size is: %lu qpn: %d",
+              nvme_cid, ptl_qp->recv_op_meta_size, ptl_qp->qpn);
   }
-  PTL_CHECK_NVME_CID(event, ptl_qp, nvme_cid);
+  calculated_cid =
+      (u16)(((u64)event->start - (u64)ptl_qp->ptl_id->nvme_cpl_start) /
+            sizeof(struct nvme_completion));
+  if (calculated_cid != nvme_cid) {
+    PTL_FATAL("Corrupted nvme_cid value: %u calculated: %u qpn: %d",
+              nvme_cid, calculated_cid, ptl_qp->qpn);
+  }
   recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
 
   // PTL_DEBUG("nvme_cpl: recv_op_meta_idx = %llu for qpn: %d",recv_op_meta_idx,
   // ptl_qp->qpn);
   if (false == recv_op_meta->is_set) {
-    PTL_FATAL("Metadata not set for qpn: %d ? Wrong", ptl_qp->qpn);
+    /* An ordinary post-reconnect race, not corruption, so this one stays non-fatal. */
+    PTL_WARN_RL("Metadata not set for qpn: %d nvme_cid: %u, dropping event",
+                ptl_qp->qpn, nvme_cid);
+    return;
   }
   wc.status =
       event->ni_fail_type == PTL_NI_OK ? IB_WC_SUCCESS : IB_WC_LOC_PROT_ERR;
@@ -156,15 +226,15 @@ static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq) {
   struct ptl_qp *ptl_qp = event->user_ptr;
   u16 nvme_cid;
 
-  if (NULL == ptl_qp) {
-    PTL_FATAL("NULL context");
+
+  /* Same wire-derived context as ptl_handle_nvme_cpl. */
+  if (NULL == ptl_qp || PTL_QP != ptl_qp->object_type) {
+    PTL_FATAL("rdma_write with stale/invalid qp context %p", ptl_qp);
   }
-  PTL_CHECK(ptl_qp, PTL_QP);
 
   // sanity check
   if (event->rlength == sizeof(struct nvme_completion)) {
-    PTL_FATAL("This should not happen!");
-    return;
+    PTL_FATAL("rdma_write sized like an nvme_completion");
   }
 
   nvme_cid = ptl_uuid_get_nvme_cid(&event->hdr_data);
@@ -173,6 +243,11 @@ static void ptl_handle_rdma_write(ptl_event_t *event, struct ptl_cq *ptl_cq) {
             "%d queue size: %d",
             event->start, event->pt_index, ptl_qp->qpn, nvme_cid,
             ptl_qp->recv_op_meta_size);
+  /* This path had no bounds check at all before. */
+  if (nvme_cid >= ptl_qp->recv_op_meta_size) {
+    PTL_FATAL("rdma_write cid %u out of range (size %lu) qpn: %d",
+              nvme_cid, ptl_qp->recv_op_meta_size, ptl_qp->qpn);
+  }
   recv_op_meta = &ptl_qp->recv_op_meta[nvme_cid];
   ++recv_op_meta->parts_num_received;
   PTL_DEBUG("[RDMA WRITE interrupt] Got part for {nvme cid: %u "
@@ -202,6 +277,8 @@ static void ptl_cnxt_process_put(ptl_event_t event, struct ptl_cq *ptl_cq) {
     ptl_handle_open_connection_reply(&event, ptl_cq);
   } else if (PTL_CLOSE_CONNECTION_REPLY == op_type) {
     ptl_handle_close_connection_reply(&event, ptl_cq);
+  } else if (PTL_CLOSE_CONNECTION == op_type) {
+    ptl_handle_close_connection(&event, ptl_cq);
   } else if (NVMeOF_cmd == op_type) {
     PTL_FATAL("Got an NVMeOF_cmd. I am the initiator hello?");
   } else {
@@ -318,7 +395,6 @@ static void ptl_cnxt_process_auto_unlink(ptl_event_t event,
     PTL_FATAL("PtlLEAppend failed with reason: %s",
               PtlToStr(rc, PTL_STR_ERROR));
   }
-  kfree(recv_buffer);
 }
 
 static void ptl_cnxt_process_auto_free(ptl_event_t event,
@@ -345,20 +421,40 @@ static process_event handler[16] = {
     ptl_cnxt_process_auto_unlink,  ptl_cnxt_process_auto_free,
     ptl_cnxt_process_search,       ptl_cnxt_process_link};
 
-void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh) {
-  struct ptl_cq *ptl_cq = arg;
+#define PTL_CQ_POLL_MS 250   //new addition (EQ poll fallback interval)
+
+/* EQ poll fallback is compiled OUT by default; build with -DPTL_EQ_POLL to include it.
+* This flag is readable at runtime so a loaded module can say which variant it is:
+* cat /sys/module/bxiv3_initiator/parameters/ptl_eq_poll_enabled */
+#ifdef PTL_EQ_POLL
+static bool ptl_eq_poll_enabled = true;
+#else
+static bool ptl_eq_poll_enabled;
+#endif
+module_param(ptl_eq_poll_enabled, bool, 0444);
+MODULE_PARM_DESC(ptl_eq_poll_enabled,
+                 "EQ poll fallback compiled in (rebuild with -DPTL_EQ_POLL to enable)");
+
+/* Shared drain used by both the interrupt callback and the poll fallback;
+ * spin_trylock keeps the two off each other's reassembly state. Handlers run
+ * under this spinlock and must not sleep. */
+static void ptl_eq_drain(struct ptl_cq *ptl_cq) {
   ptl_event_t event;
   int rc;
-
-  if (PTL_CQ != ptl_cq->object_type) {
-    PTL_FATAL("Corrupted PTL_CQ");
-    return;
-  }
-
+  if (!spin_trylock(&ptl_cq->drain_lock))
+    return; /* another context already draining this EQ */
   for (;;) {
-    rc = PtlEQGet(eqh, &event);
-    if (rc == PTL_OK) {
-
+    rc = PtlEQGet(ptl_cq->eq, &event); /* was eqh; poller has no eqh */
+    /* PTL_EQ_DROPPED carries a VALID event, but events BEFORE it were lost.
+     * Deliberately fatal: a gap in the completion stream corrupts NVMe state in
+     * ways that surface far from here and long after. Stop at the point of loss
+     * so it gets reported, rather than degrading quietly. */
+    if (rc == PTL_OK || rc == PTL_EQ_DROPPED) {
+      if (rc == PTL_EQ_DROPPED) {
+        PTL_FATAL("EQ overflow on iface_id:%d pte:%d - events were dropped "
+                  "BEFORE this one, the completion stream has a gap",
+                  ptl_cq->bxiv3_dev->iface_id, ptl_cq->pte);
+      }
       PTL_DEBUG(
           "Event: iface_id:%d EV:%d(%s) PTE:%d match_bits=0x%llx "
           "initiator:{nid:%d,pid:%d,pt_index: %d} ni_fail:%d(%s) fc_err:%d",
@@ -367,26 +463,54 @@ void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh) {
           (unsigned long long)event.match_bits, event.initiator.phys.nid,
           event.initiator.phys.pid, event.pt_index, event.ni_fail_type,
           PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE), event.fc_err);
-      if (event.type > sizeof(handler) / sizeof(handler[0])) {
+      if (event.type >= sizeof(handler) / sizeof(handler[0])) {
         PTL_FATAL("Cannot handle event of type: %d", event.type);
       }
-      if (event.ni_fail_type != PTL_OK) {
-        PTL_FATAL("Oops error: reason %s",
-                  PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE));
-      }
+      if (event.ni_fail_type != PTL_NI_OK) {
+        PTL_WARN(
+        "[%s:%s:%d] PTL: ni_fail %d(%s) on event %d(%s) from {nid:%d,pid:%d}, "
+        "delivering errored completion",
+        __FILE__, __func__, __LINE__,
+        event.ni_fail_type, PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE),
+        event.type, PtlToStr(event.type, PTL_STR_EVENT),
+        event.initiator.phys.nid, event.initiator.phys.pid);
+}
+
       handler[event.type](event, ptl_cq);
       continue;
     } else if (rc == PTL_EQ_EMPTY) {
       break;
-    } else if (rc == PTL_EQ_DROPPED) {
-      PTL_DEBUG("EQ dropped events (overflow)");
-      break;
     } else {
-      PTL_FATAL("PtlEQGet unhandled code %d", rc);
+      PTL_FATAL("PtlEQGet unhandled code %d (%s)", rc,
+                PtlToStr(rc, PTL_STR_ERROR));
       break;
     }
   }
+  spin_unlock(&ptl_cq->drain_lock);
 }
+
+void ptl_eq_callback(void *arg, ptl_handle_eq_t eqh) {     /* interrupt path */
+  struct ptl_cq *ptl_cq = arg;
+  (void)eqh;                                               //new addition (drain uses ptl_cq->eq)
+  if (PTL_CQ != ptl_cq->object_type) {
+    PTL_FATAL("Corrupted PTL_CQ");
+    return;
+  }
+  ptl_eq_drain(ptl_cq);
+}
+
+#ifdef PTL_EQ_POLL
+/* new addition: timer fallback for the shared-interrupt/coalescing problem.
+ * A lone admin completion (keep-alive / reconnect Connect) can sit undrained at
+ * idle; poll every EQ so admin always makes progress even with no IO traffic. */
+static void ptl_cq_poll_work(struct work_struct *w) {
+  struct ptl_cq *ptl_cq =
+      container_of(to_delayed_work(w), struct ptl_cq, poll_work);
+  ptl_eq_drain(ptl_cq);
+  schedule_delayed_work(&ptl_cq->poll_work,
+                        msecs_to_jiffies(PTL_CQ_POLL_MS));
+}
+#endif /* PTL_EQ_POLL */
 
 struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
                              struct ptl_bxiv3_device *bxiv3_dev, int nr_cqes,
@@ -415,30 +539,50 @@ struct ptl_cq *ptl_cq_create(struct ptl_cq_pool *cq_pool,
   cq->ptl_cq_id = pte;
   cq->nr_cqes = nr_cqes;
 
+  /* Must precede PtlEQAllocAsync: that call arms ptl_eq_callback with this cq,
+   * so an event can reach ptl_eq_drain() -> spin_trylock(&cq->drain_lock)
+   * before the tail of this function is reached. Initialising the lock down
+   * there also re-inits it under a drain already in flight. */
+  spin_lock_init(&cq->drain_lock);
+#ifdef PTL_EQ_POLL
+  INIT_DELAYED_WORK(&cq->poll_work, ptl_cq_poll_work);
+#endif /* PTL_EQ_POLL */
+
   rc = PtlEQAllocAsync(bxiv3_dev->nicia_handle, cq->nr_cqes, &cq->eq,
                        ptl_eq_callback, cq, cq->bxiv3_dev->intr_index);
   if (PTL_OK != rc) {
-    PTL_FATAL("Failed to allocate event queue for pte: %d", pte);
+    PTL_FATAL("Failed to allocate event queue for pte: %d with code: %d (%s)",
+              pte, rc, PtlToStr(rc, PTL_STR_ERROR));
     goto err;
   }
   rc = PtlPTAlloc(bxiv3_dev->nicia_handle, 0, cq->eq, pte, &cq->pte);
   if (PTL_OK != rc) {
-    PTL_FATAL("Failed to allocate PTE: %u with reason: %d", pte, rc);
+    PTL_FATAL("Failed to allocate PTE: %u with reason: %d (%s)", pte, rc,
+              PtlToStr(rc, PTL_STR_ERROR));
     goto free_cq;
   }
   rc = PtlPTEnable(bxiv3_dev->nicia_handle, cq->pte);
   if (PTL_OK != rc) {
-    PTL_FATAL("Failed to enable PTE: %u with reason: %d", pte, rc);
+    PTL_FATAL("Failed to enable PTE: %u with reason: %d (%s)", pte, rc,
+              PtlToStr(rc, PTL_STR_ERROR));
     goto free_cq;
   }
   PTL_DEBUG("Enabled for iface_id: %d PTE: %u and created cq with %d number of "
             "entries",
             bxiv3_dev->iface_id, cq->pte, nr_cqes);
+#ifdef PTL_EQ_POLL
+  /* new addition: arm the poll fallback so admin completions drain even when
+   * the shared NIC interrupt does not fire at idle. Armed last, once the CQ is
+   * fully built; the error paths below never queued it, so they need no cancel. */
+  schedule_delayed_work(&cq->poll_work,
+                        msecs_to_jiffies(PTL_CQ_POLL_MS));
+#endif /* PTL_EQ_POLL */
   return cq;
 free_cq:
   rc = PtlEQFree(cq->eq);
   if (PTL_OK != rc)
-    PTL_WARN("Failed to free event queue with code: %d, continuing", rc);
+    PTL_WARN("Failed to free event queue with code: %d (%s), continuing", rc,
+             PtlToStr(rc, PTL_STR_ERROR));
 err:
   kfree(cq);
   return ERR_PTR(-EINVAL);
@@ -454,17 +598,24 @@ ptl_pt_index_t ptl_cq_destroy(struct ptl_cq *ptl_cq) {
   }
   pte = ptl_cq->pte;
 
+  /* new addition: stop the poll fallback before tearing down the EQ/PTE, so no
+   * poll runs against a freed event queue. sync = wait for any in-flight poll. */
+#ifdef PTL_EQ_POLL
+  cancel_delayed_work_sync(&ptl_cq->poll_work);   //new addition
+#endif /* PTL_EQ_POLL */
+
   /* Free the portal table entry */
   rc = PtlPTFree(ptl_cq->bxiv3_dev->nicia_handle, ptl_cq->pte);
   if (PTL_OK != rc) {
-    PTL_WARN("Failed to free PTE: %d with code: %d, continuing", ptl_cq->pte,
-             rc);
+    PTL_WARN("Failed to free PTE: %d with code: %d (%s), continuing",
+             ptl_cq->pte, rc, PtlToStr(rc, PTL_STR_ERROR));
   }
 
   /* Free the event queue */
   rc = PtlEQFree(ptl_cq->eq);
   if (PTL_OK != rc) {
-    PTL_WARN("Failed to free event queue with code: %d, continuing", rc);
+    PTL_WARN("Failed to free event queue with code: %d (%s), continuing", rc,
+             PtlToStr(rc, PTL_STR_ERROR));
   }
   PTL_DEBUG("Destroyed cq for PTE: %d", ptl_cq->pte);
   /* Free the cq structure */
