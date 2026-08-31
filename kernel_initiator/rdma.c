@@ -1442,7 +1442,7 @@ static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev,
       nvfs_put_ops();
     } else
 #endif
-      ib_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
+      ib_portals_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
                       rq_dma_dir(rq));
 
     sg_free_table_chained(&req->metadata_sgl->sg_table,
@@ -1465,7 +1465,7 @@ static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev,
     nvfs_put_ops();
   } else
 #endif
-    ib_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
+    ib_portals_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
                     rq_dma_dir(rq));
   /*end*/
   sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);
