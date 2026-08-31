@@ -1,0 +1,18 @@
+# Build outputs
+/build/
+/obj/
+*.o
+*.d
+*.so
+
+# Compiled example / test / benchmark binaries (sources live in src/ and test/)
+/simple_sync
+/simple_async
+/stress_threads
+/stress_threads_real
+/bench_write
+/bench_write_real
+/bench_write_tcu
+/mt_tenant
+/mt_tenant_real
+/trigger_raw_ioctl

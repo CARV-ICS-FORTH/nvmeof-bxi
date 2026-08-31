@@ -101,7 +101,7 @@ static struct ptl_context_op_meta *ptl_cnxt_process_put(ptl_event_t event,
 
   if (PTL_OK != event.ni_fail_type) {
     SPDK_PTL_FATAL("Corrupted event code {%d, %s}", event.ni_fail_type,
-                   PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE));
+            PtlToStr(event.ni_fail_type, PTL_STR_FAIL_TYPE));
   }
 
   if (NULL == event.user_ptr) {

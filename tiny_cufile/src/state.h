@@ -2,24 +2,27 @@
 #define STATE_H
 
 #include "uthash.h"
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
-
+struct nvfs_ioctl_metapage;
 typedef struct {
   void *shadow_buf;
-  volatile uint64_t *fence_page;
+  volatile struct nvfs_ioctl_metapage *fence_page;
   size_t length;
+  // void *fence_alloc;
+  pthread_mutex_t io_lock;
 } tcufile_chunk_t;
 
-// A struct to hold everything we know about a registered GPU buffer
+/* A struct to hold everything we know about a registered GPU buffer */
 typedef struct tcufile_buf_s {
-  const void *devPtr_base; // our key for the hash
+  const void *devPtr_base; /* our key for the hash */
   size_t length;
-  // void *shadow_buf;
-  // volatile uint64_t *fence_page;
+  /* void *shadow_buf; */
+  /* volatile uint64_t *fence_page; */
   uint64_t pdevinfo;
 
-  tcufile_chunk_t *chunks; // array of 16mb chunks
+  tcufile_chunk_t *chunks; /* array of 16mb chunks */
   int num_chunks;
 
   UT_hash_handle hh;

@@ -58,6 +58,58 @@
 #define NVME_RDMA_METADATA_SGL_SIZE                                            \
   (sizeof(struct scatterlist) * NVME_INLINE_METADATA_SG_CNT)
 
+#ifdef GDS_SUPPORT
+#include "nvfs_glue.h"
+#include <linux/cpumask.h>
+#include <linux/delay.h>
+#include <linux/percpu.h>
+
+/* --- GPU Direct Storage: nvidia-fs registration slot ---
+nvidia-fs probes and calls nvme_rdma_v1_register_nvfs_dma_ops() at its own
+init, handing us its DMA op table. We keep it behind a per-CPU refcount so
+unregister() can drain in-flight GPU I/O before dropping the table.
+*/
+struct nvfs_dma_rw_ops *nvfs_ops;
+static atomic_t nvfs_shutdown = ATOMIC_INIT(1);
+static DEFINE_PER_CPU(long, nvfs_n_ops);
+
+bool nvfs_get_ops(void) {
+  if (nvfs_ops && !atomic_read(&nvfs_shutdown)) {
+    this_cpu_inc(nvfs_n_ops);
+    return true;
+  }
+  return false;
+}
+
+void nvfs_put_ops(void) { this_cpu_dec(nvfs_n_ops); }
+
+static long nvfs_count_ops(void) {
+  long sum = 0;
+  int cpu;
+  for_each_possible_cpu(cpu) sum += per_cpu(nvfs_n_ops, cpu);
+  return sum;
+}
+
+int nvme_rdma_v1_register_nvfs_dma_ops(struct nvfs_dma_rw_ops *ops) {
+  if (!(ops->ft_bmap & NVFS_FT_IS_GPU_PAGE) ||
+      !(ops->ft_bmap & NVFS_FT_PREP_SGLIST) ||
+      !(ops->ft_bmap & NVFS_FT_MAP_SGLIST))
+    return -EOPNOTSUPP; // reject; nvidia-fs will not call unregister
+  nvfs_ops = ops;
+  atomic_set(&nvfs_shutdown, 0);
+  return 0;
+}
+EXPORT_SYMBOL(nvme_rdma_v1_register_nvfs_dma_ops);
+
+void nvme_rdma_v1_unregister_nvfs_dma_ops(void) {
+  atomic_set(&nvfs_shutdown, 1); // block new getters
+  while (nvfs_count_ops())       // wait for in-flight GPU I/O to drain
+    msleep(10);
+  nvfs_ops = NULL;
+}
+EXPORT_SYMBOL(nvme_rdma_v1_unregister_nvfs_dma_ops);
+#endif
+
 struct nvme_rdma_device {
   struct ib_device *dev;
   struct ib_pd *pd;
@@ -96,6 +148,9 @@ struct nvme_rdma_request {
   struct nvme_rdma_sgl data_sgl;
   struct nvme_rdma_sgl *metadata_sgl;
   bool use_sig_mr;
+#ifdef GDS_SUPPORT
+  bool is_gds_mapped;
+#endif
 };
 
 enum nvme_rdma_queue_flags {
@@ -1366,35 +1421,53 @@ static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev,
                                     struct request *rq) {
   struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);
 
+#ifdef GDS_SUPPORT
+  struct device *actual_dev = ibdev->dev.parent;
+  struct ptl_bxiv3_device *bxiv3_dev = NULL;
+#endif /* ifdef GDS_SUPPORT*/
+
   if (blk_integrity_rq(rq)) {
-    /*<gesalous> debug remove later*/
-    struct scatterlist *s;
-    int i;
-    for_each_sg(req->metadata_sgl->sg_table.sgl, s, req->metadata_sgl->nents,
-                i) {
-      PTL_DEBUG("CORE_DRIVER: calling unmap-sg[%d out of %d]: virt_addr=%p, "
-                "iova=0x%llx, length=%u for request: 0x%llx",
-                i, req->metadata_sgl->nents, sg_virt(s), sg_dma_address(s),
-                s->length, (u64)rq);
-    }
-    /*</gesalous>*/
-    ib_portals_dma_unmap_sg(ibdev, req->metadata_sgl->sg_table.sgl,
-                            req->metadata_sgl->nents, rq_dma_dir(rq));
+#ifdef GDS_SUPPORT
+    if (req->is_gds_mapped) {
+      PTL_DEBUG("\n======================================================\n");
+      PTL_DEBUG("BXI : GPU SGL UNMAP INTERCEPTED SUCCESSFULLY!\n");
+      PTL_DEBUG("======================================================\n\n");
+      if (actual_dev == NULL) {
+        bxiv3_dev = container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+        actual_dev = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+      }
+      nvfs_ops->nvfs_dma_unmap_sg(actual_dev, req->data_sgl.sg_table.sgl,
+                                  req->data_sgl.nents, rq_dma_dir(rq));
+      req->is_gds_mapped = false;
+      nvfs_put_ops();
+    } else
+#endif
+      ib_portals_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
+                      rq_dma_dir(rq));
+
     sg_free_table_chained(&req->metadata_sgl->sg_table,
                           NVME_INLINE_METADATA_SG_CNT);
   }
-  /*<gesalous> debug remove later*/
-  // struct scatterlist *s;
-  // int i;
-  // for_each_sg(req->data_sgl.sg_table.sgl, s, req->data_sgl.nents, i) {
-  //   PTL_DEBUG("CORE_DRIVER: calling unmap-sg[%d out of %d ]: virt_addr=%p, "
-  //             "iova=0x%llx, length=%u for rq: 0x%llx",
-  //             i, req->data_sgl.nents, sg_virt(s), sg_dma_address(s),
-  //             s->length, (u64)rq);
-  // }
-  /*</gesalous>*/
-  ib_portals_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl,
-                          req->data_sgl.nents, rq_dma_dir(rq));
+
+/*the gds trapdoor*/
+#ifdef GDS_SUPPORT
+  if (req->is_gds_mapped) {
+    PTL_DEBUG("\n======================================================\n");
+    PTL_DEBUG("BXI : GPU SGL UNMAP INTERCEPTED SUCCESSFULLY!\n");
+    PTL_DEBUG("======================================================\n\n");
+    if (actual_dev == NULL) {
+      bxiv3_dev = container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+      actual_dev = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+    }
+    nvfs_ops->nvfs_dma_unmap_sg(actual_dev, req->data_sgl.sg_table.sgl,
+                                req->data_sgl.nents, rq_dma_dir(rq));
+    req->is_gds_mapped = false;
+    nvfs_put_ops();
+  } else
+#endif
+    ib_portals_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
+                    rq_dma_dir(rq));
+  /*end*/
   sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);
 }
 
@@ -1634,10 +1707,17 @@ mr_put:
   return -EINVAL;
 }
 
+/*Original*/
+
 static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,
                                  int *count, int *pi_count) {
   struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);
   int ret;
+
+  struct req_iterator iter;
+  struct bio_vec bvec;
+  struct page *first_page = NULL;
+  int is_gpu = 0;
 
   req->data_sgl.sg_table.sgl = (struct scatterlist *)(req + 1);
   ret = sg_alloc_table_chained(&req->data_sgl.sg_table,
@@ -1646,11 +1726,59 @@ static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,
   if (ret) {
     return -ENOMEM;
   }
+#ifdef GDS_SUPPORT
+  req->is_gds_mapped = false;
+  /* Only touch nvidia-fs if it is registered. For a GPU-mapped request the
+    ref taken here is held until unmap (released by nvfs_put_ops() there). */
 
-  req->data_sgl.nents = blk_rq_map_sg(rq->q, rq, req->data_sgl.sg_table.sgl);
+  /* We interogate the first page to see if it contains gpu pages */
+  if (nvfs_get_ops()) {
+    rq_for_each_segment(bvec, rq, iter) {
+      first_page = bvec.bv_page;
+      break; /* we only need to check the first page */
+    }
 
-  *count = ib_portals_dma_map_sg(ibdev, req->data_sgl.sg_table.sgl,
-                                 req->data_sgl.nents, rq_dma_dir(rq));
+    if (first_page) {
+      is_gpu = nvfs_ops->nvfs_is_gpu_page(first_page);
+      if (is_gpu)
+        PTL_DEBUG("BXI DEBUG: Intercepted GPU Page pointer "
+                  "nvfs_is_gpu_page() returned: %d\n",
+                  is_gpu);
+    }
+
+    if (is_gpu) {
+      /* we build the scatterlist using nvfs builder */
+      req->data_sgl.nents =
+          nvfs_ops->nvfs_blk_rq_map_sg(rq->q, rq, req->data_sgl.sg_table.sgl);
+      req->is_gds_mapped = true; /* ref stays held until unmap */
+
+      PTL_DEBUG("\n======================================================\n");
+      PTL_DEBUG("BXI : GPU MEMORY INTERCEPTED SUCCESSFULLY!\n");
+      PTL_DEBUG("BXI : 64KB SGL Built. Ready for P2P DMA.\n");
+      PTL_DEBUG("======================================================\n\n");
+
+      struct device *actual_dev = ibdev->dev.parent;
+      if (actual_dev == NULL) {
+        struct ptl_bxiv3_device *bxiv3_dev =
+            container_of(ibdev, struct ptl_bxiv3_device, fake_ib_dev);
+        actual_dev = PtlGetDriverDev(bxiv3_dev->nicia_handle);
+      }
+      /* we pass the struct dev of the nic as per nvfs constraint */
+      PTL_DEBUG("BXI DEBUG: ibdev parent is %p\n", ibdev->dev.parent);
+      *count = nvfs_ops->nvfs_dma_map_sg_attrs(
+          actual_dev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
+          rq_dma_dir(rq), 0);
+    } else
+      nvfs_put_ops(); /* not a gpu page -> release ref, use cpu path */
+  }
+  if (!req->is_gds_mapped)
+#endif
+  { // default behaviour
+    req->data_sgl.nents = blk_rq_map_sg(rq->q, rq, req->data_sgl.sg_table.sgl);
+    *count = ib_portals_dma_map_sg(ibdev, req->data_sgl.sg_table.sgl,
+                                   req->data_sgl.nents, rq_dma_dir(rq));
+  }
+
   if (unlikely(*count <= 0)) {
     ret = -EIO;
     goto out_free_table;
@@ -1683,18 +1811,17 @@ out_free_pi_table:
   sg_free_table_chained(&req->metadata_sgl->sg_table,
                         NVME_INLINE_METADATA_SG_CNT);
 out_unmap_sg:
-    /*<gesalous> debug remove later*/;
-  // struct scatterlist *s;
-  // int i;
-  // for_each_sg(req->data_sgl.sg_table.sgl, s, req->data_sgl.nents, i) {
-  //   PTL_DEBUG("CORE_DRIVER: calling unmap-sg[%d out of %d]: virt_addr=%p, "
-  //             "iova=0x%llx, length=%u, for request: 0x%llx",
-  //             i, req->data_sgl.nents, sg_virt(s), sg_dma_address(s),
-  //             s->length, (u64)rq);
-  // }
-  /*</gesalous>*/
-  ib_portals_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl,
-                          req->data_sgl.nents, rq_dma_dir(rq));
+#ifdef GDS_SUPPORT
+  // check whether the request is actually a GDS req.
+  if (req->is_gds_mapped) {
+    nvfs_ops->nvfs_dma_unmap_sg(ibdev->dev.parent, req->data_sgl.sg_table.sgl,
+                                req->data_sgl.nents, rq_dma_dir(rq));
+    req->is_gds_mapped = false;
+    nvfs_put_ops();
+  } else // default behaviour
+#endif
+    ib_portals_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl,
+                            req->data_sgl.nents, rq_dma_dir(rq));
 out_free_table:
   sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);
   return ret;
@@ -2628,6 +2755,8 @@ static bool nvme_rdma_existing_controller(struct nvmf_ctrl_options *opts) {
   return found;
 }
 
+struct ptl_bxiv3_dev_map bxiv3_dev_map;
+
 static struct nvme_rdma_ctrl *
 nvme_rdma_alloc_ctrl(struct device *dev, struct nvmf_ctrl_options *opts) {
   PTL_DEBUG("CORE_DRIVER: Allocating nvme controller... v1");
@@ -2692,10 +2821,17 @@ nvme_rdma_alloc_ctrl(struct device *dev, struct nvmf_ctrl_options *opts) {
   if (!ctrl->queues) {
     goto out_free_ctrl;
   }
-
+#ifdef GDS_SUPPORT
+  struct device *parent_dev = dev;
+  if (bxiv3_dev_map.num_nicia > 0 && bxiv3_dev_map.bxiv3_dev[0]) {
+    parent_dev = bxiv3_dev_map.bxiv3_dev[0]->fake_ib_dev.dev.parent;
+  }
+  ret = nvme_init_ctrl(&ctrl->ctrl, /*dev*/ parent_dev, &nvme_rdma_ctrl_ops,
+                       0 /* no quirks, we're perfect! */);
+#else
   ret = nvme_init_ctrl(&ctrl->ctrl, dev, &nvme_rdma_ctrl_ops,
                        0 /* no quirks, we're perfect! */);
-
+#endif
   if (ret) {
     goto out_kfree_queues;
   }
@@ -2810,7 +2946,6 @@ static struct ib_client nvme_rdma_ib_client = {.name = "nvme_rdma",
                                                .remove = nvme_rdma_remove_one};
 
 /*<gesalous>*/
-struct ptl_bxiv3_dev_map bxiv3_dev_map;
 
 static int __ptl_init_devices(void) {
   u32 iface_id;
@@ -2832,6 +2967,14 @@ static int __ptl_init_devices(void) {
     strlcpy(bxiv3_dev_map.bxiv3_dev[iface_id]->fake_ib_dev.name, "BXIv3",
             IB_DEVICE_NAME_MAX);
 
+#ifdef GDS_SUPPORT
+
+    /* we need to do this so we can get the struct device* of the bxi nic
+     (needed by internal nvfs_* functions) */
+    bxiv3_dev_map.bxiv3_dev[iface_id]->fake_ib_dev.dev.parent =
+        PtlGetDriverDev(bxiv3_dev_map.bxiv3_dev[iface_id]->nicia_handle);
+
+#endif
     /*vanilla*/
     /*
      * Fast registration feature of Mellanx NICs allows the kernel to map
